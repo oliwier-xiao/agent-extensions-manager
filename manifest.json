@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "oliwier.agent-extensions-manager",
-  "name": "Agent Extensions",
+  "id": "oliwier.agent-skills-manager",
+  "name": "Agent Skills Manager",
   "version": "0.1.0",
   "author": "oliwier-xiao",
   "license": "MIT",
-  "description": "Every skill, plugin and MCP server your coding agents load, in one list. Claude Code, OpenCode and Codex each keep theirs in their own folders and none of them will tell you what the other two are loading — so this shows all of it at once: what is on, what it costs in tokens on every turn, what is quietly installed twice under two names, and what has drifted from the copy the other tool reads.",
+  "description": "Every skill, plugin and MCP server your coding agents load, in one list. Claude Code, OpenCode and Codex each keep theirs in their own folders, and none of them will tell you what the other two are loading — or what it costs you in tokens on every turn.",
   "homepage": "https://github.com/oliwier-xiao/agent-extensions-manager",
   "kinds": [
     "bar-widget"
@@ -15,7 +15,7 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Agent Extensions",
+    "displayName": "Agent Skills Manager",
     "description": "Browse, search and switch the skills, plugins and MCP servers behind Claude Code, OpenCode and Codex.",
     "category": "AI",
     "aliases": [

@@ -3,18 +3,35 @@
 Recorded as they are made, with the reasoning that settled them. A decision here overrides anything in
 `DESIGN.md` that predates it.
 
-## D1 — Identity: `oliwier.agent-extensions-manager`, displayed as "Agent Extensions"
+## D1 — Identity: `oliwier.agent-skills-manager`, displayed as "Agent Skills Manager"
 
-2026-09-05, renamed 2026-09-07. The id keeps the author's existing `oliwier.*` convention and matches
-the repository name. Both were `ai-skills-manager` until the widget had been used for a while and the
-name stopped describing it: it lists skills, MCP servers and Claude Code plugins, and "skills" is a third
-of that. Renamed before the marketplace submission rather than after, which is the only cheap moment --
-nothing outside this repository referred to the old id, so the cost was one commit and one line of the
-author's own bar config.
-The display name does not repeat it, because the widget picker already holds two entries called
-"Plugin Manager" and a first-party `omarchy.agents`; a third manager-shaped name would be chosen by
-accident. "Extensions" is also the word Claude Code itself uses for this list, so the name describes what
-the panel holds rather than which family of tools it belongs to.
+2026-09-05, renamed twice, settled 2026-09-07. The id keeps the author's existing `oliwier.*`
+convention. It was `ai-skills-manager`, then `agent-extensions-manager`, and is now this.
+
+The middle name was chosen against the wrong list. "Extensions" is Claude Code's own umbrella term for
+skills, plugins, MCP servers and hooks, and it collides with nothing in the widget picker -- which holds
+eleven entries, two of them called "Plugin Manager". But the picker is not where anyone finds this. The
+marketplace is, and its catalog was measured rather than guessed: of **2599 listings, "skills" appears in
+one haystack and in zero names**, while "agent" is in 28 names -- including the first-party
+`omarchy.agents`, displayed simply as "Agents". "Agent Extensions" sitting under "Agents (Built-in)" reads
+as an add-on to that widget. And "extension" is a dead search word on a site where every item is one: two
+listings match it.
+
+The marketplace's search was read rather than assumed (`assets/js/search.js`, `app.js`). The haystack is
+name + description + author + publisher + id + category + kind + tags -- manifest `aliases` are **not** in
+it, so they serve only the widget picker. Tokens longer than three characters match as substrings; shorter
+ones ("ai", "mcp") match only at a word boundary; multiple words are ANDed; and there is no relevance
+ranking at all, the default sort being "Recently added". Two consequences settled the name. Putting "AI"
+in it buys exactly nothing, because the `ai` tag already supplies that word and a two-character token
+cannot match inside one. And the name is worth only the words the description does not already contain --
+"skills" was the one word nobody on the site had.
+
+"Manager" stays despite the two "Plugin Manager" entries in the picker. Without it the name reads as a
+pack of skills to install rather than something that manages them, and the author's other listing is
+"OpenCode Config Manager", so the pair sits together under one publisher.
+
+Renamed before the marketplace submission, which is the only cheap moment: ids are permanent there and 22
+retired ones are blocked from reuse forever. Nothing outside this repository referred to the old id.
 
 ## D2 — Upstream updates only where the answer is exact
 

@@ -1,4 +1,4 @@
-# Agent Extensions
+# Agent Skills Manager
 
 Every skill, plugin and MCP server your coding agents load, in one list on your Omarchy bar.
 
@@ -46,12 +46,12 @@ omarchy plugin add https://github.com/oliwier-xiao/agent-extensions-manager.git 
 
 `--enable` puts it straight on the bar and asks which side you want it on. Leave the flag off and it
 installs disabled, so you can read the code first and turn it on later with `omarchy plugin enable
-oliwier.agent-extensions-manager`. Either way nothing runs until you open the panel for the first time.
+oliwier.agent-skills-manager`. Either way nothing runs until you open the panel for the first time.
 
 To remove it:
 
 ```
-omarchy plugin remove oliwier.agent-extensions-manager
+omarchy plugin remove oliwier.agent-skills-manager
 ```
 
 That takes the widget off the bar and deletes the plugin. If you have filed anything yourself, one file of yours
@@ -327,7 +327,7 @@ The widget reads your agent configuration and never writes to it. The one file i
 ## Removal
 
 ```
-omarchy plugin remove oliwier.agent-extensions-manager
+omarchy plugin remove oliwier.agent-skills-manager
 ```
 
 If you have filed anything yourself, that file survives the removal, so reinstalling later finds your

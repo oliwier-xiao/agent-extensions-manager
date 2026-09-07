@@ -18,8 +18,8 @@ import qs.Ui
 // nothing, anywhere.
 Panel {
   id: root
-  moduleName: "oliwier.agent-extensions-manager"
-  ipcTarget: "oliwier.agent-extensions-manager"
+  moduleName: "oliwier.agent-skills-manager"
+  ipcTarget: "oliwier.agent-skills-manager"
   // The bar widget owns the single live handler for this target. Leaving the
   // base's own handler enabled would register the target twice.
   manageIpc: false
@@ -2855,7 +2855,7 @@ Panel {
             Text {
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
-              text: "Agent Extensions"
+              text: "Agent Skills Manager"
               color: root.fg
               font.family: root.face
               font.pixelSize: Style.font.title

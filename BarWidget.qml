@@ -13,7 +13,7 @@ import qs.Ui
 // what it is until somebody changes it.
 BarWidget {
   id: root
-  moduleName: "oliwier.agent-extensions-manager"
+  moduleName: "oliwier.agent-skills-manager"
 
   // nf-md-brain (U+F09D1), written as its surrogate pair rather than pasted in.
   // A private-use codepoint is invisible in a diff, in a review, and in any
@@ -199,11 +199,11 @@ BarWidget {
   // Nothing read off another author's disk is ever put here; that stays inside
   // the panel, where every sink is explicitly PlainText.
   readonly property string tooltipText: {
-    if (!root.summaryPresent) return "Agent Extensions\nClaude Code · OpenCode · Codex"
+    if (!root.summaryPresent) return "Agent Skills Manager\nClaude Code · OpenCode · Codex"
     var line = String(root.summary.enabled) + " of " + String(root.summary.skills) + " enabled"
     if (!root.tokensHidden)
       line += "  ·  ~" + root.compact(root.liveTokens) + " tokens on every turn"
-    var out = "Agent Extensions\n" + line
+    var out = "Agent Skills Manager\n" + line
     // Whose figure that is. Without this the number changes when a session
     // starts and nothing on screen says why it changed.
     if (!root.tokensHidden)
@@ -283,7 +283,7 @@ BarWidget {
   // way for any process on the session bus to make the shell fork on demand is a
   // surface this plugin does not need. Middle-clicking the mark does that job.
   IpcHandler {
-    target: "oliwier.agent-extensions-manager"
+    target: "oliwier.agent-skills-manager"
 
     function open(): void { root.open() }
     function close(): void { root.close() }

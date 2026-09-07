@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""agent-ext — the only part of Agent Extensions that touches the filesystem.
+"""agent-ext — the only part of Agent Skills Manager that touches the filesystem.
 
 One line of JSON on stdout, diagnostics on stderr. The QML reads and draws; it does
 no I/O of its own beyond spawning this. Every subcommand is runnable by hand, which

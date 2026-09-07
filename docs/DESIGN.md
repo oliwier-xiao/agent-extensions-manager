@@ -1,4 +1,4 @@
-# Agent Extensions — design brief
+# Agent Skills Manager — design brief
 
 > Status: design settled, implementation not started. This document is the output of a 37-agent research
 > pass over the Omarchy plugin API, the two reference plugin managers, this author's own two plugins, the
@@ -12,7 +12,7 @@
 
 # 1. What this is
 
-**Agent Extensions** is a bar widget and a keyboard-driven panel for the Omarchy shell that puts one list in front of you: every skill, plugin and MCP server that Claude Code, OpenCode and Codex will load, drawn from all six of their skill roots and all of their config files at once. It tells you what is on and what is off per tool, what each item costs in tokens on every single turn before you have typed anything, which category it falls into, where it came from, and whether an update is waiting. From that list you can turn a skill off in any of the three tools, copy the correct invocation string for the tool you are actually using, drop a skill into a project, pull upstream changes for the things that have an upstream, and write a new skill from scratch that all three tools will read without complaint. It exists because the three CLIs deliberately overlap — OpenCode reads Claude's `~/.claude/skills` and the shared `~/.agents/skills`, Codex reads `~/.agents/skills` natively, and the same folder on disk therefore charges you context in two or three system prompts at once — and nothing in any of the three shows you that.
+**Agent Skills Manager** is a bar widget and a keyboard-driven panel for the Omarchy shell that puts one list in front of you: every skill, plugin and MCP server that Claude Code, OpenCode and Codex will load, drawn from all six of their skill roots and all of their config files at once. It tells you what is on and what is off per tool, what each item costs in tokens on every single turn before you have typed anything, which category it falls into, where it came from, and whether an update is waiting. From that list you can turn a skill off in any of the three tools, copy the correct invocation string for the tool you are actually using, drop a skill into a project, pull upstream changes for the things that have an upstream, and write a new skill from scratch that all three tools will read without complaint. It exists because the three CLIs deliberately overlap — OpenCode reads Claude's `~/.claude/skills` and the shared `~/.agents/skills`, Codex reads `~/.agents/skills` natively, and the same folder on disk therefore charges you context in two or three system prompts at once — and nothing in any of the three shows you that.
 
 ---
 
@@ -20,8 +20,8 @@
 
 | Field | Value |
 |---|---|
-| `id` | `oliwier.agent-extensions` |
-| `name` / `barWidget.displayName` | Agent Extensions |
+| `id` | `oliwier.agent-skills-manager` |
+| `name` / `barWidget.displayName` | Agent Skills Manager |
 | `barWidget.category` | `AI` |
 | `barWidget.defaultSection` | `right` |
 | `barWidget.allowMultiple` | `false` |
@@ -31,9 +31,9 @@
 | Marketplace tags | `ai`, `quickshell`, `bar` |
 | Tagline | Every skill, plugin and MCP server your three agents load, in one list — with what each one costs you before you have typed a word. |
 
-**Why this id.** `oliwier.*` is what the two already-listed plugins use and both are verified, so it carries reputational credit. It is lowercase, which community submissions require and which `omarchy plugin validate`'s looser regex does not catch. It is not in the reserved `omarchy.*` namespace. And `oliwier.agent-extensions` is free: the installed set on this machine is `agx.screen-time`, `io.github.juancasanueva.plugin-manager`, `io.github.vuhuy.clipboard-manager`, `jankeesvw.notification-center`, `oliwier.network-usage`, `oliwier.opencode-configs`, `omaplug`, `quickshell.spotify`, `saif.workspaces`, `sid.sessions`, `sofos.workspaces`.
+**Why this id.** `oliwier.*` is what the two already-listed plugins use and both are verified, so it carries reputational credit. It is lowercase, which community submissions require and which `omarchy plugin validate`'s looser regex does not catch. It is not in the reserved `omarchy.*` namespace. And `oliwier.agent-skills-manager` is free: the installed set on this machine is `agx.screen-time`, `io.github.juancasanueva.plugin-manager`, `io.github.vuhuy.clipboard-manager`, `jankeesvw.notification-center`, `oliwier.network-usage`, `oliwier.opencode-configs`, `omaplug`, `quickshell.spotify`, `saif.workspaces`, `sid.sessions`, `sofos.workspaces`.
 
-**Why "Agent Extensions" and not "AI Skills Manager".** Three generic words, two of which are already taken in this bar. `omarchy.agents` is a first-party widget named "Agents" in category "AI"; `omaplug` and `io.github.juancasanueva.plugin-manager` both answer to "Plugin Manager" in the widget picker's search. "Extensions" is Claude Code's own umbrella term for exactly this set — skills, plugins, MCP servers, hooks — so it names the thing correctly and collides with nothing. Plugin ids are permanent at the marketplace and 22 retired ids are permanently blocked from reuse, so this is decided once.
+**Why "Agent Skills Manager".** Measured against the marketplace catalog, not guessed: of 2599 listings, "skills" appears in one search haystack and in zero names, "mcp" in two names, while "agent" is in 28 -- including the first-party `omarchy.agents`, displayed as "Agents". Adding "AI" to the name buys nothing, because the site's matcher only matches a two-character token at a word boundary and the `ai` tag already supplies that word. Full reasoning, including how the search actually works, in `DECISIONS.md` D1. Plugin ids are permanent at the marketplace and 22 retired ids are blocked from reuse, so this is decided once.
 
 ---
 
@@ -147,7 +147,7 @@ license: MIT
 metadata:
   agent-ext.category: design
   agent-ext.tags: ui,animation,nextjs
-  agent-ext.origin: oliwier.agent-extensions
+  agent-ext.origin: oliwier.agent-skills-manager
   agent-ext.created: "2026-09-05"
 ---
 
@@ -277,7 +277,7 @@ Companion scripts, all vendored from the user's own reviewed code with attributi
 ## 5.3 Cache and state
 
 ```
-~/.cache/omarchy/oliwier.agent-extensions/     0700, files 0600
+~/.cache/omarchy/oliwier.agent-skills-manager/     0700, files 0600
   inventory.json         full scan result, with a `sources` array of {path, mtime_ns, size, inode}
   summary.json           < 1 KB, the bar-label projection
   catalog-projection.json  the 291-plugin catalog reduced to the ~12 fields we use
@@ -305,7 +305,7 @@ Three tiers.
 2. **While the panel is open** — `FileView { watchChanges: true }` on the config files, plus **one** `Process` running `inotifywait -m -q -e create,delete,moved_to,moved_from,close_write` over the skill roots. Both feed a 300 ms debounced re-run of the same 30 ms scan. `~/.claude.json` gets a 750 ms debounce of its own because it is ~86 KB and is rewritten repeatedly *during* a session — measured, with five rotated backups at 113/115/144/514-second intervals, all mid-session.
 3. **Background or explicit** — the `$HOME` project walk (162 ms at depth 5), the content-hash origin index (~800 ms), and every `git ls-remote`.
 
-Two watcher hazards, both real. Claude Code writes `~/.claude.json` via `tmp.<pid>.<epoch>` + rename, replacing the inode on every save, so a watch on the path goes dead after the first write — watch the parent directory, or re-arm after every event. And Omarchy's own `Bar.qml` documents that `FileView`'s directory watch can permanently stop delivering events after several changes land in quick succession. Belt and braces: `FileView` + a slow 30 s reconciliation timer + an `IpcHandler { target: "oliwier.agent-extensions" }` exposing `refresh()` so a hook or a script can force a rescan.
+Two watcher hazards, both real. Claude Code writes `~/.claude.json` via `tmp.<pid>.<epoch>` + rename, replacing the inode on every save, so a watch on the path goes dead after the first write — watch the parent directory, or re-arm after every event. And Omarchy's own `Bar.qml` documents that `FileView`'s directory watch can permanently stop delivering events after several changes land in quick succession. Belt and braces: `FileView` + a slow 30 s reconciliation timer + an `IpcHandler { target: "oliwier.agent-skills-manager" }` exposing `refresh()` so a hook or a script can force a rescan.
 
 `inotify` is effectively unlimited here — `max_user_watches` is 524,288 with 64 in use — but `inotify-tools` is **not** a declared dependency of the `omarchy` package. Guard with `command -v inotifywait` and degrade to the polling timer, exactly as `net-usage` degrades when docker is absent. Do not document `omarchy pkg add inotify-tools` in the README: a single package-manager line in a scanned fence costs the `package-manager` capability and forfeits a `passed` security baseline.
 
@@ -313,7 +313,7 @@ Two watcher hazards, both real. Claude Code writes `~/.claude.json` via `tmp.<pi
 
 Quickshell's own file watcher is **off** — `omarchy-launch-shell` runs `QS_DISABLE_FILE_WATCHER=1 QS_NO_RELOAD_POPUP=1 systemd-cat -t omarchy-shell -- quickshell -n -p "$OMARCHY_PATH/shell"`. All plugin hot reload comes from `PluginRegistry`'s `inotifywait -m -r` on `~/.config/omarchy/plugins`, debounced 150 ms into `Qt.clearComponentCache()` + rescan. Console output goes to the journal under tag `omarchy-shell`.
 
-`dev-sync.sh` is copied from `opencode-config_manager` with two strings changed: `rsync -a --delete` into `~/.config/omarchy/plugins/oliwier.agent-extensions/` excluding `.git dev-sync.sh *.md .gitignore test docs`, an explicit `rm -rf` of any stray symlinked tooling directory (rsync protects excluded names on the receiving side, so an already-deployed symlink is never removed and will keep failing validation forever), `chmod +x bin/*`, `omarchy plugin validate "$DEST"`, then `omarchy-restart-shell` — **not** `rescanPlugins`, because a bar widget already mounted in a bar slot keeps its old instance, and the change lands in the registry but not on the screen, which reads exactly like a bug in the edit you just made. Then `journalctl --user` for the last 20 seconds grepped for the plugin id.
+`dev-sync.sh` is copied from `opencode-config_manager` with two strings changed: `rsync -a --delete` into `~/.config/omarchy/plugins/oliwier.agent-skills-manager/` excluding `.git dev-sync.sh *.md .gitignore test docs`, an explicit `rm -rf` of any stray symlinked tooling directory (rsync protects excluded names on the receiving side, so an already-deployed symlink is never removed and will keep failing validation forever), `chmod +x bin/*`, `omarchy plugin validate "$DEST"`, then `omarchy-restart-shell` — **not** `rescanPlugins`, because a bar widget already mounted in a bar slot keeps its old instance, and the change lands in the registry but not on the screen, which reads exactly like a bug in the edit you just made. Then `journalctl --user` for the last 20 seconds grepped for the plugin id.
 
 ---
 
@@ -688,7 +688,7 @@ Never run `rev-list --count HEAD..@{u}` inside `~/.claude/plugins/marketplaces/*
 
 Before applying, check for local modification: `git status --porcelain` for git installs, a recomputed sha256-tree fingerprint against `origins.json` for the 31 non-git ones (measured at 40 ms for a two-file skill). If dirty, refuse the fast path and offer three explicit choices — back up and overwrite, stash, cancel. Never silently discard. Back up first to `<parent>/.<name>.bak.<YYYYMMDDHHMMSS>`; the dot prefix is load-bearing, because every tool's discovery glob skips dotfiles and a non-dotted backup would register as a second, duplicate skill.
 
-Run the whole job **detached** with a status-file protocol at `$XDG_RUNTIME_DIR/oliwier.agent-extensions/update.status` (falling back to `~/.cache/…`), copying omaplug's job-id guard, `pid` line with a `kill -0` liveness probe every 2 s, `FileView { watchChanges: true }` plus a 500 ms poll, a 3 s start timer, a per-operation watchdog and a 300 s staleness window for adopting an orphaned job. Applying an update can reload the plugin that is running it; without this the UI is stuck on "Installing…" forever.
+Run the whole job **detached** with a status-file protocol at `$XDG_RUNTIME_DIR/oliwier.agent-skills-manager/update.status` (falling back to `~/.cache/…`), copying omaplug's job-id guard, `pid` line with a `kill -0` liveness probe every 2 s, `FileView { watchChanges: true }` plus a 500 ms poll, a 3 s start timer, a per-operation watchdog and a 300 s staleness window for adopting an orphaned job. Applying an update can reload the plugin that is running it; without this the UI is stuck on "Installing…" forever.
 
 **A git acquisition followed by an execution sink in the same script is the marketplace's blocking `remote-git-execution-unpinned` finding.** So: `git -C <dir> fetch/merge` and nothing else. Show the diff, and let the user run any build step themselves.
 
@@ -706,7 +706,7 @@ Mouse contract: left click toggles the panel, middle click refreshes without ope
 
 Vertical bars return an empty label and draw the glyph only.
 
-The widget exposes the shape contract the bar's popout coordinator requires — `readonly property bool opened`, `open()`, `close()`, `togglePanel()`, `readonly property bool popoutSwitchClosing`, `closeForPopoutSwitch()` — all forwarded to the `Loader`'s `Panel.qml` item, plus `IpcHandler { target: "oliwier.agent-extensions" }` with `open/close/show/hide/toggle/refresh/status`. Every IPC method is read-only or UI-only: none of them writes a config. Exposing `enableSkill` over IPC would be a blocking marketplace finding — the reviewer has flagged first-party plugins for exactly that, since any local process could then modify the user's configuration without a panel interaction.
+The widget exposes the shape contract the bar's popout coordinator requires — `readonly property bool opened`, `open()`, `close()`, `togglePanel()`, `readonly property bool popoutSwitchClosing`, `closeForPopoutSwitch()` — all forwarded to the `Loader`'s `Panel.qml` item, plus `IpcHandler { target: "oliwier.agent-skills-manager" }` with `open/close/show/hide/toggle/refresh/status`. Every IPC method is read-only or UI-only: none of them writes a config. Exposing `enableSkill` over IPC would be a blocking marketplace finding — the reviewer has flagged first-party plugins for exactly that, since any local process could then modify the user's configuration without a panel interaction.
 
 Set the `Loader`'s `active: false` until first open. omaplug loads 1900 lines of QML at shell start for every user whether or not they open it.
 
@@ -852,4 +852,4 @@ tests/  docs/  .github/workflows/ci.yml
 
 **Marketplace posture: aim for `passed`.** That means no install command anywhere in the repo — the scanner reads the root README's ```bash fences *and* `.github/workflows/*.yml`, and an `apt-get install shellcheck` in CI already cost this user a capability once. Anything genuinely needed goes under a `## Development` heading, which the scanner skips. No file named `install*`, `setup*` or `uninstall*` — the name alone trips the `installer` capability, and a setup-named binary asset fails closed. No `.service` file, no `systemctl`, no bundled binary, no `__pycache__` (set `sys.dont_write_bytecode = True` in the helpers). Say "No sudo or pkexec is required" explicitly, twice — the policy excludes clearly-negated documentation from the `privilege` capability, and it is free. A `passed` baseline publishes automatically as Verified and unlocks `installation.mode: standard`, which is a real discoverability difference from the `manual-setup` note the user's network-usage listing carries.
 
-The submission body is the six-heading form byte-exact, title `[Plugin]: Agent Extensions`, category `Developer Tools`, tags `ai, quickshell, bar`, and Maintainer notes that pre-declare every capability the scanner will find and enumerate what the plugin writes, at what mode, and what it reads. Pre-declaring is what turns a ten-hour review into a smooth one. During review, push exactly one commit and then stop — approval binds to an exact 40-character SHA, and a moving HEAD is the sixth most common machine rejection.
+The submission body is the six-heading form byte-exact, title `[Plugin]: Agent Skills Manager`, category `Developer Tools`, tags `ai, quickshell, bar`, and Maintainer notes that pre-declare every capability the scanner will find and enumerate what the plugin writes, at what mode, and what it reads. Pre-declaring is what turns a ten-hour review into a smooth one. During review, push exactly one commit and then stop — approval binds to an exact 40-character SHA, and a moving HEAD is the sixth most common machine rejection.
