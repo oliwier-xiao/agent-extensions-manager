@@ -1081,10 +1081,20 @@ Panel {
     return root.rows[root.selectedIndex]
   }
 
+  // Every keyboard move of the cursor goes through here, so this is the one
+  // place that has to bring it back on screen. `Contain` scrolls the least
+  // amount that makes the row visible and does nothing when it already is,
+  // which is why walking down a visible list does not move the viewport at all.
   function moveCursor(delta) {
     if (root.rows.length === 0) return
-    if (!root.cursorActive) { root.cursorActive = true; return }
+    if (!root.cursorActive) { root.cursorActive = true; root.showCursor(); return }
     root.selectedIndex = Math.max(0, Math.min(root.rows.length - 1, root.selectedIndex + delta))
+    root.showCursor()
+  }
+
+  function showCursor() {
+    if (root.selectedIndex >= 0 && root.selectedIndex < root.rows.length)
+      list.positionViewAtIndex(root.selectedIndex, ListView.Contain)
   }
 
   function setFilter(next) {
@@ -1775,6 +1785,18 @@ Panel {
 
     implicitHeight: er.lineHeight + (er.expanded ? detail.implicitHeight + Style.spacing.xl : 0)
 
+    // The height used to snap and the content used to fade into the space that
+    // had already appeared, which reads as two separate events for one action.
+    // Animating it was previously impossible: a moving delegate height fought
+    // ApplyRange while the keyboard cursor walked the list. The range is gone,
+    // so the card can open the way it looks like it should. Short, and ease-out,
+    // because this is feedback for something you just did rather than a
+    // performance -- and it stays under the 300ms where a UI animation starts
+    // being felt as a delay.
+    Behavior on implicitHeight {
+      NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+    }
+
     CursorSurface {
       anchors.left: parent.left
       anchors.right: parent.right
@@ -2063,9 +2085,10 @@ Panel {
       active: er.expanded
       opacity: er.expanded ? 1 : 0
 
-      // Opacity, not height: an animated delegate height fights ApplyRange while
-      // the keyboard cursor is walking the list.
-      Behavior on opacity { NumberAnimation { duration: 90; easing.type: Easing.OutCubic } }
+      // Matched to the height so the card arrives as one thing. It used to be
+      // 90ms against an instant height change, which is why the space appeared
+      // before anything was in it.
+      Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
 
       sourceComponent: Column {
         spacing: Style.spacing.lg
@@ -2522,11 +2545,12 @@ Panel {
         if (event.key === Qt.Key_PageDown) { root.moveCursor(8); event.accepted = true; return }
         if (event.key === Qt.Key_PageUp) { root.moveCursor(-8); event.accepted = true; return }
         if (event.key === Qt.Key_Home) {
-          root.selectedIndex = 0; root.cursorActive = true; event.accepted = true; return
+          root.selectedIndex = 0; root.cursorActive = true
+          root.showCursor(); event.accepted = true; return
         }
         if (event.key === Qt.Key_End) {
           root.selectedIndex = root.rows.length - 1
-          root.cursorActive = true; event.accepted = true; return
+          root.cursorActive = true; root.showCursor(); event.accepted = true; return
         }
         if (event.key === Qt.Key_Right) {
           var rr = root.currentRow()
@@ -3258,12 +3282,23 @@ Panel {
         model: root.rows
         currentIndex: root.selectedIndex
 
-        // Keeps the keyboard cursor on screen when it walks past the fold. Zero,
-        // not a margin: a non-zero begin scrolls the list on load so the first row
-        // and its heading sit above the fold before anything is touched.
-        highlightRangeMode: ListView.ApplyRange
-        preferredHighlightBegin: 0
-        preferredHighlightEnd: height - Style.space(40)
+        // The view never steers itself. It used to run ApplyRange, which keeps
+        // the current item inside a band and is the right tool while a keyboard
+        // cursor walks a list of fixed-height rows -- which is what the
+        // neighbouring plugin has. These rows are not fixed height: expanding one
+        // changes it, and the new height does not arrive on the click. The Loader
+        // has to build the card and the wrapped text has to measure, so the row
+        // grows a frame or two later, and ApplyRange answered that late change by
+        // scrolling. That is the pause-then-jump: you click, nothing moves, and a
+        // moment later the list slides under you. Flick during the gap and the
+        // range constraint and your finger pull in opposite directions, which is
+        // the "random place" it lands in.
+        //
+        // So the range is gone and keeping the cursor visible is done explicitly,
+        // on the keystrokes that move it, where it is wanted and nowhere else.
+        // Expanding a row now does what it looks like: the card opens downward
+        // and the viewport stays where you put it.
+        highlightRangeMode: ListView.NoHighlightRange
         highlightMoveDuration: 0
 
         // The helper cannot tell whether a tool is installed -- skill_roots()
