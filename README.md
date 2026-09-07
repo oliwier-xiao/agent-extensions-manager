@@ -29,9 +29,10 @@ answer and a useless one, because the bar would read it most of the day and stop
 watches.
 
 The default is the mark on its own, because a bar is contested space and this is a thing you open when you
-want it rather than a number you watch. Turn the figure on and the widget re-reads once a minute so it
-keeps up with sessions starting and stopping; leave it off and nothing runs at all until you open the
-panel.
+want it rather than a number you watch. Turn the token figure on and the widget re-reads once a minute,
+which is what it takes to keep up with sessions starting and stopping; the other two figures move only
+when you install or enable something, so they re-read every fifteen. Leave the label off and nothing runs
+at all until you open the panel.
 
 An Omarchy **Quattro** shell plugin (`bar-widget`). It needs `omarchy-shell` and `python3`, which a stock
 Omarchy install already has — ten packages in the base set depend on it. Nothing else.
@@ -47,6 +48,20 @@ omarchy plugin add https://github.com/oliwier-xiao/agent-skills-manager.git --en
 `--enable` puts it straight on the bar and asks which side you want it on. Leave the flag off and it
 installs disabled, so you can read the code first and turn it on later with `omarchy plugin enable
 oliwier.agent-skills-manager`. Either way nothing runs until you open the panel for the first time.
+
+To update it:
+
+```
+omarchy plugin update oliwier.agent-skills-manager
+omarchy restart shell
+```
+
+The restart is not optional, and it is not this plugin's fault. The shell reloads a plugin by re-reading
+the directory, but a QML component it has already instantiated keeps the code it was built from, so a
+bar widget that is already on your bar goes on running the version you had. Nothing reports this: the new
+files are on disk, `omarchy plugin list` shows the new version, and the widget in front of you is the old
+one. It is the most-reported plugin problem in the Omarchy tracker, it is being fixed upstream, and until
+it is, restarting the shell is what makes an update take.
 
 To remove it:
 
@@ -209,7 +224,7 @@ way of knowing was still a draft.
 This is the only thing the widget writes, and it writes it to one file of its own:
 
 ```
-~/.config/agent-ext/categories.json
+~/.config/agent-skills/categories.json
 ```
 
 It names directories and categories, nothing else. Deleting it restores every guess the classifier made
@@ -313,16 +328,22 @@ restating its label.
 
 ## Requirements
 
-Omarchy 4 with its Quickshell bar, and `python3`. Nothing else, and no Python package beyond the standard
-library — the frontmatter reader is deliberately hand-written rather than reaching for PyYAML, which is
-not in the Omarchy base set and which rejects real skill files that all three agents read without
-complaint.
+Omarchy 4 with its Quickshell bar, and `python3` at `/usr/bin/python3`. Nothing else, and no Python
+package beyond the standard library — the frontmatter reader is deliberately hand-written rather than
+reaching for PyYAML, which is not in the Omarchy base set and which rejects real skill files that all
+three agents read without complaint.
+
+The interpreter is named rather than looked up: the panel spawns `/usr/bin/python3` outright instead of
+letting the helper's `#!/usr/bin/env python3` search a `PATH`, so which Python runs is a decision in the
+source and not a search result. Stock Omarchy puts it there. If yours is somewhere else the panel will
+open empty while `bin/agent-skills doctor` in a terminal still works, which is the one confusing pair of
+symptoms this choice can produce.
 
 Whichever of the three agents you actually use is the one you get rows for. An agent that is not installed
 is one quiet line saying so, not an error.
 
 The widget reads your agent configuration and never writes to it. The one file it does write is its own,
-`~/.config/agent-ext/categories.json`, and only when you file something yourself.
+`~/.config/agent-skills/categories.json`, and only when you file something yourself.
 
 ## Removal
 
@@ -334,7 +355,7 @@ If you have filed anything yourself, that file survives the removal, so reinstal
 categories again. To clear them:
 
 ```
-rm -f ~/.config/agent-ext/categories.json
+rm -f ~/.config/agent-skills/categories.json
 ```
 
 Beyond those two paths the footprint is nothing: no cache, no state under `~/.local`, and no file
@@ -342,41 +363,48 @@ belonging to Claude Code, OpenCode or Codex modified at any point.
 
 ## The command line behind it
 
-The panel draws; `bin/agent-ext` does every byte of the reading and every byte of the one write. It is
+The panel draws; `bin/agent-skills` does every byte of the reading and every byte of the one write. It is
 worth running on its own.
 
 ```
-bin/agent-ext doctor
+bin/agent-skills doctor
 ```
 
 ```
-agent-ext 0.1.0   scan 30.8 ms
+agent-skills 0.1.0   scan 27.1 ms
 skills            39
   claude          16   ~1406 tok always on
-  codex            8    ~808 tok always on
+  codex            8   ~808 tok always on
   opencode        32   ~4186 tok always on
 mcp servers       7
 claude plugins    1
 running now       claude, opencode
-categories        automation 16, agents 5, code 4, design 3, content 2, infra 2, media 2, system 2, ...
+categories        automation 16, agents 5, code 4, design 3, content 2, infra 2, media 2, system 2, data 1, security 1, web 1
 ```
 
-`bin/agent-ext scan` prints the same inventory as one line of JSON, which is what the panel reads.
-`bin/agent-ext category` is the write side, and every one of its verbs is a single named change to the one
+`bin/agent-skills scan` prints the same inventory as one line of JSON, which is what the panel reads.
+`bin/agent-skills category` is the write side, and every one of its verbs is a single named change to the one
 file above:
 
 ```
-bin/agent-ext category list
-bin/agent-ext category create ui --label UI --color '#7AA2F7'
-bin/agent-ext category assign nextjs ui
-bin/agent-ext category unassign nextjs
-bin/agent-ext category style ui --reset
+bin/agent-skills category list
+bin/agent-skills category create ui --label UI --color '#7AA2F7'
+bin/agent-skills category assign nextjs ui
+bin/agent-skills category unassign nextjs
+bin/agent-skills category style ui --reset
 ```
 
-Every file the helper reads from outside its own checkout is opened once with `O_NOFOLLOW` and
-`O_NONBLOCK`, judged on that descriptor rather than on its name, and read back only up to the size that
-descriptor vouched for. `omarchy-shell` is one process for the whole desktop, so nothing read on its
-behalf may block inside `open(2)` or turn out to be larger than it said it was.
+Every file the helper reads under a scanned root — every `SKILL.md`, every agent config — is opened once
+with `O_NOFOLLOW` and `O_NONBLOCK`, judged on that descriptor rather than on its name, and read back only
+up to the size that descriptor vouched for. `omarchy-shell` is one process for the whole desktop, so
+nothing read on its behalf may block inside `open(2)` or turn out to be larger than it said it was. A
+file that is refused — a symlink, a device, something world-writable, something over the read cap — is
+reported as refused rather than treated as absent, because an empty list and a list that could not be
+read look identical and mean opposite things.
+
+The one read that does not go through that path is `/proc/<pid>/comm`, which is how the bar finds out
+which of the three agents is running. It is a kernel file, it is never larger than a line, and it cannot
+be a symlink to somewhere else, so it is opened plainly and every error is swallowed per process.
 
 ## Development
 
@@ -388,10 +416,12 @@ python3 -m unittest discover -s tests -v
 
 `tests/preflight.sh` checks this repository against the Omarchy plugin marketplace's published rules — the
 structural validator, the automated security baseline, and the recurring demands of its manual review —
-and exits non-zero on any violation. Run it before proposing a change.
+and exits non-zero on any violation. CI runs it on every push and every pull request, so run it before
+proposing a change and meet it locally rather than on the branch.
 
-The design and the reasoning behind it are in [docs/DESIGN.md](docs/DESIGN.md); the decisions that shaped
-it, and what was deliberately left out, are in [docs/DECISIONS.md](docs/DECISIONS.md).
+Everything above the `## Development` heading is the design, written out. Where a default looks arbitrary,
+the setting that governs it says why it is the default rather than restating its label, and the same is
+true of the comments in the source: they explain the choice, not the syntax.
 
 ## License
 

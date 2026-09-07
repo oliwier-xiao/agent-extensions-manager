@@ -1,4 +1,4 @@
-# Local development only — the live copy is made by dev-sync.sh
+# Local development only — none of this belongs in a plugin folder on somebody's disk.
 *.log
 *.swp
 *~
@@ -14,3 +14,11 @@ __pycache__/
 session-*.md
 # Scratch file used to tell a full /tmp apart from a full home directory.
 .diskprobe
+
+# The working notes behind this plugin — the research brief, the decisions as they were
+# taken, and the questions still open. They are kept on disk because they are worth having,
+# and out of the repository because `omarchy plugin add` clones the whole tree onto somebody
+# else's machine, and none of it is theirs to read.
+docs/DESIGN.md
+docs/DECISIONS.md
+docs/OPEN-QUESTIONS.md
