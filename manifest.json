@@ -33,7 +33,6 @@
       "groupBy": "Category",
       "tokenModel": "chars/4",
       "showBundled": false,
-      "confirmToggle": false,
       "scanOnOpen": true
     },
     "schema": [
@@ -71,13 +70,6 @@
         "description": "Each agent ships skills of its own — Claude Code has roughly eighteen that no filesystem scan can see, Codex has six under a directory it rewrites on every launch. They are on, you cannot turn them off, and you did not install them, so by default they are left out and only your own things are counted. Turn this on when you want the honest total of what a session is really carrying."
       },
       {
-        "key": "confirmToggle",
-        "type": "boolean",
-        "label": "Ask before switching something off",
-        "defaultValue": false,
-        "description": "Off is the fast path a bar widget exists for, and every toggle here is a one-key undo away. On is worth it if you share this machine, or if you have been bitten by turning off the skill that a running session was halfway through using."
-      },
-      {
         "key": "tokenModel",
         "type": "enum",
         "label": "Estimate token cost as",
@@ -87,7 +79,7 @@
           "Hide"
         ],
         "defaultValue": "chars/4",
-        "description": "chars/4 is what Claude Code's own extensions browser shows, and it reproduces eleven of the fifteen figures on this machine exactly, so it is the number to match if you want the two to agree. chars/3 is closer to how newer models actually tokenise dense technical prose, and therefore closer to what you are really paying. Hide drops the column when you have decided the cost is not the thing you are managing."
+        "description": "chars/4 is what Claude Code's own extensions browser shows, and it reproduces fourteen of the fifteen figures on this machine exactly, so it is the number to match if you want the two to agree. chars/3 is closer to how newer models actually tokenise dense technical prose, and therefore closer to what you are really paying. Hide drops the column when you have decided the cost is not the thing you are managing."
       },
       {
         "key": "scanOnOpen",
