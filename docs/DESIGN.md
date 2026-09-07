@@ -100,7 +100,7 @@ Every `low` and `unclassified` row is visually marked and sorts to the top of it
 
 ## 3.5 Where overrides live
 
-`~/.local/state/omarchy/agent-extensions/overrides.json`, mode 0600, following the shape of the user's own `opencode-configs/profiles.json`:
+`~/.local/state/omarchy/agent-skills/overrides.json`, mode 0600, following the shape of the user's own `opencode-configs/profiles.json`:
 
 ```json
 {
@@ -283,7 +283,7 @@ Companion scripts, all vendored from the user's own reviewed code with attributi
   catalog-projection.json  the 291-plugin catalog reduced to the ~12 fields we use
   origins-index.json     content-hash → candidate upstreams, TTL in hours
 
-~/.local/state/omarchy/agent-extensions/        0700, files 0600
+~/.local/state/omarchy/agent-skills/        0700, files 0600
   overrides.json         categories, tags, favourites — user-entered, must survive
   origins.json           manual upstream links — user-entered, must survive
   backups/               timestamped pre-write copies, pruned to keepBackups
@@ -497,11 +497,11 @@ OpenCode never hot-reloads config. Every toggle needs a restart banner on the ro
 There is no comment-preserving TOML writer on this machine — no `taplo`, no `dasel`, no `yq`, no `tomlkit`; `tomllib` is read-only by design. So the write is a **sentinel-delimited block splice**:
 
 ```toml
-# >>> omarchy agent-extensions (managed) — do not edit inside this block >>>
+# >>> omarchy agent-skills (managed) — do not edit inside this block >>>
 [[skills.config]]
 name = "some-skill"
 enabled = false
-# <<< omarchy agent-extensions (managed) <<<
+# <<< omarchy agent-skills (managed) <<<
 ```
 
 We own everything between the sentinels and rewrite that region wholesale; we never touch a byte outside it. If the file does not exist we create it with `O_EXCL`. If it exists but our block is missing we append. If our sentinels are unbalanced or nested we **refuse** and say so. After every write we re-parse with `tomllib` and roll back on failure. Any `[[skills.config]]` entry outside our block is shown as "managed elsewhere — read only". The block goes last in the file, and the README says why: TOML scopes subsequent bare keys into the final table, so anything the user adds after our block would land inside it.
@@ -751,7 +751,7 @@ Twelve rules. Every one of them exists because something measurably went wrong.
 6. **One write path per file.** Where we delegate to a CLI, we never also hand-edit that file. A direct rename while Claude Code holds `~/.claude.json.lock` clobbers the holder.
 7. **Detect-modified-since-read, always.** Compare `(mtime_ns, size, inode)` against what was read. On a difference, abort and re-present rather than merge blindly. `~/.claude.json` and `opencode.json` are both rewritten by running sessions.
 8. **Parse-check the serialised bytes before the rename, never after.** A `~/.claude.json` left unparseable for an instant triggers Claude Code's auto-repair, which overwrites the whole file from memory and destroys everything on disk since its last read. A `config.toml` left unparseable breaks Codex's entire config load, not just our block.
-9. **Back up before every write**, to `~/.local/state/omarchy/agent-extensions/backups/` with second-resolution stamps disambiguated by a `-2`, `-3` suffix (an undo lands well inside one second, and without a unique name the revert's own backup overwrites the copy it is about to restore from), pruned to `keepBackups` but **never** pruning the copy Undo points at.
+9. **Back up before every write**, to `~/.local/state/omarchy/agent-skills/backups/` with second-resolution stamps disambiguated by a `-2`, `-3` suffix (an undo lands well inside one second, and without a unique name the revert's own backup overwrites the copy it is about to restore from), pruned to `keepBackups` but **never** pruning the copy Undo points at.
 10. **Write eagerly, on the user action.** A write through a child process does **not** survive `Component.onDestruction` — the bytes sit in Qt's buffer while the event loop that would flush them is already stopping. Never defer a user-visible mutation to shutdown.
 11. **No state-changing IPC.** `open/close/toggle/refresh/status` only. Anything running as this user can call these.
 12. **Argv arrays, never shell strings.** Skill names and descriptions come from arbitrary third-party frontmatter. Where `bash -c` is genuinely needed for a pipeline, use a **constant script plus positional parameters** and pass every value as `$1`, `$2` — never spliced into the script text. And no runtime value ever goes into interpreter source: `python3 -c "…$var…"` is the shape of an injection even when today's source for it is the kernel.

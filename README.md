@@ -41,7 +41,7 @@ Omarchy install already has — ten packages in the base set depend on it. Nothi
 ## Install
 
 ```
-omarchy plugin add https://github.com/oliwier-xiao/agent-extensions-manager.git --enable
+omarchy plugin add https://github.com/oliwier-xiao/agent-skills-manager.git --enable
 ```
 
 `--enable` puts it straight on the bar and asks which side you want it on. Leave the flag off and it
