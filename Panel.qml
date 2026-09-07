@@ -68,6 +68,26 @@ Panel {
   readonly property int divisor: root.tokenModel === "chars/3" ? 3 : 4
   readonly property bool showTokens: root.tokenModel !== "Hide"
 
+  // ---- The column grid ----------------------------------------------------
+  //
+  // One set of widths, read by the three things that have to agree on them: the
+  // row, the group header that sums the row, and the legend that names them. The
+  // row's columns were right-anchored with their widths written where they were
+  // used, so they lined up down the list by construction and nothing said what
+  // any of them held -- and the group header, which sums two of the same
+  // quantities, laid its own numbers out in a right-aligned Row of variable
+  // widths, so the sums sat in no column at all. A legend over that would have
+  // named columns the totals were not in.
+  //
+  // Named here, every width is one number in one place, and moving a column
+  // moves the heading and the total with it.
+  readonly property int colFlag: Style.space(18)
+  readonly property int colUsed: Style.space(40)
+  readonly property int colTokens: root.showTokens ? Style.space(46) : 0
+  readonly property int colAgents: Style.space(15) * 3 + Style.spacing.xs * 2
+  readonly property int colScope: Style.space(52)
+  readonly property int colKind: Style.space(48)
+
   // `g` cycles this for the session; the setting owns the default.
   property string groupOverride: ""
   readonly property string grouping: root.groupOverride !== "" ? root.groupOverride : root.groupMode
@@ -1589,12 +1609,28 @@ Panel {
     root.openInFiles(m[0].abs)
   }
 
-  function cycleGrouping() {
-    var order = ["Category", "Tool", "Kind", "Nothing"]
-    root.groupOverride = order[(order.indexOf(root.grouping) + 1) % order.length]
+  readonly property var groupModes: [
+    { key: "Category", label: "category" },
+    { key: "Tool", label: "tool" },
+    { key: "Kind", label: "kind" },
+    { key: "Nothing", label: "none" }
+  ]
+
+  // One way in, two ways to reach it: the key cycles, the boxes above the list
+  // pick. Both land here so neither can forget to drop the folds, which belong
+  // to the grouping that made them and mean nothing under the next one.
+  function setGrouping(mode) {
+    root.groupOverride = String(mode)
     root.collapsed = ({})
     root.selectedIndex = 0
     root.flash("Grouped by " + root.groupOverride.toLowerCase())
+  }
+
+  function cycleGrouping() {
+    var at = -1
+    for (var i = 0; i < root.groupModes.length; i++)
+      if (root.groupModes[i].key === root.grouping) { at = i; break }
+    root.setGrouping(root.groupModes[(at + 1) % root.groupModes.length].key)
   }
 
   // ---- Lifecycle ----------------------------------------------------------
@@ -1627,13 +1663,27 @@ Panel {
   // lightness so a tint can never leave the theme. An achromatic accent rotates
   // to grey, so that case falls back to graded foreground alpha rather than
   // pretending to have hues.
+  // Fifteen shelves off one accent. Walking the wheel in order gave neighbouring
+  // shelves neighbouring hues -- web and design are one step apart in the list
+  // above and were one step apart on the wheel, which is twenty-four degrees,
+  // and twenty-four degrees is not a difference a reader can use. So the walk
+  // takes a stride co-prime with the number of shelves, which visits every point
+  // exactly once and puts consecutive shelves most of the wheel apart; and hue
+  // is not asked to carry it alone, because two shelves far apart in hue can
+  // still be close in weight. Lightness and saturation step on cycles of three
+  // and two, so any two shelves differ on at least two axes.
   function categoryTint(category) {
     var idx = root.categoryOrder.indexOf(String(category || ""))
     if (idx < 0) return root.soft
     var a = root.hue
     if (a.hslSaturation < 0.12) return Util.alpha(root.fg, 0.28 + (idx % 5) * 0.09)
-    var h = (a.hslHue < 0 ? 0 : a.hslHue) + idx / root.categoryOrder.length
-    return Qt.hsla(h - Math.floor(h), a.hslSaturation, a.hslLightness, 1)
+    var n = root.categoryOrder.length
+    var h = (a.hslHue < 0 ? 0 : a.hslHue) + ((idx * 7) % n) / n
+    var l = a.hslLightness + ((idx % 3) - 1) * 0.11
+    var sat = a.hslSaturation * (idx % 2 === 0 ? 1 : 0.74)
+    return Qt.hsla(h - Math.floor(h),
+                   Math.max(0.16, Math.min(1, sat)),
+                   Math.max(0.34, Math.min(0.82, l)), 1)
   }
 
   // ---- Row delegates ------------------------------------------------------
@@ -1642,6 +1692,7 @@ Panel {
     id: gr
     required property var group
     property bool hasCursor: false
+    readonly property color tint: root.categoryColourFor(gr.group.category)
     signal toggled()
     signal entered()
     signal styleRequested()
@@ -1674,89 +1725,133 @@ Panel {
       font.pixelSize: Style.font.caption
     }
 
-    Text {
+    // The shelf, drawn as the same chip the filter strip draws it as: one shape,
+    // one dot, one count, in two places that mean the same thing.
+    //
+    // It used to be a bare label with a nine-pixel dot beside it. Fourteen
+    // shelves are handed fourteen points around one hue wheel, so two of them
+    // are always about twenty degrees apart, and twenty degrees of hue on nine
+    // pixels is not a difference anybody can use -- Web and Design read as the
+    // same pink. An outlined box carries the same hue on a hundred times the
+    // area, and the box is also what stops one shelf's rows from running into
+    // the next shelf's heading.
+    Rectangle {
+      id: shelfChip
       anchors.left: chevron.right
       anchors.leftMargin: Style.spacing.sm
-      anchors.right: gmeta.left
-      anchors.rightMargin: Style.spacing.md
       anchors.verticalCenter: parent.verticalCenter
-      textFormat: Text.PlainText
-      text: gr.group.label
-      color: gr.hasCursor ? root.fg : root.strong
-      font.family: root.face
-      // A label role, not a caption: one step up from the metadata around it,
-      // with the tracking a short bold string needs to stop reading as a lump.
-      font.pixelSize: Style.font.bodySmall
-      font.bold: true
-      font.letterSpacing: 0.4
-      elide: Text.ElideRight
+      width: shelfRow.implicitWidth + Style.space(16)
+      height: Style.space(20)
+      radius: height / 2
+      color: Util.alpha(gr.tint, 0.13)
+      border.width: 1
+      border.color: Util.alpha(gr.tint, gr.hasCursor ? 0.9 : 0.55)
+
+      Row {
+        id: shelfRow
+        anchors.left: parent.left
+        anchors.leftMargin: Style.space(7)
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.spacing.sm
+
+        // Still the way into renaming and recolouring, and still only on a
+        // category grouping: a group of "everything Claude can see" is not a
+        // shelf and has no name of yours to change.
+        Rectangle {
+          id: marker
+          anchors.verticalCenter: parent.verticalCenter
+          visible: gr.group.category !== ""
+          width: visible ? Style.space(14) : 0
+          height: Style.space(14)
+          radius: width / 2
+          color: markerHover.hovered ? Util.alpha(root.fg, 0.20) : "transparent"
+
+          Rectangle {
+            anchors.centerIn: parent
+            width: Style.space(8)
+            height: Style.space(8)
+            radius: width / 2
+            color: gr.tint
+            border.width: markerHover.hovered ? 1 : 0
+            border.color: root.fg
+          }
+
+          HoverHandler { id: markerHover; cursorShape: Qt.PointingHandCursor }
+          TapHandler { onTapped: gr.styleRequested() }
+        }
+
+        Text {
+          id: glabel
+          anchors.verticalCenter: parent.verticalCenter
+          // Capped against the header's own width, never against the row or
+          // the chip around it: the chip is sized from this row's content, so
+          // measuring this against either of them is the two of them waiting
+          // on each other, and what that resolves to is a label of nothing.
+          width: Math.min(implicitWidth, Math.round(gr.width * 0.40))
+          textFormat: Text.PlainText
+          text: gr.group.label
+          color: gr.hasCursor ? root.fg : root.strong
+          font.family: root.face
+          // A label role, not a caption: one step up from the metadata around
+          // it, with the tracking a short bold string needs to stop reading as
+          // a lump.
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+          font.letterSpacing: 0.4
+          elide: Text.ElideRight
+        }
+
+        // How many things are on this shelf, inside the chip and beside the
+        // name, exactly as the filter strip writes it. It used to sit at the
+        // right end of the header, in line with the column that counts how many
+        // times you have used the skill on that row -- a different quantity
+        // wearing the same position.
+        Text {
+          id: gcount
+          anchors.verticalCenter: parent.verticalCenter
+          textFormat: Text.PlainText
+          text: String(gr.group.count)
+          color: root.soft
+          font.family: root.face
+          font.pixelSize: Style.font.caption
+        }
+      }
     }
 
-    Row {
-      id: gmeta
+    // The two quantities a group sums are two the rows underneath it carry, so
+    // they are drawn in those rows' columns: the same width, the same right edge,
+    // one heading above both.
+    Text {
+      id: gflag
       anchors.right: parent.right
       anchors.rightMargin: Style.spacing.md
       anchors.verticalCenter: parent.verticalCenter
-      spacing: Style.spacing.md
+      width: root.colFlag
+      horizontalAlignment: Text.AlignRight
+      visible: gr.group.attention > 0
+      textFormat: Text.PlainText
+      text: String(gr.group.attention)
+      color: Color.urgent
+      font.family: root.face
+      font.pixelSize: Style.font.caption
+    }
 
-      // The shelf's own colour and the way into changing it. Only on a category
-      // grouping, because a group of "everything Claude can see" is not a shelf
-      // and has no name of yours to change. It sits at the head of the meta
-      // strip rather than beside the label so the counts stay in one column
-      // down the whole list.
-      Rectangle {
-        id: marker
-        anchors.verticalCenter: parent.verticalCenter
-        visible: gr.group.category !== ""
-        width: visible ? Style.space(18) : 0
-        height: Style.space(18)
-        radius: width / 2
-        color: markerHover.hovered ? Util.alpha(root.fg, 0.16) : "transparent"
-
-        Rectangle {
-          anchors.centerIn: parent
-          width: Style.space(9)
-          height: Style.space(9)
-          radius: width / 2
-          color: root.categoryColourFor(gr.group.category)
-          border.width: markerHover.hovered ? 1 : 0
-          border.color: root.fg
-        }
-
-        HoverHandler { id: markerHover; cursorShape: Qt.PointingHandCursor }
-        TapHandler { onTapped: gr.styleRequested() }
-      }
-
-      Text {
-        anchors.verticalCenter: parent.verticalCenter
-        visible: gr.group.attention > 0
-        textFormat: Text.PlainText
-        text: "● " + String(gr.group.attention)
-        color: Color.urgent
-        font.family: root.face
-        font.pixelSize: Style.font.caption
-      }
-
-      Text {
-        anchors.verticalCenter: parent.verticalCenter
-        visible: root.showTokens && gr.group.tokens > 0
-        textFormat: Text.PlainText
-        text: gr.group.tokens >= 1000
-          ? "~" + (gr.group.tokens / 1000).toFixed(1) + "k"
-          : "~" + String(gr.group.tokens)
-        color: root.soft
-        font.family: root.face
-        font.pixelSize: Style.font.caption
-      }
-
-      Text {
-        anchors.verticalCenter: parent.verticalCenter
-        textFormat: Text.PlainText
-        text: String(gr.group.count)
-        color: root.soft
-        font.family: root.face
-        font.pixelSize: Style.font.caption
-      }
+    Text {
+      anchors.right: gflag.left
+      // Straight over the tokens column: the used column sits between the two and
+      // a group has nothing to say in it.
+      anchors.rightMargin: Style.spacing.md + root.colUsed + Style.spacing.lg
+      anchors.verticalCenter: parent.verticalCenter
+      width: root.colTokens
+      horizontalAlignment: Text.AlignRight
+      visible: root.showTokens && gr.group.tokens > 0
+      textFormat: Text.PlainText
+      text: gr.group.tokens >= 1000
+        ? "~" + (gr.group.tokens / 1000).toFixed(1) + "k"
+        : "~" + String(gr.group.tokens)
+      color: root.soft
+      font.family: root.face
+      font.pixelSize: Style.font.caption
     }
 
     MouseArea {
@@ -1901,7 +1996,7 @@ Panel {
       anchors.rightMargin: Style.spacing.md
       anchors.top: parent.top
       anchors.topMargin: Math.round((er.lineHeight - height) / 2)
-      width: Style.space(48)
+      width: root.colKind
       height: Style.space(16)
       radius: height / 2
       color: Util.alpha(root.fg, 0.10)
@@ -1923,7 +2018,7 @@ Panel {
       anchors.rightMargin: Style.spacing.lg
       anchors.top: parent.top
       height: er.lineHeight
-      width: Style.space(52)
+      width: root.colScope
       verticalAlignment: Text.AlignVCenter
       horizontalAlignment: Text.AlignRight
       textFormat: Text.PlainText
@@ -1993,7 +2088,7 @@ Panel {
       anchors.rightMargin: Style.spacing.lg
       anchors.top: parent.top
       height: er.lineHeight
-      width: root.showTokens ? Style.space(46) : 0
+      width: root.colTokens
       visible: root.showTokens
       verticalAlignment: Text.AlignVCenter
       horizontalAlignment: Text.AlignRight
@@ -2010,11 +2105,11 @@ Panel {
 
     Text {
       id: usage
-      anchors.right: dot.left
+      anchors.right: flagCell.left
       anchors.rightMargin: Style.spacing.md
       anchors.top: parent.top
       height: er.lineHeight
-      width: Style.space(40)
+      width: root.colUsed
       verticalAlignment: Text.AlignVCenter
       horizontalAlignment: Text.AlignRight
       textFormat: Text.PlainText
@@ -2024,17 +2119,29 @@ Panel {
       font.pixelSize: Style.font.caption
     }
 
-    Rectangle {
-      id: dot
+    // A cell, not a dot. The dot is what a row has to say here -- flagged or
+    // not -- but a group header has a number, and the two only read as one
+    // column if they are laid out in one. The dot keeps the right edge it always
+    // had, so nothing moves on a row.
+    Item {
+      id: flagCell
       anchors.right: parent.right
       anchors.rightMargin: Style.spacing.md
       anchors.top: parent.top
-      anchors.topMargin: Math.round((er.lineHeight - height) / 2)
-      width: Style.space(6)
-      height: width
-      radius: width / 2
-      visible: er.view.attention.length > 0
-      color: er.broken ? Color.urgent : root.soft
+      height: er.lineHeight
+      width: root.colFlag
+
+      Rectangle {
+        id: dot
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.topMargin: Math.round((er.lineHeight - height) / 2)
+        width: Style.space(6)
+        height: width
+        radius: width / 2
+        visible: er.view.attention.length > 0
+        color: er.broken ? Color.urgent : root.soft
+      }
     }
 
     // The confirmation, in the bottom corner of the open card -- the same card
@@ -3213,9 +3320,26 @@ Panel {
         // rows above it can see. Its own row, because it answers a different
         // question from the one above and the two were competing for the same
         // line.
-        Flow {
+        //
+        // Opposite them, how the list is grouped. ^G cycles it and the footer
+        // says so, which is worth nothing to someone who came here with a mouse:
+        // the only way to find out the list could be grouped by agent was to
+        // read a key hint and try it. Four boxes name the choices and take one
+        // click to any of them, and they sit on this line rather than a line of
+        // their own because this line was half empty and a panel is not obliged
+        // to spend a row on a control that fits beside one.
+        Item {
           width: parent.width
-          visible: root.loaded && root.toolChips.length > 0
+          visible: root.loaded
+          implicitHeight: Math.max(toolFlow.implicitHeight, groupSwitch.height)
+
+        Flow {
+          id: toolFlow
+          anchors.left: parent.left
+          anchors.right: groupSwitch.left
+          anchors.rightMargin: Style.spacing.lg
+          anchors.verticalCenter: parent.verticalCenter
+          visible: root.toolChips.length > 0
           spacing: Style.spacing.sm
 
           Repeater {
@@ -3278,6 +3402,50 @@ Panel {
                 onTapped: {
                   root.toolFilter = toolChip.on ? "" : String(toolChip.modelData.tool)
                   root.selectedIndex = 0
+                }
+              }
+            }
+          }
+        }
+
+          Row {
+            id: groupSwitch
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.spacing.xs
+            height: Style.space(24)
+
+            Repeater {
+              model: root.groupModes
+
+              Rectangle {
+                id: modeChip
+                required property var modelData
+                readonly property bool on: root.grouping === modeChip.modelData.key
+
+                anchors.verticalCenter: parent.verticalCenter
+                width: modeText.implicitWidth + Style.space(16)
+                height: Style.space(22)
+                radius: Style.cornerRadius
+                color: modeChip.on ? Util.alpha(root.hue, 0.30)
+                  : (modeHover.hovered ? Util.alpha(root.fg, 0.16) : Util.alpha(root.fg, 0.07))
+
+                Text {
+                  id: modeText
+                  anchors.centerIn: parent
+                  textFormat: Text.PlainText
+                  text: modeChip.modelData.label
+                  color: modeChip.on ? root.fg : (modeHover.hovered ? root.readable : root.soft)
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                }
+
+                HoverHandler { id: modeHover; cursorShape: Qt.PointingHandCursor }
+                // No toggle-off. Every one of these is a grouping, "none"
+                // included, so there is no state for clicking the current one to
+                // return to.
+                TapHandler {
+                  onTapped: if (!modeChip.on) root.setGrouping(String(modeChip.modelData.key))
                 }
               }
             }
@@ -3350,6 +3518,136 @@ Panel {
               HoverHandler { id: dismissHover; cursorShape: Qt.PointingHandCursor }
               TapHandler { onTapped: root.dismissFinding() }
             }
+          }
+        }
+
+        // ---- The legend --------------------------------------------------
+        //
+        // Six columns of numbers and glyphs, and until now not one of them said
+        // what it was. The token figure was guessable from the tilde; the count
+        // beside it -- how many times Claude Code records you having used that
+        // skill -- was guessable by nobody, and neither was the difference
+        // between the scope word and the three marks next to it.
+        //
+        // One heading row, above the whole list rather than repeated inside each
+        // group, because the group headers sum two of these columns and are laid
+        // out in them: a legend per group would be the same six words over and
+        // over and would still be missing the totals it explains. It sits above
+        // the rule for the same reason a table's head does.
+        //
+        // Every width here is root's column grid, the same one the row and the
+        // group header read, so a heading cannot come to stand over a column it
+        // does not name.
+        Item {
+          width: parent.width
+          visible: root.rows.length > 0
+          height: visible ? Style.space(15) : 0
+
+          Text {
+            anchors.left: parent.left
+            // Where a row's name starts: past the shelf bar, the gap, the kind
+            // glyph and its gap.
+            anchors.leftMargin: Style.space(2) + Style.space(3) + Style.spacing.lg
+                                + Style.space(16) + Style.spacing.md
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: "name"
+            color: root.soft
+            font.family: root.face
+            font.pixelSize: Style.font.caption
+            font.letterSpacing: 0.4
+          }
+
+          Text {
+            id: legendKind
+            anchors.right: legendScope.left
+            anchors.rightMargin: Style.spacing.md
+            anchors.verticalCenter: parent.verticalCenter
+            width: root.colKind
+            horizontalAlignment: Text.AlignHCenter
+            textFormat: Text.PlainText
+            text: "kind"
+            color: root.soft
+            font.family: root.face
+            font.pixelSize: Style.font.caption
+            font.letterSpacing: 0.4
+          }
+
+          Text {
+            id: legendScope
+            anchors.right: legendAgents.left
+            anchors.rightMargin: Style.spacing.lg
+            anchors.verticalCenter: parent.verticalCenter
+            width: root.colScope
+            horizontalAlignment: Text.AlignRight
+            textFormat: Text.PlainText
+            text: "scope"
+            color: root.soft
+            font.family: root.face
+            font.pixelSize: Style.font.caption
+            font.letterSpacing: 0.4
+          }
+
+          Text {
+            id: legendAgents
+            anchors.right: legendTokens.left
+            anchors.rightMargin: Style.spacing.lg
+            anchors.verticalCenter: parent.verticalCenter
+            width: root.colAgents
+            horizontalAlignment: Text.AlignHCenter
+            textFormat: Text.PlainText
+            text: "agents"
+            color: root.soft
+            font.family: root.face
+            font.pixelSize: Style.font.caption
+            font.letterSpacing: 0.4
+          }
+
+          Text {
+            id: legendTokens
+            anchors.right: legendUsed.left
+            anchors.rightMargin: Style.spacing.lg
+            anchors.verticalCenter: parent.verticalCenter
+            width: root.colTokens
+            visible: root.showTokens
+            horizontalAlignment: Text.AlignRight
+            textFormat: Text.PlainText
+            text: "tokens"
+            color: root.soft
+            font.family: root.face
+            font.pixelSize: Style.font.caption
+            font.letterSpacing: 0.4
+          }
+
+          Text {
+            id: legendUsed
+            anchors.right: legendFlag.left
+            anchors.rightMargin: Style.spacing.md
+            anchors.verticalCenter: parent.verticalCenter
+            width: root.colUsed
+            horizontalAlignment: Text.AlignRight
+            textFormat: Text.PlainText
+            text: "used"
+            color: root.soft
+            font.family: root.face
+            font.pixelSize: Style.font.caption
+            font.letterSpacing: 0.4
+          }
+
+          // The same key that filters the list down to this column.
+          Text {
+            id: legendFlag
+            anchors.right: parent.right
+            anchors.rightMargin: Style.spacing.md
+            anchors.verticalCenter: parent.verticalCenter
+            width: root.colFlag
+            horizontalAlignment: Text.AlignRight
+            textFormat: Text.PlainText
+            text: "!"
+            color: root.soft
+            font.family: root.face
+            font.pixelSize: Style.font.caption
+            font.bold: true
           }
         }
 
