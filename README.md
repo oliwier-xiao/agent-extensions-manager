@@ -60,8 +60,15 @@ Codex **2** for **~272** — one machine, one set of files on disk, three very d
 reads Claude Code's skill directory as well as its own, so most of what you installed for one agent is
 being paid for twice.
 
-Each row says what the thing is, which agents can see it, what it costs, and how many places on disk it is
-reachable from. The coloured bar down the left is the shelf it is on.
+Each row says what the thing is, which agents can see it, what it costs, and how often you have reached
+for it. The coloured bar down the left is the shelf it is on.
+
+Every column is named. Seven of them carried numbers and glyphs and not one said what it held: the tilde
+made the token figure guessable, and the count beside it — how many times Claude Code records you having
+used that skill — was guessable by nobody. The headings sit above the whole list rather than being
+repeated inside each shelf, because a shelf's heading sums two of the same columns and is drawn in them.
+`~524` under **tokens** is what the three skills on the Design shelf cost together, and the `1` under
+**!** is how many of them are flagged.
 
 ## What a row knows
 
@@ -159,6 +166,15 @@ wrong — on the machine this was written for, four of the five low-confidence p
 they keep their shelf instead of being swept into Unsorted, and the control above is how the fifth gets
 fixed.
 
+A shelf's heading is the same chip the filter strip draws it as: one shape, one dot, one count, in the two
+places that mean the same thing. It used to be a bare label with a small dot beside it, and that was not
+enough to tell two shelves apart. Fourteen shelves are handed fourteen points around one hue wheel, so
+some pair of them is always about twenty-four degrees apart — and twenty-four degrees on a nine-pixel dot
+is a difference nobody can use. Web and Design read as the same pink. The walk around the wheel now takes
+a stride that puts consecutive shelves most of it apart, lightness and saturation step on cycles of their
+own so no two shelves differ on one axis only, and an outlined box carries the colour on a hundred times
+the area a dot did.
+
 ![The shelf index](docs/shelves.png)
 
 **Edit**, opposite the title, opens all of them at once: every shelf with its colour and its size, and a
@@ -206,10 +222,15 @@ three agent totals have been recomputed against that.
 
 ![Grouped by agent](docs/grouped.png)
 
-`^G` cycles the grouping: by shelf, by agent, by kind, or not at all. By shelf answers the question you
-open the panel with — where is the thing that does X. By agent is right when you are about to switch
-agents and want to know what that one alone can see. By kind separates skills from plugins from MCP
-servers. Not at all gives one flat alphabetical list, which is the fastest thing to type-search through.
+Four boxes at the right of the agent row say what the choices are and take one click to any of them; `^G`
+cycles the same four from the keyboard, and the boxes follow it. They are there because a key hint in a
+footer is worth nothing to somebody who arrived with a mouse: the only way to find out this list could be
+grouped by agent at all was to read that hint and try it.
+
+By shelf answers the question you open the panel with — where is the thing that does X. By agent is right
+when you are about to switch agents and want to know what that one alone can see. By kind separates skills
+from plugins from MCP servers. None gives one flat alphabetical list, which is the fastest thing to
+type-search through.
 
 ## MCP servers and plugins
 
