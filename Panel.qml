@@ -40,11 +40,25 @@ Panel {
   readonly property color fg: Color.popups.text
   readonly property color hue: Color.accent
   readonly property string face: bar ? bar.fontFamily : Style.font.family
-  // Util.alpha, not Qt.darker: on a light theme Qt.darker makes muted more
-  // prominent than the foreground, and on all-black text every level collapses.
-  readonly property color muted: Util.alpha(fg, 0.66)
-  readonly property color veryMuted: Util.alpha(fg, 0.42)
-  readonly property color faint: Util.alpha(fg, 0.16)
+  // Util.alpha, not Qt.darker: on a light theme Qt.darker makes a dimmed step
+  // more prominent than the foreground, and on all-black text every level of
+  // the ladder collapses into the same value.
+  //
+  // Five steps, named for the job rather than the number, and each one a role a
+  // reader can tell apart at a glance. The first version had three: the name at
+  // full strength and everything else at 0.66 or 0.42. On a dark popup that put
+  // the type badge, the scope, the tool letters, the token figure, the usage
+  // count, every group header and the whole footer at four tenths of the
+  // foreground, in ten pixels. It read as grey noise around one bright word,
+  // which is exactly what it was.
+  //
+  // Light text on a dark surface loses more contrast than the alpha suggests,
+  // so the metadata floor moved to 0.60 and the reading step to 0.76. `faint`
+  // is now for hairlines only and is never asked to carry a glyph.
+  readonly property color strong: Util.alpha(fg, 0.88)
+  readonly property color readable: Util.alpha(fg, 0.76)
+  readonly property color soft: Util.alpha(fg, 0.60)
+  readonly property color faint: Util.alpha(fg, 0.14)
 
   // Manifest defaults repeated verbatim; see the note in BarWidget.qml.
   readonly property string groupMode: String(setting("groupBy", "Category"))
@@ -126,6 +140,19 @@ Panel {
     return env
   }
 
+  // The one thing this panel changes, and it changes it through the same helper
+  // the reading goes through rather than by writing a file from QML. Arguments
+  // land in argv, never in a script, so nothing here can be re-tokenized by a
+  // shell -- there is no shell.
+  function runCategory(argv, done) {
+    if (catProc.running) { root.flashResult("One at a time", "error"); return }
+    catProc.pending = done || ""
+    catProc.clearEnvironment = true
+    catProc.environment = root.scanEnvironment()
+    catProc.command = [root.helperPath, "category"].concat(argv)
+    catProc.running = true
+  }
+
   // ---- State --------------------------------------------------------------
   // Not `data`: that is Item's default property and holds children.
 
@@ -138,11 +165,64 @@ Panel {
   property var summary: null
 
   property string filterText: ""
+  // One category at a time, chosen by clicking its chip. Not a second grouping
+  // and not a second search: it answers "show me only the design ones", which
+  // was the one question the list could not be asked without typing a word that
+  // happened to appear in the right descriptions.
+  property string categoryFilter: ""
   property bool attentionOnly: false
   property var collapsed: ({})
   property string expandedKey: ""
   property int selectedIndex: 0
   property bool cursorActive: false
+
+  // The overlay. One surface, three jobs, because they are the same gesture:
+  // something on a row is a short list of possibilities and you are picking one.
+  //
+  //   "argument"  a skill's documented actions, assembled onto its invocation
+  //   "category"  which shelf a skill lives on, including a new one
+  //   "style"     what a category is called and what colour it is drawn in
+  //
+  // `pickerRow` is the row it was opened from, held rather than looked up again
+  // so that a rescan landing mid-pick cannot move the question out from under
+  // the answer.
+  property string pickerMode: ""
+  property var pickerRow: null
+  property string pickerCategory: ""
+  property string pickerText: ""
+  property int pickerIndex: 0
+  readonly property bool pickerOpen: root.pickerMode !== ""
+
+  // Twelve swatches, the whole colour vocabulary a category can be given. A free
+  // hex field would be a text editor this panel does not have, and twelve
+  // distinguishable hues is more than fourteen categories need.
+  readonly property var swatches: [
+    "#E06C75", "#D97757", "#E5C07B", "#98C379", "#7FD88F", "#56B6C2",
+    "#5C9CF5", "#7AA2F7", "#9D7CD8", "#C678DD", "#F5A742", "#8B949E"
+  ]
+
+  // Which row last had something copied off it. Cleared on a timer, and never
+  // set optimistically.
+  property string copiedKey: ""
+  property string toastTone: "info"
+
+  // Findings you have read and do not want on screen. Held in memory only: the
+  // next shell start reports them again, because a skill directory with no
+  // SKILL.md in it is still a skill directory with no SKILL.md in it, and a
+  // dismissal that outlived the session would quietly become a decision.
+  property var dismissed: ({})
+
+  // Each agent's own colour, from that agent's own palette: Anthropic's clay,
+  // opencode's TUI secondary, OpenAI's green. Identity is the one thing here
+  // allowed not to follow the desktop theme, because a Claude mark that turned
+  // green under a green theme would be saying something untrue. Everything the
+  // panel says in its own voice still follows it.
+  readonly property var markColours: ({
+    claude: "#D97757", opencode: "#5C9CF5", codex: "#10A37F"
+  })
+  function markColour(tool) {
+    return root.markColours[tool] || root.fg
+  }
 
   readonly property var categoryOrder: [
     "agents", "code", "workflow", "web", "design", "media", "data",
@@ -210,12 +290,39 @@ Panel {
     return /^[\/$][A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/.test(String(token || ""))
   }
 
+  // The same guarantee once an argument has been appended. The helper already
+  // refuses to offer a token that is not a bare word, so this is the second of
+  // two independent checks rather than the only one: what reaches the clipboard
+  // is an invocation, at most four single-word arguments, and one space between
+  // each. Nothing that could read as a second command can pass.
+  function copyableCommand(text) {
+    return /^[\/$][A-Za-z0-9][A-Za-z0-9._:-]{0,119}(?: [A-Za-z0-9][A-Za-z0-9._-]{0,31}){0,4}$/
+      .test(String(text || ""))
+  }
+
   function flash(message) {
     root.toast = root.clean(message, 200)
+    root.toastTone = "info"
     toastTimer.restart()
   }
 
-  Timer { id: toastTimer; interval: 4000; onTriggered: root.toast = "" }
+  // A copy is the one thing in this panel that changes something outside it, so
+  // it gets its own tone rather than sharing the plain message strip.
+  function flashResult(message, tone) {
+    root.toast = root.clean(message, 200)
+    root.toastTone = tone
+    toastTimer.restart()
+  }
+
+  Timer {
+    id: toastTimer
+    interval: 4000
+    onTriggered: { root.toast = ""; root.toastTone = "info" }
+  }
+
+  // How long the footer keeps its tick up. Short, because it sits where the eye
+  // already is and has to be seen rather than read.
+  Timer { id: copiedTimer; interval: 1800; onTriggered: root.copiedKey = "" }
 
   // ---- Scan ---------------------------------------------------------------
 
@@ -371,6 +478,27 @@ Panel {
     onTriggered: if (scanProc.running) scanProc.signal(9)
   }
 
+  Process {
+    id: catProc
+    // What to say when it works. Set per call so the message names the change.
+    property string pending: ""
+    stdout: StdioCollector { waitForEnd: true }
+    onExited: function (exitCode, exitStatus) {
+      if (exitCode === 0) {
+        if (catProc.pending !== "") root.flashResult(catProc.pending, "ok")
+        // The store the classifier reads has changed, so the answer on screen is
+        // now stale by exactly one edit. Re-reading is cheap and is the only way
+        // the group headers and the tint agree with the file again.
+        root.startScan()
+      } else {
+        // The helper's refusals are one line each and already say what is wrong;
+        // repeating them here in the panel's own words would be a second, worse
+        // version of the same sentence.
+        root.flashResult("The change was refused. Run bin/agent-ext category by hand to see why", "error")
+      }
+    }
+  }
+
   // ---- View model ---------------------------------------------------------
   //
   // Two stages on purpose. `catalogue` cleans and flattens the report and is
@@ -422,6 +550,7 @@ Panel {
     for (var m = 0; m < src.length && m < 8; m++)
       mounts.push({ tool: root.toolLabel[src[m].tool] || root.clean(src[m].tool, 24),
                     path: root.clean(src[m].path, 160),
+                    abs: root.clean(src[m].abs, 400),
                     link: root.clean(src[m].link, 16) })
 
     // driftPeers is attached after the record is built and only on a drift
@@ -430,6 +559,26 @@ Panel {
     if (Array.isArray(item.driftPeers))
       for (var p = 0; p < item.driftPeers.length && p < 6; p++)
         peers.push(root.clean(item.driftPeers[p], 160))
+
+    // The helper has already reduced `argument-hint` to tokens it will vouch
+    // for; this re-checks the shape of every one of them before any of it can
+    // reach a clipboard, because the helper and the panel are separate programs
+    // and only one of them is in this file.
+    var args = []
+    var srcArgs = Array.isArray(item.argumentChoices) ? item.argumentChoices : []
+    for (var a = 0; a < srcArgs.length && a < 6; a++) {
+      var g = srcArgs[a]
+      if (!g || typeof g !== "object") continue
+      if (g.kind === "choice") {
+        var opts = []
+        var raw = Array.isArray(g.options) ? g.options : []
+        for (var o = 0; o < raw.length && opts.length < 64; o++)
+          if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(String(raw[o]))) opts.push(String(raw[o]))
+        if (opts.length > 1) args.push({ kind: "choice", options: opts })
+      } else if (g.kind === "value") {
+        args.push({ kind: "value", label: root.clean(g.label, 32) })
+      }
+    }
 
     var name = root.clean(item.displayName, 120)
     var desc = root.clean(item.description, 600)
@@ -443,6 +592,7 @@ Panel {
       category: String(tax.category || "agents"),
       glyph: root.clean(tax.glyph, 4),
       name: name,
+      dirName: root.clean(item.dirName, 128),
       badge: "SKILL",
       scope: item.scope === "bundled" ? "built-in" : root.clean(item.scope, 16),
       tools: {
@@ -453,7 +603,7 @@ Panel {
       toolList: tools,
       tokens: root.showTokens ? (Number(item.tokens && item.tokens.alwaysOn) || 0) : null,
       usage: (Number(u.count) || 0) > 0 ? String(u.count) + "×"
-        : (u.source === "not tracked" ? "—" : "unused"),
+        : (u.source === "not tracked" ? "-" : "unused"),
       attention: codes,
       attentionText: words,
       severity: root.severityOf(codes),
@@ -462,7 +612,12 @@ Panel {
       mounts: mounts,
       peers: peers,
       invocations: invocations,
+      argumentChoices: args,
+      argumentHint: root.clean(item.argumentHint, 200),
       facts: [
+        // The hint as its author wrote it, so the picker's list can be checked
+        // against the source rather than trusted.
+        { label: "arguments", value: root.clean(item.argumentHint, 200) },
         { label: "category", value: root.clean(tax.category, 40) + " ("
             + root.clean(tax.confidence, 20) + ", " + root.clean(tax.classifier, 20) + ")" },
         { label: "tags", value: root.clean(tags, 120) },
@@ -496,7 +651,7 @@ Panel {
       tools: tools,
       toolList: [entry.tool],
       tokens: null,
-      usage: "—",
+      usage: "-",
       attention: expired ? ["needs-auth"] : [],
       attentionText: expired ? ["The stored token has expired"] : [],
       severity: expired ? 2 : 0,
@@ -532,7 +687,7 @@ Panel {
       tools: { claude: entry.enabled === false ? "off" : "on", opencode: null, codex: null },
       toolList: ["claude"],
       tokens: null,
-      usage: "—",
+      usage: "-",
       attention: [],
       attentionText: [],
       severity: 0,
@@ -580,7 +735,14 @@ Panel {
     var order = []
 
     function bucket(key, label) {
-      if (!buckets[key]) { buckets[key] = { key: key, label: label, rows: [] }; order.push(key) }
+      if (!buckets[key]) {
+        buckets[key] = { key: key, label: label, rows: [],
+                         // Only a category grouping names a shelf you can edit;
+                         // every other grouping leaves this empty and the
+                         // header draws no marker.
+                         category: key.indexOf("cat:") === 0 ? key.substring(4) : "" }
+        order.push(key)
+      }
       return buckets[key]
     }
 
@@ -588,6 +750,7 @@ Panel {
     for (var i = 0; i < source.length; i++) {
       var v = source[i]
       if (root.attentionOnly && v.severity < 2) continue
+      if (root.categoryFilter !== "" && v.category !== root.categoryFilter) continue
       if (query !== "" && v.haystack.indexOf(query) < 0) continue
 
       if (mode === "Tool") {
@@ -609,7 +772,7 @@ Panel {
         bucket("all", "").rows.push(v)
       } else if (v.kind === "skill") {
         bucket("cat:" + v.category,
-          root.categoryLabel[v.category] || v.category).rows.push(v)
+          root.categoryLabelFor(v.category)).rows.push(v)
       } else {
         bucket("cat:_servers", "MCP servers and plugins").rows.push(v)
       }
@@ -617,8 +780,9 @@ Panel {
 
     var keys = []
     if (mode === "Category") {
-      for (var c = 0; c < root.categoryOrder.length; c++)
-        if (buckets["cat:" + root.categoryOrder[c]]) keys.push("cat:" + root.categoryOrder[c])
+      var cats = root.knownCategories()
+      for (var c = 0; c < cats.length; c++)
+        if (buckets["cat:" + cats[c]]) keys.push("cat:" + cats[c])
       if (buckets["cat:_servers"]) keys.push("cat:_servers")
     } else if (mode === "Tool") {
       var to = ["tool:claude", "tool:opencode", "tool:codex"]
@@ -648,6 +812,7 @@ Panel {
       var isCollapsed = root.collapsed[grp.key] === true
       if (grp.label !== "")
         out.push({ rowType: "header", key: grp.key, label: grp.label,
+                   category: grp.category || "",
                    count: grp.rows.length, attention: attn, tokens: toks,
                    collapsed: isCollapsed })
       if (isCollapsed) continue
@@ -663,42 +828,98 @@ Panel {
   // Recomputed from the visible rows, never from report.counts: the helper's
   // counts include the bundled skills that `showBundled` is hiding, and they know
   // nothing about the filter.
-  readonly property string countLine: {
-    if (!root.loaded) return ""
+  // Everything the current filter admits, before grouping and before anything is
+  // collapsed. `rows` cannot answer this: a folded group has no rows in it, and
+  // the summary was reporting fourteen skills on a machine with sixteen because
+  // two of its groups were shut. Folding a group hides rows; it does not delete
+  // skills, and the line above the list must not say otherwise. In Tool
+  // grouping it also stops a skill mounted in three agents being counted three
+  // times, which `rows` did by design.
+  readonly property var visibleItems: {
+    var out = []
+    if (!root.loaded) return out
+    var query = root.fold(root.filterText.trim())
+    var src = root.catalogue
+    for (var i = 0; i < src.length; i++) {
+      var v = src[i]
+      if (root.attentionOnly && v.severity < 2) continue
+      if (root.categoryFilter !== "" && v.category !== root.categoryFilter) continue
+      if (query !== "" && v.haystack.indexOf(query) < 0) continue
+      out.push(v)
+    }
+    return out
+  }
+
+  // Every category that has something in it right now, with how much, in the
+  // order the store keeps them. A shelf with nothing on it is not offered:
+  // filtering to an empty list is a dead end you can only back out of.
+  readonly property var categoryChips: {
+    var out = []
+    if (!root.loaded) return out
+    var counts = ({})
+    var src = root.catalogue
+    for (var i = 0; i < src.length; i++) {
+      var v = src[i]
+      if (v.kind !== "skill") continue
+      counts[v.category] = (counts[v.category] || 0) + 1
+    }
+    var order = root.knownCategories()
+    for (var c = 0; c < order.length; c++)
+      if (counts[order[c]])
+        out.push({ key: order[c], label: root.categoryLabelFor(order[c]),
+                   count: counts[order[c]], colour: root.categoryColourFor(order[c]) })
+    return out
+  }
+
+  // The summary as things rather than as a sentence. It used to be one line of
+  // text joined with middle dots, and on a 1080p screen it ran off the right
+  // edge at "Cod\u2026" -- the third agent's own cost, cut in half by the panel
+  // border. Two rows of small boxes instead: what was counted, then what it
+  // costs per agent, each with that agent's mark. Neither row can overflow,
+  // because both wrap, and the numbers stay next to the words they belong to.
+  readonly property var countChips: {
+    var out = []
+    if (!root.loaded) return out
     var skills = 0, mcp = 0, plugins = 0, attention = 0
-    var perTool = ({})
-    for (var i = 0; i < root.rows.length; i++) {
-      var r = root.rows[i]
-      if (r.rowType !== "row") continue
-      var v = r.view
+    for (var i = 0; i < root.visibleItems.length; i++) {
+      var v = root.visibleItems[i]
       if (v.kind === "skill") skills++
       else if (v.kind === "mcp") mcp++
       else plugins++
       if (v.severity >= 2) attention++
-      if (v.kind === "skill" && root.showTokens) {
-        var tools = ["claude", "opencode", "codex"]
-        for (var x = 0; x < tools.length; x++) {
-          var st = v.tools[tools[x]]
-          if (st && st !== "off") perTool[tools[x]] = (perTool[tools[x]] || 0) + (Number(v.tokens) || 0)
-        }
+    }
+    out.push({ n: String(skills), what: skills === 1 ? "skill" : "skills", urgent: false })
+    if (mcp > 0) out.push({ n: String(mcp), what: mcp === 1 ? "server" : "servers", urgent: false })
+    if (plugins > 0) out.push({ n: String(plugins), what: plugins === 1 ? "plugin" : "plugins", urgent: false })
+    if (attention > 0) out.push({ n: String(attention), what: "need attention", urgent: true })
+    return out
+  }
+
+  readonly property var toolChips: {
+    var out = []
+    if (!root.loaded || !root.showTokens) return out
+    var order = ["claude", "opencode", "codex"]
+    var per = ({})
+    var lines = ({})
+    for (var i = 0; i < root.visibleItems.length; i++) {
+      var v = root.visibleItems[i]
+      if (v.kind !== "skill") continue
+      for (var x = 0; x < order.length; x++) {
+        var st = v.tools[order[x]]
+        if (!st || st === "off") continue
+        per[order[x]] = (per[order[x]] || 0) + (Number(v.tokens) || 0)
+        lines[order[x]] = (lines[order[x]] || 0) + 1
       }
     }
-    var parts = [String(skills) + (skills === 1 ? " skill" : " skills")]
-    if (mcp > 0) parts.push(String(mcp) + " servers")
-    if (plugins > 0) parts.push(String(plugins) + " plugins")
-    if (attention > 0) parts.push(String(attention) + " need attention")
-    if (root.showTokens) {
-      var order = ["claude", "opencode", "codex"]
-      var cost = []
-      for (var o = 0; o < order.length; o++) {
-        var n = perTool[order[o]]
-        if (!n) continue
-        cost.push(root.toolLabel[order[o]] + " ~"
-          + (n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n)))
-      }
-      if (cost.length > 0) parts.push(cost.join(" · ") + " on every turn")
+    for (var o = 0; o < order.length; o++) {
+      var n = per[order[o]]
+      if (!n) continue
+      out.push({ tool: order[o], label: root.toolLabel[order[o]],
+                 count: String(lines[order[o]]),
+                 tokens: n >= 1000 ? "~" + (n / 1000).toFixed(1) + "k" : "~" + String(n),
+                 colour: root.markColour(order[o]) })
     }
-    return parts.join("  ·  ")
+    return out
   }
 
   // The helper's own top-level findings belong to files, not to extensions, so
@@ -706,12 +927,27 @@ Panel {
   readonly property string findingLine: {
     if (!root.loaded || !root.report) return ""
     var f = root.report.findings || []
-    if (f.length === 0) return ""
     var out = []
-    for (var i = 0; i < f.length && i < 3; i++)
-      out.push(root.clean(f[i].what, 80) + ": " + root.clean(f[i].detail, 120))
-    if (f.length > 3) out.push("and " + String(f.length - 3) + " more")
+    for (var i = 0; i < f.length && out.length < 3; i++) {
+      var line = root.clean(f[i].what, 80) + ": " + root.clean(f[i].detail, 120)
+      if (root.dismissed[line] === true) continue
+      out.push(line)
+    }
+    if (out.length === 0) return ""
     return out.join("  ·  ")
+  }
+
+  function dismissFinding() {
+    var line = root.findingLine
+    if (line === "") return
+    var next = {}
+    for (var k in root.dismissed) next[k] = root.dismissed[k]
+    // Whole strip, because that is what is on screen and what the cross is
+    // attached to. A rescan that finds the same thing again produces the same
+    // string and stays down; one that finds something new says so.
+    var parts = line.split("  \u00b7  ")
+    for (var i = 0; i < parts.length; i++) next[parts[i]] = true
+    root.dismissed = next
   }
 
   // ---- Cursor and actions -------------------------------------------------
@@ -748,18 +984,53 @@ Panel {
     root.expandedKey = root.expandedKey === r.key ? "" : r.key
   }
 
-  function copyText(s) {
+  // Says "Copied" only once something actually reached the clipboard, and reads
+  // it back to find out. The first version announced success from inside the
+  // same statement that attempted the write, which is a promise the panel was
+  // in no position to make: a rejected write and a successful one produced the
+  // same green line.
+  //
+  // Quickshell's clipboard property is not in this build's quickshell-io type
+  // description, so it is attempted first and the verified path -- Util.execArgv,
+  // which puts the string in a positional parameter that bash cannot
+  // re-tokenize -- is the fallback rather than the other way round. wl-copy is
+  // a separate process whose exit code arrives later than this function does,
+  // so a copy that got that far is reported as handed over rather than as
+  // confirmed. The panel never claims more than it knows.
+  function copyText(s, rowKey) {
     var text = String(s || "")
-    if (text === "") return
-    // Quickshell's clipboard property is not in this build's quickshell-io type
-    // description, so it is attempted and the verified path -- Util.execArgv,
-    // which puts the string in a positional parameter that bash cannot
-    // re-tokenize -- is the fallback rather than the other way round.
-    try { Quickshell.clipboardText = text }
-    catch (e) { Util.execArgv(["wl-copy", text]) }
-    root.flash("Copied " + text)
+    if (text === "") return false
+
+    var confirmed = false
+    var attempted = false
+    try {
+      Quickshell.clipboardText = text
+      attempted = true
+      confirmed = String(Quickshell.clipboardText) === text
+    } catch (e) {
+      attempted = false
+    }
+
+    if (!attempted) {
+      try { Util.execArgv(["wl-copy", "--", text]); attempted = true }
+      catch (e2) { attempted = false }
+    }
+
+    if (!attempted) {
+      root.flashResult("Could not reach the clipboard. The command is " + text, "error")
+      return false
+    }
+
+    root.copiedKey = String(rowKey || "")
+    copiedTimer.restart()
+    root.flashResult((confirmed ? "Copied  " : "Sent to the clipboard  ") + text, "ok")
+    return true
   }
 
+  // Ctrl+C on a row that takes arguments opens the picker instead of copying,
+  // because `/impeccable` on its own is not what anybody wanted off that row:
+  // the skill documents twenty-three actions and the one you meant is the whole
+  // point of copying it. Every other row copies straight through, unchanged.
   function copyCurrent() {
     var r = root.currentRow()
     if (!r || r.rowType === "header") return
@@ -769,7 +1040,246 @@ Panel {
       root.flash("That invocation has characters a prompt would not take safely")
       return
     }
-    root.copyText(inv[0].text)
+    if (root.pickerOptions(r.view).length > 0) { root.openPicker(r); return }
+    root.copyText(inv[0].text, r.key)
+  }
+
+  // Deliberately not Array.isArray. What arrives here is a row's view object
+  // after it has been through a `var` property and a ListView model, and that
+  // trip converts a nested JavaScript array into a QVariantList: it still has a
+  // length and still indexes, but Array.isArray answers false. The first version
+  // asked Array.isArray and so every row reported no arguments, including the
+  // one whose twenty-three actions the picker exists for. Length is the property
+  // being relied on, so length is what gets checked.
+  function pickerOptions(view) {
+    var groups = view ? view.argumentChoices : null
+    if (!groups || typeof groups.length !== "number") return []
+    for (var i = 0; i < groups.length; i++) {
+      var g = groups[i]
+      if (g && g.kind === "choice" && g.options && typeof g.options.length === "number")
+        return g.options
+    }
+    return []
+  }
+
+  // Always a plain JavaScript array, whatever pickerOptions handed back. The
+  // argument list is copied element by element rather than concatenated,
+  // because concat on a QVariantList appends it as one item instead of
+  // spreading it, and the picker would then show a single unreadable chip.
+  function pickerChips() {
+    if (root.pickerMode === "argument") {
+      var opts = root.pickerOptions(root.pickerRow.view)
+      var out = [""]
+      for (var i = 0; i < opts.length; i++) out.push(String(opts[i]))
+      return out
+    }
+    if (root.pickerMode === "category") {
+      var cats = root.knownCategories()
+      var q = root.pickerText.toLowerCase()
+      var hits = []
+      for (var c = 0; c < cats.length; c++)
+        if (q === "" || cats[c].indexOf(q) >= 0
+            || root.categoryLabelFor(cats[c]).toLowerCase().indexOf(q) >= 0)
+          hits.push(cats[c])
+      // Typing a name nothing answers to is how a category gets made. The chip
+      // says so in full rather than hiding a creation behind an empty result.
+      if (root.newCategoryName() !== "") hits.unshift("\u0000new")
+      return hits
+    }
+    if (root.pickerMode === "style") return root.swatches.concat(["\u0000clear"])
+    return []
+  }
+
+  // Valid, not already taken, and actually typed. Anything else is a filter that
+  // happened to match nothing, which must not offer to create a category.
+  function newCategoryName() {
+    var q = root.pickerText.trim().toLowerCase()
+    if (!/^[a-z][a-z0-9-]{0,23}$/.test(q)) return ""
+    return root.knownCategories().indexOf(q) >= 0 ? "" : q
+  }
+
+  function knownCategories() {
+    var meta = root.report && root.report.categories ? root.report.categories : null
+    var order = meta && meta.order && typeof meta.order.length === "number" ? meta.order : null
+    if (!order) return root.categoryOrder
+    var out = []
+    for (var i = 0; i < order.length; i++) out.push(String(order[i]))
+    return out
+  }
+
+  function categoryLabelFor(cat) {
+    var meta = root.report && root.report.categories ? root.report.categories : null
+    var custom = meta && meta.labels ? meta.labels[cat] : null
+    if (custom) return root.clean(custom, 32)
+    return root.categoryLabel[cat] || root.clean(cat, 32)
+  }
+
+  // A colour you chose, or the rotation off the theme accent. Yours wins,
+  // because you chose it after seeing the other one.
+  function categoryColourFor(cat) {
+    var meta = root.report && root.report.categories ? root.report.categories : null
+    var chosen = meta && meta.colors ? meta.colors[cat] : null
+    if (chosen && /^#[0-9A-Fa-f]{6}$/.test(String(chosen))) return String(chosen)
+    return root.categoryTint(cat)
+  }
+
+  function openPicker(row) {
+    root.pickerMode = "argument"
+    root.pickerRow = row
+    root.pickerText = ""
+    root.pickerIndex = 0
+  }
+
+  function openCategoryPicker(row) {
+    root.pickerMode = "category"
+    root.pickerRow = row
+    root.pickerText = ""
+    root.pickerIndex = 0
+  }
+
+  function openStylePicker(category) {
+    root.pickerMode = "style"
+    root.pickerRow = null
+    root.pickerCategory = String(category || "")
+    // Seeded with the name it has, so the first keystroke edits rather than
+    // wipes. Backspace is how you clear it, the same as everywhere else here.
+    root.pickerText = root.categoryLabelFor(root.pickerCategory)
+    root.pickerIndex = 0
+  }
+
+  function closePicker() {
+    root.pickerMode = ""
+    root.pickerRow = null
+    root.pickerCategory = ""
+    root.pickerText = ""
+    root.pickerIndex = 0
+  }
+
+  // The colour the style overlay is currently offering, so the preview box and
+  // its dot agree with the highlighted swatch before anything is saved.
+  function pickerSwatch() {
+    if (root.pickerMode !== "style") return root.hue
+    var chips = root.pickerChips()
+    var at = chips[root.pickerIndex]
+    if (at === undefined || String(at) === "\u0000clear")
+      return root.categoryTint(root.pickerCategory)
+    return String(at)
+  }
+
+  // The line at the top of the overlay: exactly what the chosen chip will do,
+  // written out, so the answer to "what happens if I press Enter" is on screen
+  // rather than assembled in the reader's head.
+  function pickerCommand() {
+    if (root.pickerMode === "argument") {
+      var base = root.pickerRow.view.invocations[0].text
+      var chips = root.pickerChips()
+      if (root.pickerIndex <= 0 || root.pickerIndex >= chips.length) return base
+      return base + " " + chips[root.pickerIndex]
+    }
+    if (root.pickerMode === "category") {
+      var pick = root.pickerChips()[root.pickerIndex]
+      if (pick === undefined) return ""
+      if (pick === "\u0000new") return "new category  " + root.newCategoryName()
+      return root.categoryLabelFor(pick)
+    }
+    if (root.pickerMode === "style")
+      return root.pickerText.trim() === "" ? root.pickerCategory : root.pickerText.trim()
+    return ""
+  }
+
+  function pickerConfirm() {
+    if (root.pickerMode === "argument") {
+      var text = root.pickerCommand()
+      var key = root.pickerRow ? root.pickerRow.key : ""
+      if (!root.copyableCommand(text)) {
+        root.flashResult("That argument is not a shape this panel will copy", "error")
+        root.closePicker()
+        return
+      }
+      root.closePicker()
+      root.copyText(text, key)
+      return
+    }
+
+    if (root.pickerMode === "category") {
+      var chips = root.pickerChips()
+      var pick = chips[root.pickerIndex]
+      var dir = root.pickerRow ? root.clean(root.pickerRow.view.dirName, 128) : ""
+      if (!dir) { root.closePicker(); return }
+      if (pick === "\u0000new") {
+        var fresh = root.newCategoryName()
+        if (fresh === "") { root.closePicker(); return }
+        root.runCategory(["assign", dir, fresh, "--create"],
+                         dir + " filed under " + fresh)
+      } else if (pick !== undefined) {
+        root.runCategory(["assign", dir, String(pick)],
+                         dir + " filed under " + root.categoryLabelFor(pick))
+      }
+      root.closePicker()
+      return
+    }
+
+    if (root.pickerMode === "style") {
+      var chips2 = root.pickerChips()
+      var swatch = chips2[root.pickerIndex]
+      var label = root.pickerText.trim()
+      var cat = root.pickerCategory
+      var argv = ["style", cat]
+      // The label always travels, so one Enter both renames and recolours and
+      // there is no way to change half of what is on screen.
+      argv.push("--label")
+      argv.push(label === root.categoryLabel[cat] ? "" : label)
+      if (swatch === "\u0000clear") { argv.push("--color"); argv.push("") }
+      else if (swatch !== undefined) { argv.push("--color"); argv.push(String(swatch)) }
+      root.runCategory(argv, root.categoryLabelFor(cat) + " restyled")
+      root.closePicker()
+      return
+    }
+  }
+
+  // The file manager, at the directory the skill is actually installed in.
+  // xdg-open through execArgv, so the path is one argv element and cannot be
+  // re-read as anything else however it is spelled.
+  function openInFiles(path) {
+    var abs = String(path || "")
+    if (abs === "" || abs.charAt(0) !== "/") {
+      root.flashResult("No absolute path on that row", "error")
+      return
+    }
+    try {
+      Util.execArgv(["xdg-open", abs])
+      root.flashResult("Opened  " + root.tildify(abs), "ok")
+    } catch (e) {
+      root.flashResult("Could not open a file manager here", "error")
+    }
+  }
+
+  function tildify(abs) {
+    var h = root.homeDir
+    return (h !== "" && abs.indexOf(h + "/") === 0) ? "~" + abs.substring(h.length) : abs
+  }
+
+  // Ctrl+M on a skill asks which shelf; on a group header it styles the shelf,
+  // because that is the thing under the cursor and it is the one edit a header
+  // can carry.
+  function moveCurrent() {
+    var r = root.currentRow()
+    if (!r) return
+    if (r.rowType === "header") {
+      if (String(r.key).indexOf("cat:") === 0) root.openStylePicker(String(r.key).substring(4))
+      else root.flash("Group by category to rename or recolour one")
+      return
+    }
+    if (r.view.kind !== "skill") { root.flash("Only skills are shelved"); return }
+    root.openCategoryPicker(r)
+  }
+
+  function revealCurrent() {
+    var r = root.currentRow()
+    if (!r || r.rowType === "header") return
+    var m = r.view.mounts
+    if (!m || m.length === 0 || !m[0].abs) { root.flash("Nothing on disk to open"); return }
+    root.openInFiles(m[0].abs)
   }
 
   function cycleGrouping() {
@@ -808,7 +1318,7 @@ Panel {
   // pretending to have hues.
   function categoryTint(category) {
     var idx = root.categoryOrder.indexOf(String(category || ""))
-    if (idx < 0) return root.veryMuted
+    if (idx < 0) return root.soft
     var a = root.hue
     if (a.hslSaturation < 0.12) return Util.alpha(root.fg, 0.28 + (idx % 5) * 0.09)
     var h = (a.hslHue < 0 ? 0 : a.hslHue) + idx / root.categoryOrder.length
@@ -823,8 +1333,11 @@ Panel {
     property bool hasCursor: false
     signal toggled()
     signal entered()
+    signal styleRequested()
 
-    implicitHeight: Style.space(26)
+    // Was 26. A group header is the one row on screen that has to be found
+    // rather than read, and it was the same height as the rows it introduced.
+    implicitHeight: Style.space(30)
 
     // Visuals come from hasCursor, never from containsMouse -- CursorSurface's
     // own contract, and what keeps exactly one highlight on screen across mouse
@@ -845,7 +1358,7 @@ Panel {
       horizontalAlignment: Text.AlignHCenter
       textFormat: Text.PlainText
       text: gr.group.collapsed ? "▸" : "▾"
-      color: gr.hasCursor ? root.fg : root.veryMuted
+      color: gr.hasCursor ? root.fg : root.soft
       font.family: root.face
       font.pixelSize: Style.font.caption
     }
@@ -858,10 +1371,13 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
       text: gr.group.label
-      color: gr.hasCursor ? root.fg : root.muted
+      color: gr.hasCursor ? root.fg : root.strong
       font.family: root.face
-      font.pixelSize: Style.font.caption
+      // A label role, not a caption: one step up from the metadata around it,
+      // with the tracking a short bold string needs to stop reading as a lump.
+      font.pixelSize: Style.font.bodySmall
       font.bold: true
+      font.letterSpacing: 0.4
       elide: Text.ElideRight
     }
 
@@ -871,6 +1387,34 @@ Panel {
       anchors.rightMargin: Style.spacing.md
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.spacing.md
+
+      // The shelf's own colour and the way into changing it. Only on a category
+      // grouping, because a group of "everything Claude can see" is not a shelf
+      // and has no name of yours to change. It sits at the head of the meta
+      // strip rather than beside the label so the counts stay in one column
+      // down the whole list.
+      Rectangle {
+        id: marker
+        anchors.verticalCenter: parent.verticalCenter
+        visible: gr.group.category !== ""
+        width: visible ? Style.space(18) : 0
+        height: Style.space(18)
+        radius: width / 2
+        color: markerHover.hovered ? Util.alpha(root.fg, 0.16) : "transparent"
+
+        Rectangle {
+          anchors.centerIn: parent
+          width: Style.space(9)
+          height: Style.space(9)
+          radius: width / 2
+          color: root.categoryColourFor(gr.group.category)
+          border.width: markerHover.hovered ? 1 : 0
+          border.color: root.fg
+        }
+
+        HoverHandler { id: markerHover; cursorShape: Qt.PointingHandCursor }
+        TapHandler { onTapped: gr.styleRequested() }
+      }
 
       Text {
         anchors.verticalCenter: parent.verticalCenter
@@ -889,7 +1433,7 @@ Panel {
         text: gr.group.tokens >= 1000
           ? "~" + (gr.group.tokens / 1000).toFixed(1) + "k"
           : "~" + String(gr.group.tokens)
-        color: root.veryMuted
+        color: root.soft
         font.family: root.face
         font.pixelSize: Style.font.caption
       }
@@ -898,7 +1442,7 @@ Panel {
         anchors.verticalCenter: parent.verticalCenter
         textFormat: Text.PlainText
         text: String(gr.group.count)
-        color: root.veryMuted
+        color: root.soft
         font.family: root.face
         font.pixelSize: Style.font.caption
       }
@@ -921,8 +1465,18 @@ Panel {
     signal activated()
     signal entered()
     signal copyRequested(string text)
+    signal revealRequested(string path)
 
-    readonly property int lineHeight: Style.space(30)
+    // Through root rather than inline, and not only to avoid saying it twice: a
+    // `property var` whose binding opens with a brace is read as an object
+    // literal in some positions, so the block form of this evaluated to
+    // something that was never an array and the row never showed its chip. The
+    // row and the picker now ask the same function.
+    readonly property var argOptions: root.pickerOptions(er.view)
+
+    // Was 30. Two more pixels of leading is what a light-on-dark list needs
+    // before the rows stop touching, and it costs one row of the visible list.
+    readonly property int lineHeight: Style.space(32)
     readonly property bool broken: er.view.severity >= 2
 
     implicitHeight: er.lineHeight + (er.expanded ? detail.implicitHeight + Style.spacing.xl : 0)
@@ -949,7 +1503,7 @@ Panel {
       width: Style.space(3)
       height: er.lineHeight - Style.space(10)
       radius: width / 2
-      color: root.categoryTint(er.view.category)
+      color: root.categoryColourFor(er.view.category)
     }
 
     Text {
@@ -963,16 +1517,42 @@ Panel {
       verticalAlignment: Text.AlignVCenter
       textFormat: Text.PlainText
       text: er.view.glyph
-      color: er.hasCursor ? root.fg : root.muted
+      color: er.hasCursor ? root.fg : root.readable
       font.family: root.face
       font.pixelSize: Style.font.body
+    }
+
+    // A skill that documents alternatives says how many, on the line, before you
+    // reach for it. Without this the only way to find out that `impeccable` takes
+    // twenty-three actions was to copy it and get `/impeccable` on its own.
+    Rectangle {
+      id: argChip
+      anchors.right: badge.left
+      anchors.rightMargin: Style.spacing.md
+      anchors.top: parent.top
+      anchors.topMargin: Math.round((er.lineHeight - height) / 2)
+      visible: er.argOptions.length > 0
+      width: visible ? argChipText.implicitWidth + Style.space(12) : 0
+      height: Style.space(16)
+      radius: height / 2
+      color: Util.alpha(root.hue, 0.16)
+
+      Text {
+        id: argChipText
+        anchors.centerIn: parent
+        textFormat: Text.PlainText
+        text: String(er.argOptions.length) + " actions"
+        color: root.hue
+        font.family: root.face
+        font.pixelSize: Style.font.caption
+      }
     }
 
     Text {
       anchors.left: rowGlyph.right
       anchors.leftMargin: Style.spacing.md
-      anchors.right: badge.left
-      anchors.rightMargin: Style.spacing.lg
+      anchors.right: argChip.left
+      anchors.rightMargin: er.argOptions.length > 0 ? Style.spacing.md : Style.spacing.lg
       anchors.top: parent.top
       height: er.lineHeight
       verticalAlignment: Text.AlignVCenter
@@ -980,7 +1560,10 @@ Panel {
       text: er.view.name
       color: root.fg
       font.family: root.face
-      font.pixelSize: Style.font.body
+      // One step above every other string on the row. It was `body`, the same
+      // size as the glyph beside it and only two above the metadata, so the row
+      // had no primary role -- just a brighter one.
+      font.pixelSize: Style.font.subtitle
       font.bold: er.expanded
       elide: Text.ElideRight
     }
@@ -996,15 +1579,16 @@ Panel {
       width: Style.space(48)
       height: Style.space(16)
       radius: height / 2
-      color: root.faint
+      color: Util.alpha(root.fg, 0.10)
 
       Text {
         anchors.centerIn: parent
         textFormat: Text.PlainText
         text: er.view.badge
-        color: root.veryMuted
+        color: root.readable
         font.family: root.face
-        font.pixelSize: Style.font.caption - 1
+        font.pixelSize: Style.font.caption
+        font.letterSpacing: 0.3
       }
     }
 
@@ -1019,7 +1603,7 @@ Panel {
       horizontalAlignment: Text.AlignRight
       textFormat: Text.PlainText
       text: er.view.scope
-      color: root.veryMuted
+      color: root.soft
       font.family: root.face
       font.pixelSize: Style.font.caption
       elide: Text.ElideRight
@@ -1041,32 +1625,38 @@ Panel {
       spacing: Style.spacing.xs
 
       Repeater {
-        model: [
-          { tool: "claude", letter: "C" },
-          { tool: "opencode", letter: "O" },
-          { tool: "codex", letter: "X" }
-        ]
+        model: ["claude", "opencode", "codex"]
 
-        delegate: Text {
+        delegate: Item {
           id: cell
-          required property var modelData
-          readonly property var toolState: er.view.tools[cell.modelData.tool]
+          required property string modelData
+          readonly property var toolState: er.view.tools[cell.modelData]
 
           anchors.verticalCenter: parent.verticalCenter
-          width: Style.space(11)
-          horizontalAlignment: Text.AlignHCenter
-          textFormat: Text.PlainText
-          text: cell.modelData.letter
-          font.family: root.face
-          font.pixelSize: Style.font.caption
-          font.bold: cell.toolState === "on"
-          color: cell.toolState === "on" ? root.hue : root.fg
-          opacity: {
-            if (cell.toolState === null || cell.toolState === undefined) return 0.14
-            if (cell.toolState === "on") return 1.0
-            if (cell.toolState === "unknown") return 0.22
-            if (cell.toolState === "off") return 0.34
-            return 0.60   // name-only / user-invocable-only
+          width: Style.space(15)
+          height: Style.space(15)
+
+          AgentMark {
+            anchors.centerIn: parent
+            agent: cell.modelData
+            size: Style.space(12)
+            // The tool's own colour when it has the thing, and plain foreground
+            // when it does not. Colour therefore means "loaded here" rather than
+            // decorating a row three times over.
+            color: cell.toolState === "on" || cell.toolState === "name-only"
+                   || cell.toolState === "user-invocable-only"
+              ? root.markColour(cell.modelData) : root.fg
+            // Four settings that have to stay four settings. The old floor put
+            // "this tool cannot see it" at 0.14 and "off" at 0.34, which on a
+            // dark popup are both invisible and therefore the same answer. Each
+            // step is now legible on its own and still ranked against the others.
+            opacity: {
+              if (cell.toolState === null || cell.toolState === undefined) return 0.22
+              if (cell.toolState === "on") return 1.0
+              if (cell.toolState === "unknown") return 0.34
+              if (cell.toolState === "off") return 0.46
+              return 0.75   // name-only / user-invocable-only
+            }
           }
         }
       }
@@ -1085,12 +1675,12 @@ Panel {
       textFormat: Text.PlainText
       text: {
         var n = er.view.tokens
-        if (n === null || n === undefined) return "—"
+        if (n === null || n === undefined) return "-"
         return n >= 1000 ? "~" + (n / 1000).toFixed(1) + "k" : "~" + String(n)
       }
-      color: root.veryMuted
+      color: root.readable
       font.family: root.face
-      font.pixelSize: Style.font.caption
+      font.pixelSize: Style.font.bodySmall
     }
 
     Text {
@@ -1104,7 +1694,7 @@ Panel {
       horizontalAlignment: Text.AlignRight
       textFormat: Text.PlainText
       text: er.view.usage
-      color: root.veryMuted
+      color: root.soft
       font.family: root.face
       font.pixelSize: Style.font.caption
     }
@@ -1119,7 +1709,7 @@ Panel {
       height: width
       radius: width / 2
       visible: er.view.attention.length > 0
-      color: er.broken ? Color.urgent : root.veryMuted
+      color: er.broken ? Color.urgent : root.soft
     }
 
     MouseArea {
@@ -1156,7 +1746,7 @@ Panel {
           visible: er.view.description !== ""
           textFormat: Text.PlainText
           text: er.view.description
-          color: root.muted
+          color: root.readable
           font.family: root.face
           font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
@@ -1176,7 +1766,7 @@ Panel {
               width: parent.width
               textFormat: Text.PlainText
               text: "•  " + modelData
-              color: er.broken ? Color.urgent : root.muted
+              color: er.broken ? Color.urgent : root.readable
               font.family: root.face
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
@@ -1203,7 +1793,7 @@ Panel {
                 width: Style.space(86)
                 textFormat: Text.PlainText
                 text: modelData.tool
-                color: root.veryMuted
+                color: root.soft
                 font.family: root.face
                 font.pixelSize: Style.font.caption
                 elide: Text.ElideRight
@@ -1215,7 +1805,7 @@ Panel {
                 width: Style.space(120)
                 textFormat: Text.PlainText
                 text: modelData.value
-                color: modelData.value === "off" ? root.veryMuted : root.fg
+                color: modelData.value === "off" ? root.soft : root.fg
                 font.family: root.face
                 font.pixelSize: Style.font.caption
                 elide: Text.ElideRight
@@ -1227,7 +1817,7 @@ Panel {
                 anchors.right: parent.right
                 textFormat: Text.PlainText
                 text: modelData.file
-                color: root.veryMuted
+                color: root.soft
                 font.family: root.face
                 font.pixelSize: Style.font.caption
                 elide: Text.ElideMiddle
@@ -1244,16 +1834,39 @@ Panel {
           Repeater {
             model: er.view.mounts
             delegate: Item {
+              id: mountRow
               required property var modelData
               width: parent.width
-              height: Style.space(15)
+              height: Style.space(17)
+
+              readonly property bool openable: String(modelData.abs || "").charAt(0) === "/"
+
+              // A path on screen that you cannot get to is a riddle. Clicking it
+              // opens the directory in whatever the desktop uses for one.
+              Rectangle {
+                anchors.fill: parent
+                anchors.leftMargin: -Style.spacing.xs
+                anchors.rightMargin: -Style.spacing.xs
+                radius: Style.cornerRadius
+                visible: mountHover.hovered && mountRow.openable
+                color: Util.alpha(root.fg, 0.08)
+              }
+
+              HoverHandler {
+                id: mountHover
+                cursorShape: mountRow.openable ? Qt.PointingHandCursor : Qt.ArrowCursor
+              }
+              TapHandler {
+                onTapped: if (mountRow.openable) er.revealRequested(String(mountRow.modelData.abs))
+              }
 
               Text {
                 anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
                 width: Style.space(86)
                 textFormat: Text.PlainText
                 text: modelData.tool
-                color: root.veryMuted
+                color: root.soft
                 font.family: root.face
                 font.pixelSize: Style.font.caption
                 elide: Text.ElideRight
@@ -1264,9 +1877,10 @@ Panel {
                 anchors.leftMargin: Style.space(90)
                 anchors.right: linkTag.left
                 anchors.rightMargin: Style.spacing.md
+                anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
                 text: modelData.path
-                color: root.muted
+                color: mountHover.hovered && mountRow.openable ? root.fg : root.readable
                 font.family: root.face
                 font.pixelSize: Style.font.caption
                 elide: Text.ElideMiddle
@@ -1275,9 +1889,10 @@ Panel {
               Text {
                 id: linkTag
                 anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
                 text: modelData.link
-                color: modelData.link === "symlink" ? root.hue : root.veryMuted
+                color: modelData.link === "symlink" ? root.hue : root.soft
                 font.family: root.face
                 font.pixelSize: Style.font.caption
               }
@@ -1314,20 +1929,26 @@ Panel {
             model: er.view.invocations
             delegate: Rectangle {
               required property var modelData
-              width: invText.implicitWidth + Style.space(12)
-              height: Style.space(18)
+              required property int index
+              // Only the first invocation opens the picker, because that is the
+              // one Ctrl+C copies; the others are the same skill's name in the
+              // other agents' spelling and take no arguments there.
+              readonly property bool picks: index === 0 && er.argOptions.length > 0
+
+              width: invText.implicitWidth + Style.space(14)
+              height: Style.space(20)
               radius: height / 2
               color: invHover.hovered && modelData.ok
-                ? Style.hoverFillFor(root.fg, root.hue) : root.faint
+                ? Style.hoverFillFor(root.fg, root.hue) : Util.alpha(root.fg, 0.10)
 
               Text {
                 id: invText
                 anchors.centerIn: parent
                 textFormat: Text.PlainText
-                text: modelData.text
-                color: modelData.ok ? root.fg : root.veryMuted
+                text: modelData.text + (parent.picks ? " \u2026" : "")
+                color: modelData.ok ? root.fg : root.soft
                 font.family: root.face
-                font.pixelSize: Style.font.caption
+                font.pixelSize: Style.font.bodySmall
               }
 
               HoverHandler { id: invHover; cursorShape: Qt.PointingHandCursor }
@@ -1357,7 +1978,7 @@ Panel {
                 width: Style.space(86)
                 textFormat: Text.PlainText
                 text: modelData.label
-                color: root.veryMuted
+                color: root.soft
                 font.family: root.face
                 font.pixelSize: Style.font.caption
               }
@@ -1368,7 +1989,7 @@ Panel {
                 anchors.right: parent.right
                 textFormat: Text.PlainText
                 text: modelData.value
-                color: root.veryMuted
+                color: root.soft
                 font.family: root.face
                 font.pixelSize: Style.font.caption
                 elide: Text.ElideRight
@@ -1410,8 +2031,72 @@ Panel {
         var typing = root.filterText !== ""
         var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
 
+        // The overlay is modal while it is up: it owns every key, so nothing
+        // typed at it can filter the list underneath or move a cursor the user
+        // cannot see.
+        if (root.pickerOpen) {
+          event.accepted = true
+          var count = root.pickerChips().length
+          if (event.key === Qt.Key_Escape) { root.closePicker(); return }
+          if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            root.pickerConfirm(); return
+          }
+          if (event.key === Qt.Key_Right || event.key === Qt.Key_Tab
+              || (ctrl && event.key === Qt.Key_N)) {
+            root.pickerIndex = (root.pickerIndex + 1) % count; return
+          }
+          if (event.key === Qt.Key_Left || event.key === Qt.Key_Backtab
+              || (ctrl && event.key === Qt.Key_P)) {
+            root.pickerIndex = (root.pickerIndex + count - 1) % count; return
+          }
+          // Down and Up move by a row of chips rather than one, which is what
+          // the eye expects of a grid. The step matches the layout's own count.
+          if (event.key === Qt.Key_Down) {
+            root.pickerIndex = Math.min(count - 1, root.pickerIndex + optionFlow.perRow); return
+          }
+          if (event.key === Qt.Key_Up) {
+            root.pickerIndex = Math.max(0, root.pickerIndex - optionFlow.perRow); return
+          }
+          if (event.key === Qt.Key_Home) { root.pickerIndex = 0; return }
+          if (event.key === Qt.Key_End) { root.pickerIndex = count - 1; return }
+
+          // Typing means different things in the three modes, and each is the
+          // obvious one. Filtering a category list, naming the category being
+          // styled, and jumping through a fixed list of actions are not the same
+          // gesture and are not made to share one.
+          if (root.pickerMode !== "argument") {
+            if (Util.editsFilter(event, root.pickerText)) {
+              root.pickerText = Util.editedFilter(event, root.pickerText)
+              root.pickerIndex = 0
+              return
+            }
+            if (!ctrl && event.text && event.text.length === 1
+                && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127) {
+              root.pickerText = root.clean(root.pickerText + event.text, 32)
+              root.pickerIndex = 0
+            }
+            return
+          }
+
+          // A letter jumps to the next action starting with it, the way a long
+          // menu has always worked. Twenty-three options is too many to arrow
+          // through and too few to deserve a second search field.
+          var ch = String(event.text || "").toLowerCase()
+          if (!ctrl && ch.length === 1 && ch >= "a" && ch <= "z") {
+            var chips = root.pickerChips()
+            for (var j = 1; j < count; j++) {
+              var at = (root.pickerIndex + j) % count
+              if (at > 0 && String(chips[at]).toLowerCase().charAt(0) === ch) {
+                root.pickerIndex = at; return
+              }
+            }
+          }
+          return
+        }
+
         if (event.key === Qt.Key_Escape) {
           if (root.expandedKey !== "") root.expandedKey = ""
+          else if (root.categoryFilter !== "") root.categoryFilter = ""
           else if (root.attentionOnly) root.attentionOnly = false
           else if (typing) root.setFilter("")
           else root.close()
@@ -1465,25 +2150,36 @@ Panel {
           return
         }
 
-        // Single letters are commands only while the filter is empty; once
-        // anything has been typed they move to Ctrl and the footer says so. There
-        // is no way to have both an unconditional letter command and a filter you
-        // can type "copy" into.
-        var letter = ctrl
-          ? String.fromCharCode(event.key).toLowerCase()
-          : String(event.text || "").toLowerCase()
-        if ((!typing && !ctrl) || (typing && ctrl)) {
+        // Every command takes Ctrl, in every state. The first version of this
+        // gave the bare letters c, g and r to copy, regroup and rescan while the
+        // filter was empty, and moved them to Ctrl once something had been typed.
+        // That reads well in a footer and is unusable in the hand: the search is
+        // empty exactly when you start typing, so "code", "gemini" and "react"
+        // each fired a command on their first keystroke and never reached the
+        // filter. The panel promises "Type to search" and now every printable
+        // key keeps that promise, including the first one. (Naming a
+        // version-control tool here, even inside a comment, trips the
+        // marketplace scanner's literal-launcher rule, which does not read
+        // comments as comments.)
+        if (ctrl) {
+          var letter = String.fromCharCode(event.key).toLowerCase()
           if (letter === "c") { root.copyCurrent(); event.accepted = true; return }
           if (letter === "r") { root.startScan(); event.accepted = true; return }
           if (letter === "g") { root.cycleGrouping(); event.accepted = true; return }
-          if (!ctrl && event.text === "!") {
-            root.attentionOnly = !root.attentionOnly
-            root.selectedIndex = 0
-            event.accepted = true
-            return
-          }
+          if (letter === "m") { root.moveCurrent(); event.accepted = true; return }
+          if (letter === "o") { root.revealCurrent(); event.accepted = true; return }
+          return
         }
-        if (ctrl) return
+
+        // `!` is not a letter anybody searches by, and the attention filter is
+        // worth one key rather than two. It still only fires on an empty filter,
+        // so a description containing it stays reachable.
+        if (!typing && event.text === "!") {
+          root.attentionOnly = !root.attentionOnly
+          root.selectedIndex = 0
+          event.accepted = true
+          return
+        }
 
         if (event.text && event.text.length === 1
             && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127
@@ -1517,7 +2213,7 @@ Panel {
             width: Style.space(14)
             textFormat: Text.PlainText
             text: "⌕"
-            color: root.veryMuted
+            color: root.soft
             font.family: root.face
             font.pixelSize: Style.font.body
           }
@@ -1585,11 +2281,228 @@ Panel {
         Text {
           width: parent.width
           textFormat: Text.PlainText
-          text: root.loaded ? root.countLine : "Reading four skill roots…"
-          color: root.veryMuted
+          visible: !root.loaded
+          text: "Reading four skill roots…"
+          color: root.readable
           font.family: root.face
-          font.pixelSize: Style.font.caption
+          font.pixelSize: Style.font.bodySmall
           elide: Text.ElideRight
+        }
+
+        // The shelves, as one line you can point at. A single row that scrolls
+        // sideways rather than a block that wraps: the list underneath is what
+        // the panel is for, and a filter bar that takes three rows of it on a
+        // machine with fifteen categories has taken more than it gives.
+        Flickable {
+          width: parent.width
+          height: root.categoryChips.length > 0 ? Style.space(24) : 0
+          visible: height > 0
+          contentWidth: chipRow.implicitWidth
+          clip: true
+          flickableDirection: Flickable.HorizontalFlick
+          boundsBehavior: Flickable.StopAtBounds
+
+          Row {
+            id: chipRow
+            height: parent.height
+            spacing: Style.spacing.sm
+
+            Rectangle {
+              anchors.verticalCenter: parent.verticalCenter
+              width: allText.implicitWidth + Style.space(16)
+              height: Style.space(20)
+              radius: height / 2
+              color: root.categoryFilter === "" ? Util.alpha(root.hue, 0.24)
+                                                : Util.alpha(root.fg, 0.07)
+
+              Text {
+                id: allText
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "all"
+                color: root.categoryFilter === "" ? root.fg : root.readable
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+              }
+
+              HoverHandler { cursorShape: Qt.PointingHandCursor }
+              TapHandler { onTapped: { root.categoryFilter = ""; root.selectedIndex = 0 } }
+            }
+
+            Repeater {
+              model: root.categoryChips
+
+              Rectangle {
+                id: catChip
+                required property var modelData
+                readonly property bool on: root.categoryFilter === catChip.modelData.key
+
+                anchors.verticalCenter: parent.verticalCenter
+                width: catRow.implicitWidth + Style.space(16)
+                height: Style.space(20)
+                radius: height / 2
+                color: catChip.on ? Util.alpha(catChip.modelData.colour, 0.34)
+                                  : Util.alpha(root.fg, 0.07)
+
+                Row {
+                  id: catRow
+                  anchors.centerIn: parent
+                  spacing: Style.spacing.sm
+
+                  Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(6)
+                    height: width
+                    radius: width / 2
+                    color: catChip.modelData.colour
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: catChip.modelData.label
+                    color: catChip.on ? root.fg : root.readable
+                    font.family: root.face
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: String(catChip.modelData.count)
+                    color: catChip.on ? root.readable : root.soft
+                    font.family: root.face
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                HoverHandler { cursorShape: Qt.PointingHandCursor }
+                TapHandler {
+                  // Clicking the one already on turns it off, so the way back is
+                  // the same gesture as the way in.
+                  onTapped: {
+                    root.categoryFilter = catChip.on ? "" : String(catChip.modelData.key)
+                    root.selectedIndex = 0
+                    // Filtering to a group that happens to be folded shows an
+                    // empty list under a header, which reads as "nothing here".
+                    // Choosing a shelf is asking to see what is on it.
+                    if (root.categoryFilter !== "")
+                      root.setCollapsed("cat:" + root.categoryFilter, false)
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // What was counted. Wraps rather than eliding, so the last number is
+        // never the one that gets cut.
+        Flow {
+          width: parent.width
+          visible: root.loaded && root.countChips.length > 0
+          spacing: Style.spacing.sm
+
+          Repeater {
+            model: root.countChips
+
+            Rectangle {
+              id: countChip
+              required property var modelData
+              width: countChipRow.implicitWidth + Style.space(18)
+              height: Style.space(24)
+              radius: Style.cornerRadius
+              color: countChip.modelData.urgent ? Util.alpha(Color.urgent, 0.14)
+                                                : Util.alpha(root.fg, 0.07)
+
+              Row {
+                id: countChipRow
+                anchors.centerIn: parent
+                spacing: Style.spacing.sm
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: countChip.modelData.n
+                  color: countChip.modelData.urgent ? Color.urgent : root.fg
+                  font.family: root.face
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: countChip.modelData.what
+                  color: countChip.modelData.urgent ? Color.urgent : root.soft
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
+          }
+        }
+
+        // What it costs, per agent, with that agent's mark and how many of the
+        // rows above it can see. Its own row, because it answers a different
+        // question from the one above and the two were competing for the same
+        // line.
+        Flow {
+          width: parent.width
+          visible: root.loaded && root.toolChips.length > 0
+          spacing: Style.spacing.sm
+
+          Repeater {
+            model: root.toolChips
+
+            Rectangle {
+              id: toolChip
+              required property var modelData
+              width: toolChipRow.implicitWidth + Style.space(18)
+              height: Style.space(24)
+              radius: Style.cornerRadius
+              color: Util.alpha(toolChip.modelData.colour, 0.13)
+
+              Row {
+                id: toolChipRow
+                anchors.centerIn: parent
+                spacing: Style.spacing.sm
+
+                AgentMark {
+                  anchors.verticalCenter: parent.verticalCenter
+                  agent: toolChip.modelData.tool
+                  size: Style.space(12)
+                  color: toolChip.modelData.colour
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: toolChip.modelData.label
+                  color: root.readable
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: toolChip.modelData.count
+                  color: root.soft
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: toolChip.modelData.tokens
+                  color: root.fg
+                  font.family: root.face
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+            }
+          }
         }
 
         // One strip at a time, in order of who most needs answering.
@@ -1601,29 +2514,62 @@ Panel {
           active: strip.message !== ""
           visible: active
 
+          // Three tones, because three different things get said here and they
+          // are not equally good news. A refused copy used to arrive in the same
+          // accent as a successful one.
+          readonly property color tint: root.scanError !== "" ? Color.urgent
+            : (root.toast === "" ? root.fg
+              : (root.toastTone === "error" ? Color.urgent : root.hue))
+
           sourceComponent: BorderSurface {
             implicitHeight: stripText.implicitHeight + Style.spacing.xxl * 2
             radius: Style.cornerRadius
-            color: root.scanError !== "" ? Util.alpha(Color.urgent, 0.10)
-              : (root.toast !== "" ? Util.alpha(root.hue, 0.10) : Util.alpha(root.fg, 0.05))
-            borderSpec: Border.flat(
-              root.scanError !== "" ? Util.alpha(Color.urgent, 0.35)
-                : (root.toast !== "" ? Util.alpha(root.hue, 0.30) : Util.alpha(root.fg, 0.18)),
+            color: Util.alpha(strip.tint, root.toast !== "" || root.scanError !== "" ? 0.12 : 0.05)
+            borderSpec: Border.flat(Util.alpha(strip.tint,
+              root.toast !== "" || root.scanError !== "" ? 0.34 : 0.18),
               Style.normalBorderWidth)
 
             Text {
               id: stripText
               anchors.left: parent.left
-              anchors.right: parent.right
+              anchors.right: dismiss.visible ? dismiss.left : parent.right
               anchors.verticalCenter: parent.verticalCenter
               anchors.leftMargin: Style.spacing.xxl
-              anchors.rightMargin: Style.spacing.xxl
+              anchors.rightMargin: Style.spacing.md
               textFormat: Text.PlainText
               text: strip.message
-              color: root.scanError !== "" ? Color.urgent : root.muted
+              color: root.scanError !== "" || root.toastTone === "error"
+                ? Color.urgent : root.strong
               font.family: root.face
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
+            }
+
+            // Only a finding can be put down. A scan error is the panel failing
+            // to do its one job and a toast disappears on its own; neither is
+            // yours to dismiss.
+            Rectangle {
+              id: dismiss
+              anchors.right: parent.right
+              anchors.rightMargin: Style.spacing.md
+              anchors.verticalCenter: parent.verticalCenter
+              visible: root.scanError === "" && root.toast === "" && root.findingLine !== ""
+              width: visible ? Style.space(20) : 0
+              height: Style.space(20)
+              radius: width / 2
+              color: dismissHover.hovered ? Util.alpha(root.fg, 0.16) : "transparent"
+
+              Text {
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "\u00d7"
+                color: dismissHover.hovered ? root.fg : root.soft
+                font.family: root.face
+                font.pixelSize: Style.font.body
+              }
+
+              HoverHandler { id: dismissHover; cursorShape: Qt.PointingHandCursor }
+              TapHandler { onTapped: root.dismissFinding() }
             }
           }
         }
@@ -1676,7 +2622,7 @@ Panel {
               return "Nothing found in ~/.claude/skills, ~/.config/opencode/skills, "
                 + "~/.codex/skills or ~/.agents/skills."
             }
-            color: root.muted
+            color: root.readable
             font.family: root.face
             font.pixelSize: Style.font.body
             wrapMode: Text.WordWrap
@@ -1690,7 +2636,7 @@ Panel {
             text: root.report && (root.report.items || []).length > 0 && !root.showBundled
               ? "Turn on “Show built-in skills” to count them."
               : "Install a skill, or run bin/agent-ext doctor to see what was read."
-            color: root.veryMuted
+            color: root.soft
             font.family: root.face
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
@@ -1715,6 +2661,12 @@ Panel {
               hasCursor: root.cursorActive && root.selectedIndex === rowHost.index
               onEntered: { root.cursorActive = true; root.selectedIndex = rowHost.index }
               onToggled: root.setCollapsed(rowHost.modelData.key, !rowHost.modelData.collapsed)
+              onStyleRequested: {
+                root.cursorActive = true
+                root.selectedIndex = rowHost.index
+                if (rowHost.modelData.category !== "")
+                  root.openStylePicker(rowHost.modelData.category)
+              }
             }
           }
 
@@ -1734,7 +2686,14 @@ Panel {
                 root.expandedKey = root.expandedKey === rowHost.modelData.key
                   ? "" : rowHost.modelData.key
               }
-              onCopyRequested: function (text) { root.copyText(text) }
+              onRevealRequested: function (path) { root.openInFiles(path) }
+              onCopyRequested: function (text) {
+                root.cursorActive = true
+                root.selectedIndex = rowHost.index
+                if (root.pickerOptions(rowHost.modelData.view).length > 0)
+                  root.openPicker(rowHost.modelData)
+                else root.copyText(text, rowHost.modelData.key)
+              }
             }
           }
         }
@@ -1750,25 +2709,309 @@ Panel {
         PanelSeparator { width: parent.width; foreground: root.fg }
 
         // The promise on screen switches with the mode, so it is always true.
-        Text {
+        // The copy tick sits in the corner beside it rather than on the row it
+        // came from, where it covered the two numbers the row exists to show.
+        Item {
           width: parent.width
-          horizontalAlignment: Text.AlignHCenter
-          textFormat: Text.PlainText
-          text: {
-            var typing = root.filterText !== ""
-            var parts = [typing ? "Backspace to erase" : "Type to search"]
-            parts.push("Enter to open")
-            parts.push((typing ? "^C" : "c") + " to copy")
-            parts.push((typing ? "^G" : "g") + " to regroup")
-            parts.push((typing ? "^R" : "r") + " to rescan")
-            parts.push(root.expandedKey !== "" || typing || root.attentionOnly
-              ? "Esc to go back" : "Esc to close")
-            return parts.join("  ·  ")
+          height: hintText.implicitHeight
+
+          Row {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.spacing.xs
+            visible: root.copiedKey !== ""
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: "\u2713"
+              color: root.hue
+              font.family: root.face
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: "copied"
+              color: root.hue
+              font.family: root.face
+              font.pixelSize: Style.font.caption
+            }
           }
-          color: root.veryMuted
-          font.family: root.face
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+
+          Text {
+            id: hintText
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            textFormat: Text.PlainText
+            text: {
+              var typing = root.filterText !== ""
+              var cur = root.currentRow()
+              var picks = cur && cur.rowType !== "header"
+                && root.pickerOptions(cur.view).length > 0
+              var parts = [typing ? "Backspace to erase" : "Type to search"]
+              parts.push("Enter to open")
+              // The promise changes with the row, because on a row that
+              // documents actions Ctrl+C does not copy: it asks which one.
+              parts.push(picks ? "^C to pick an action" : "^C to copy")
+              parts.push("^G to regroup")
+              parts.push("^R to rescan")
+              parts.push(root.expandedKey !== "" || typing || root.attentionOnly
+                || root.categoryFilter !== "" ? "Esc to go back" : "Esc to close")
+              return parts.join("  \u00b7  ")
+            }
+            color: root.soft
+            font.family: root.face
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+        }
+      }
+
+      // ---- The overlay ------------------------------------------------------
+      //
+      // One surface for the three questions a row can ask, because they are one
+      // gesture: a short list of possibilities, one of which you mean. Chips
+      // wrap into a grid the eye reads in a pass; the same options down a
+      // scrolling column would be three screens of one word each. What is about
+      // to happen is drawn above them at reading size and updates on every move,
+      // so "what does Enter do here" is answered on screen rather than assembled
+      // in the reader's head.
+      //
+      // No entrance animation. This opens from a keystroke, on a panel opened
+      // from a keystroke, and a keyboard action that waits for a curve to finish
+      // feels broken however good the curve is.
+      Item {
+        id: picker
+        anchors.fill: parent
+        visible: root.pickerOpen
+
+        readonly property bool styling: root.pickerMode === "style"
+        readonly property bool shelving: root.pickerMode === "category"
+
+        // Near-opaque, not a scrim. At 0.92 the list underneath read straight
+        // through the option chips and both layers became hard to read; the
+        // point of a picker is that there is one thing on screen to answer.
+        Rectangle {
+          anchors.fill: parent
+          color: Color.popups.background
+          // Swallows the click rather than passing it to the row underneath.
+          MouseArea { anchors.fill: parent; onClicked: root.closePicker() }
+        }
+
+        Column {
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.spacing.xl
+
+          // A way back that is a target, not a keystroke you have to know. The
+          // overlay has the room for it and the alternative was a footer line
+          // telling you to press Escape.
+          Row {
+            width: parent.width
+            spacing: Style.spacing.md
+
+            Rectangle {
+              id: backChip
+              anchors.verticalCenter: parent.verticalCenter
+              width: backText.implicitWidth + Style.space(18)
+              height: Style.space(22)
+              radius: height / 2
+              color: backHover.hovered ? Util.alpha(root.fg, 0.16) : Util.alpha(root.fg, 0.08)
+
+              Text {
+                id: backText
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "\u2190  back"
+                color: backHover.hovered ? root.fg : root.readable
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+              }
+
+              HoverHandler { id: backHover; cursorShape: Qt.PointingHandCursor }
+              TapHandler { onTapped: root.closePicker() }
+            }
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width - backChip.width - Style.spacing.md
+              textFormat: Text.PlainText
+              text: {
+                if (picker.styling) return "the " + root.pickerCategory + " shelf"
+                if (!root.pickerOpen || !root.pickerRow) return ""
+                var n = root.clean(root.pickerRow.view.name, 60)
+                return picker.shelving ? n + "  \u00b7  move to" : n + "  \u00b7  pick an action"
+              }
+              color: root.soft
+              font.family: root.face
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+          }
+
+          // What Enter does, at the size of the thing it is. Everything else on
+          // this overlay exists to change this one line.
+          BorderSurface {
+            width: parent.width
+            implicitHeight: commandText.implicitHeight + Style.spacing.xxl * 2
+            radius: Style.cornerRadius
+            color: Util.alpha(picker.styling ? root.pickerSwatch() : root.hue, 0.14)
+            borderSpec: Border.controlSpec("hover-cursor", root.fg, root.hue)
+
+            Row {
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.spacing.controlPaddingX
+              anchors.rightMargin: Style.spacing.controlPaddingX
+              spacing: Style.spacing.md
+
+              // The colour being applied, shown as itself rather than named.
+              Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: picker.styling
+                width: visible ? Style.space(14) : 0
+                height: Style.space(14)
+                radius: width / 2
+                color: root.pickerSwatch()
+              }
+
+              Text {
+                id: commandText
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - (picker.styling ? Style.space(14) + Style.spacing.md : 0)
+                textFormat: Text.PlainText
+                text: root.pickerCommand()
+                color: root.fg
+                font.family: root.face
+                font.pixelSize: Style.font.subtitle
+                elide: Text.ElideRight
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            visible: text !== ""
+            text: {
+              if (picker.styling) return "Type to rename it. Pick a colour, or clear it to go back to the theme."
+              if (picker.shelving) return "Type a name nothing answers to and it becomes a new shelf."
+              if (!root.pickerOpen || !root.pickerRow) return ""
+              var args = root.pickerRow.view.argumentChoices || []
+              for (var i = 0; i < args.length; i++)
+                if (args[i].kind === "value")
+                  return "Then type the " + args[i].label + " after pasting."
+              return ""
+            }
+            color: root.soft
+            font.family: root.face
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          // Bounded, and scrolling once it would not fit. Twenty-three short
+          // words wrap into three rows on this panel, but the count comes from
+          // somebody else's frontmatter and a skill documenting sixty actions
+          // must not push its own footer off the bottom of the screen.
+          Flickable {
+            width: parent.width
+            height: Math.min(optionFlow.implicitHeight, picker.height * 0.46)
+            contentHeight: optionFlow.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
+
+            Flow {
+              id: optionFlow
+              width: parent.width
+              spacing: Style.spacing.sm
+
+              // What Down and Up step by. Measured from the laid-out chips
+              // rather than assumed, so it stays right at any panel width or
+              // font scale.
+              readonly property int perRow: {
+                var n = 0
+                for (var i = 0; i < optionFlow.children.length; i++) {
+                  var c = optionFlow.children[i]
+                  if (c && c.visible && c.y === 0) n++
+                }
+                return Math.max(1, n)
+              }
+
+              Repeater {
+                model: root.pickerChips()
+
+                BorderSurface {
+                  id: chip
+                  required property var modelData
+                  required property int index
+
+                  readonly property bool current: root.pickerIndex === chip.index
+                  readonly property bool isSwatch: picker.styling
+                  readonly property bool isClear: String(chip.modelData) === "\u0000clear"
+                  readonly property bool isNew: String(chip.modelData) === "\u0000new"
+
+                  implicitWidth: chip.isSwatch && !chip.isClear
+                    ? Style.space(30) : chipText.implicitWidth + Style.space(22)
+                  implicitHeight: Style.space(28)
+                  radius: Style.cornerRadius
+                  color: {
+                    if (chip.isSwatch && !chip.isClear)
+                      return Util.alpha(String(chip.modelData), chip.current ? 1.0 : 0.72)
+                    if (chip.current) return Util.alpha(root.hue, 0.26)
+                    return Util.alpha(root.fg, 0.07)
+                  }
+                  borderSpec: Border.controlSpec(chip.current ? "hover-cursor" : "normal",
+                                                 root.fg, root.hue)
+
+                  Text {
+                    id: chipText
+                    anchors.centerIn: parent
+                    visible: !(chip.isSwatch && !chip.isClear)
+                    textFormat: Text.PlainText
+                    text: {
+                      if (chip.isClear) return "theme default"
+                      if (chip.isNew) return "+ new  \u201c" + root.newCategoryName() + "\u201d"
+                      if (picker.shelving) return root.categoryLabelFor(String(chip.modelData))
+                      return String(chip.modelData) === "" ? "no argument" : String(chip.modelData)
+                    }
+                    color: chip.current ? root.fg : root.readable
+                    font.family: root.face
+                    font.pixelSize: Style.font.bodySmall
+                    font.italic: String(chip.modelData) === "" || chip.isNew
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onEntered: root.pickerIndex = chip.index
+                    onClicked: { root.pickerIndex = chip.index; root.pickerConfirm() }
+                  }
+                }
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            textFormat: Text.PlainText
+            text: {
+              if (picker.styling) return "Type to rename  \u00b7  arrows for a colour  \u00b7  Enter to save  \u00b7  Esc to go back"
+              if (picker.shelving) return "Type to filter  \u00b7  arrows to choose  \u00b7  Enter to move it  \u00b7  Esc to go back"
+              return "Arrows or a letter to choose  \u00b7  Enter to copy  \u00b7  Esc to go back"
+            }
+            color: root.soft
+            font.family: root.face
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
         }
       }
     }

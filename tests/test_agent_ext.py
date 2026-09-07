@@ -3,6 +3,7 @@
 Run: python3 -m unittest discover -s tests -v
 """
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -261,3 +262,150 @@ class Redaction(unittest.TestCase):
     def test_a_benign_command_is_left_alone(self):
         cmd = "npx -y @modelcontextprotocol/server-filesystem /home/me"
         self.assertEqual(ax.redact(cmd), cmd)
+
+
+class ArgumentHint(unittest.TestCase):
+    IMPECCABLE = ("[craft|shape · audit|critique · animate|bolder|colorize|delight|"
+                  "layout|overdrive|quieter|typeset · adapt|clarify|distill · "
+                  "harden|onboard|optimize|polish · init|document|extract|live] [target]")
+
+    def test_impeccable_yields_every_action_it_documents(self):
+        args = ax.parse_argument_hint(self.IMPECCABLE)
+        self.assertEqual(args[0]["kind"], "choice")
+        # The plugin's own manifest says 23 commands; the hint has to agree.
+        self.assertEqual(len(args[0]["options"]), 23)
+        self.assertIn("typeset", args[0]["options"])
+        self.assertIn("polish", args[0]["options"])
+
+    def test_the_dot_separates_alternatives_as_much_as_the_bar(self):
+        args = ax.parse_argument_hint("[a|b · c]")
+        self.assertEqual(args[0]["options"], ["a", "b", "c"])
+
+    def test_trailing_placeholder_is_a_value_not_a_choice(self):
+        args = ax.parse_argument_hint(self.IMPECCABLE)
+        self.assertEqual(args[1], {"kind": "value", "label": "target"})
+
+    def test_a_hint_with_no_alternatives_offers_no_menu(self):
+        # "[filename] [format]" is two things to type, not a list to pick from.
+        self.assertEqual(ax.parse_argument_hint("[filename] [format]"), [])
+        self.assertEqual(ax.parse_argument_hint("[issue-number]"), [])
+
+    def test_unbracketed_alternatives_still_count(self):
+        self.assertEqual(ax.parse_argument_hint("add|remove|list")[0]["options"],
+                         ["add", "remove", "list"])
+
+    def test_prose_is_not_mistaken_for_options(self):
+        self.assertEqual(ax.parse_argument_hint("Describe what you want"), [])
+
+    def test_angle_brackets_read_the_same_as_square_ones(self):
+        self.assertEqual(ax.parse_argument_hint("<on|off|status>")[0]["options"],
+                         ["on", "off", "status"])
+
+    def test_wrong_types_and_empty_values_are_not_errors(self):
+        for bad in (None, 123, [], {}, "", "   ", True):
+            self.assertEqual(ax.parse_argument_hint(bad), [])
+
+    def test_duplicates_collapse_and_the_first_position_wins(self):
+        self.assertEqual(ax.parse_argument_hint("[a|a|b]")[0]["options"], ["a", "b"])
+
+    def test_a_hostile_hint_cannot_grow_without_bound(self):
+        huge = "[" + "|".join("opt%d" % i for i in range(500)) + "]"
+        args = ax.parse_argument_hint(huge)
+        self.assertLessEqual(len(args[0]["options"]), ax.MAX_ARG_OPTIONS)
+
+    def test_nothing_shaped_like_a_command_survives(self):
+        # Whatever is offered gets appended to an invocation and pasted into a
+        # prompt, so the guarantee is on the shape of every token: word
+        # characters, dots, dashes and underscores, nothing else. `rm -rf /`
+        # carries a space and a slash, `$(id)` and `a;b` carry metacharacters,
+        # and none of them survive. A backtick-quoted word does, stripped of its
+        # markdown, because that is what its author wrote it to mean.
+        args = ax.parse_argument_hint("[safe|rm -rf /|$(id)|a;b|`polish`|ok]")
+        self.assertEqual(args[0]["options"], ["safe", "polish", "ok"])
+        for token in args[0]["options"]:
+            self.assertRegex(token, r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+    def test_groups_are_capped(self):
+        many = " ".join("[a%d|b%d]" % (i, i) for i in range(40))
+        self.assertLessEqual(len(ax.parse_argument_hint(many)), ax.MAX_ARG_GROUPS)
+
+
+class CategoryStore(unittest.TestCase):
+    """The one thing this program writes, so the shape of what it will accept
+    matters more here than anywhere else in the file."""
+
+    def test_a_name_is_lower_case_words_and_dashes(self):
+        for good in ("ui", "video", "next-js", "seo2", "a" * 24):
+            self.assertRegex(good, ax.CATEGORY_NAME)
+        for bad in ("UI", "1st", "", "a" * 25, "with space", "semi;colon", "../etc"):
+            self.assertNotRegex(bad, ax.CATEGORY_NAME)
+
+    def test_a_colour_is_a_hex_triple_and_nothing_else(self):
+        self.assertRegex("#7AA2F7", ax.HEX_COLOR)
+        for bad in ("red", "#fff", "#7AA2F7X", "rgb(1,2,3)", "url(x)", ""):
+            self.assertNotRegex(bad, ax.HEX_COLOR)
+
+    def test_a_label_is_one_line(self):
+        self.assertRegex("UI", ax.CATEGORY_LABEL)
+        self.assertNotRegex("two\nlines", ax.CATEGORY_LABEL)
+        self.assertNotRegex("", ax.CATEGORY_LABEL)
+
+    def test_a_store_of_the_wrong_shape_reads_as_an_empty_one(self):
+        # read_store is handed whatever is on disk. Anything it cannot vouch for
+        # is dropped field by field rather than failing the whole scan.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "categories.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write('{"custom": ["ok", "BAD", 7], "assign": {"s": "ok", "t": "NO"},'
+                         ' "labels": {"ok": "Fine", "BAD": "x"},'
+                         ' "colors": {"ok": "#ABCDEF", "ok2": "red"}}')
+            saved = ax.STORE_PATH
+            try:
+                ax.STORE_PATH = path
+                store = ax.read_store()
+            finally:
+                ax.STORE_PATH = saved
+        self.assertEqual(store["custom"], ["ok"])
+        self.assertEqual(store["assign"], {"s": "ok"})
+        self.assertEqual(store["labels"], {"ok": "Fine"})
+        self.assertEqual(store["colors"], {"ok": "#ABCDEF"})
+
+    def test_a_missing_store_is_not_an_error(self):
+        saved = ax.STORE_PATH
+        try:
+            ax.STORE_PATH = "/nonexistent/agent-ext/categories.json"
+            store = ax.read_store()
+        finally:
+            ax.STORE_PATH = saved
+        self.assertEqual(store, {"custom": [], "assign": {}, "labels": {}, "colors": {}})
+
+    def test_custom_categories_are_appended_after_the_built_in_ones(self):
+        known = ax.known_categories({"custom": ["ui"]})
+        self.assertEqual(known[:len(ax.CATEGORIES)], list(ax.CATEGORIES))
+        self.assertEqual(known[-1], "ui")
+
+    def test_a_custom_category_gets_its_own_glyph(self):
+        # GLYPH covers the built-ins only, and a KeyError here would abort a scan.
+        self.assertEqual(ax.GLYPH.get("ui", ax.CUSTOM_GLYPH), ax.CUSTOM_GLYPH)
+        for cat in ax.CATEGORIES:
+            self.assertIn(cat, ax.GLYPH)
+
+    def test_a_write_replaces_the_file_whole(self):
+        with tempfile.TemporaryDirectory() as d:
+            saved_dir, saved_path = ax.STORE_DIR, ax.STORE_PATH
+            try:
+                ax.STORE_DIR = os.path.join(d, "agent-ext")
+                ax.STORE_PATH = os.path.join(ax.STORE_DIR, "categories.json")
+                ax.write_store({"custom": ["ui"], "assign": {"a": "ui"},
+                                "labels": {}, "colors": {}})
+                ax.write_store({"custom": [], "assign": {},
+                                "labels": {}, "colors": {}})
+                with open(ax.STORE_PATH, encoding="utf-8") as fh:
+                    written = json.load(fh)
+                leftovers = [n for n in os.listdir(ax.STORE_DIR) if ".tmp." in n]
+            finally:
+                ax.STORE_DIR, ax.STORE_PATH = saved_dir, saved_path
+        self.assertEqual(written["custom"], [])
+        self.assertEqual(written["assign"], {})
+        self.assertEqual(written["version"], 1)
+        self.assertEqual(leftovers, [])

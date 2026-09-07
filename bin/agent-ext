@@ -368,6 +368,94 @@ TAG_RULES = {
 }
 
 
+# ---------------------------------------------------------- category store
+#
+# The one file this program writes, and the only reason it writes anything.
+# Everything else about a skill belongs to whoever wrote it; which shelf you
+# keep it on belongs to you, and there is nowhere in Claude Code, OpenCode or
+# Codex to say so. So it is kept here, beside this plugin, in a file that names
+# only directories and categories:
+#
+#   {"version": 1, "custom": ["ui", "video"], "assign": {"nextjs": "ui"}}
+#
+# Deleting it restores every classifier guess and loses nothing else. No agent
+# configuration is touched to make a category, and none is touched to move a
+# skill between them.
+STORE_DIR = os.path.join(HOME, ".config", "agent-ext")
+STORE_PATH = os.path.join(STORE_DIR, "categories.json")
+
+# Categories of your own get one mark rather than a guessed one. It is filled
+# where the built-in glyphs are outlines, so a shelf you made reads as yours.
+CUSTOM_GLYPH = "\u25c6"
+
+# A category name reaches a group header, a JSON file and the classifier's own
+# vocabulary, so it is checked once, here, against a shape rather than cleaned.
+CATEGORY_NAME = re.compile(r"^[a-z][a-z0-9-]{0,23}$")
+# A colour reaches a QML `color` property, so it is matched rather than trusted:
+# only a six-digit hex triple, never a named colour or a function call.
+HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
+CATEGORY_LABEL = re.compile(r"^[^\x00-\x1f]{1,32}$")
+MAX_CUSTOM_CATEGORIES = 32
+MAX_ASSIGNMENTS = 2000
+
+
+def read_store() -> dict:
+    value, err = read_json(STORE_PATH)
+    if err or not isinstance(value, dict):
+        return {"custom": [], "assign": {}, "labels": {}, "colors": {}}
+    custom = [c for c in as_list(value.get("custom"))
+              if isinstance(c, str) and CATEGORY_NAME.match(c)][:MAX_CUSTOM_CATEGORIES]
+    assign = {}
+    for k, v in list(as_dict(value.get("assign")).items())[:MAX_ASSIGNMENTS]:
+        if isinstance(k, str) and isinstance(v, str) and CATEGORY_NAME.match(v):
+            assign[clip(k, 128)] = v
+    cap = MAX_CUSTOM_CATEGORIES + len(CATEGORIES)
+    labels = {}
+    for k, v in list(as_dict(value.get("labels")).items())[:cap]:
+        if isinstance(k, str) and CATEGORY_NAME.match(k) and isinstance(v, str):
+            labels[k] = clip(v, 32)
+    colors = {}
+    for k, v in list(as_dict(value.get("colors")).items())[:cap]:
+        if (isinstance(k, str) and CATEGORY_NAME.match(k)
+                and isinstance(v, str) and HEX_COLOR.match(v)):
+            colors[k] = v.upper()
+    return {"custom": custom, "assign": assign, "labels": labels, "colors": colors}
+
+
+def write_store(store: dict) -> None:
+    """Whole file, temp then rename, so a crash mid-write cannot leave a
+    half-written categories.json that the next scan refuses to parse."""
+    os.makedirs(STORE_DIR, mode=0o700, exist_ok=True)
+    payload = json.dumps({"version": 1,
+                          "custom": store.get("custom", []),
+                          "assign": store.get("assign", {}),
+                          "labels": store.get("labels", {}),
+                          "colors": store.get("colors", {})},
+                         indent=1, sort_keys=True) + "\n"
+    tmp = STORE_PATH + ".tmp.%d" % os.getpid()
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, STORE_PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def known_categories(store: dict) -> list:
+    out = list(CATEGORIES)
+    for c in store.get("custom", []):
+        if c not in out:
+            out.append(c)
+    return out
+
+
 def classify(name: str, description: str, path: str, official: str | None) -> dict:
     if official and official in OFFICIAL_MAP:
         return {"category": OFFICIAL_MAP[official], "confidence": "high", "classifier": "marketplace"}
@@ -431,6 +519,57 @@ def skill_roots() -> list[dict]:
     ]
 
 
+# A skill that takes arguments says so in `argument-hint`, the frontmatter field
+# Claude Code shows during autocomplete. It is prose for a human, not a grammar,
+# so this reads it the way a human does and never guesses past what it can see.
+#
+#   impeccable: "[shape \u00b7 audit|critique \u00b7 animate|bolder|...|typeset] [target]"
+#   others:     "[issue-number]" \u00b7 "[filename] [format]" \u00b7 "[pr-number] [priority]"
+#
+# Each bracketed run is one positional argument. Inside it `|` and the middle dot
+# both separate alternatives -- impeccable uses the dot to group related actions
+# and the bar within a group, but every token in there is a value the same
+# argument can take, which is what a picker needs. A run with one token is a
+# placeholder the user has to fill in, and is offered as a label rather than a
+# choice. Nothing here is executed and nothing is inferred: a hint that says
+# nothing yields no arguments and the row keeps its plain invocation.
+ARG_GROUP_RE = re.compile(r"[\[<]([^\]>]{1,400})[\]>]")
+ARG_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
+MAX_ARG_GROUPS = 6
+MAX_ARG_OPTIONS = 64
+
+
+def parse_argument_hint(hint) -> list:
+    if not isinstance(hint, str):
+        return []
+    text = hint.strip()
+    if not text:
+        return []
+
+    groups = ARG_GROUP_RE.findall(text)
+    if not groups:
+        # No brackets at all. A bare "add|remove|list" is still a usable choice;
+        # a bare sentence is not, and falls out below when nothing tokenises.
+        groups = [text]
+
+    out = []
+    for raw in groups[:MAX_ARG_GROUPS]:
+        tokens = []
+        for piece in re.split(r"[|\u00b7,]", raw):
+            piece = piece.strip().strip("*`\"'")
+            if ARG_TOKEN_RE.match(piece) and piece not in tokens:
+                tokens.append(piece)
+            if len(tokens) >= MAX_ARG_OPTIONS:
+                break
+        if len(tokens) > 1:
+            out.append({"kind": "choice", "options": tokens})
+        elif len(tokens) == 1:
+            out.append({"kind": "value", "label": tokens[0]})
+    # A hint made only of placeholders tells the user to type something and gives
+    # a picker nothing to pick, so it is reported but never offered as a menu.
+    return out if any(a["kind"] == "choice" for a in out) else []
+
+
 def token_estimate(name: str, description: str, when_to_use: str, divisor: int = 4) -> int:
     joined = " ".join(x for x in (name, description, when_to_use) if x)
     # math.floor(x + 0.5), not round(): Python rounds halves to even, JavaScript
@@ -458,6 +597,7 @@ def scan(divisor: int = 4) -> dict:
     usage = as_dict(as_dict(claude_state).get("skillUsage"))
 
     catalog_cat = _catalog_categories()
+    store = read_store()
 
     for root in skill_roots():
         base = root["path"]
@@ -485,10 +625,10 @@ def scan(divisor: int = 4) -> dict:
                 for sub in sorted(os.scandir(entry.path), key=lambda e: e.name):
                     if sub.is_dir(follow_symlinks=True):
                         _ingest(by_real, sub.path, base, root, overrides, usage,
-                                catalog_cat, divisor, findings, bundled=True)
+                                catalog_cat, store, divisor, findings, bundled=True)
                 continue
             _ingest(by_real, entry.path, base, root, overrides, usage,
-                    catalog_cat, divisor, findings)
+                    catalog_cat, store, divisor, findings)
 
     items = list(by_real.values())
     _mark_drift(items)
@@ -502,10 +642,19 @@ def scan(divisor: int = 4) -> dict:
         "plugins": scan_claude_plugins(findings),
         "findings": findings,
         "counts": _counts(items),
+        # What the panel needs to draw a group header: the order categories are
+        # listed in, whichever of them you renamed or recoloured, and which are
+        # yours rather than built in.
+        "categories": {
+            "order": known_categories(store),
+            "custom": store["custom"],
+            "labels": store["labels"],
+            "colors": store["colors"],
+        },
     }
 
 
-def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat,
+def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
             divisor, findings, bundled=False):
     skill_md = os.path.join(dir_path, "SKILL.md")
     real = os.path.realpath(dir_path)
@@ -559,6 +708,12 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat,
     if meta.get("agent-ext.category") in CATEGORIES:
         tax = {"category": meta["agent-ext.category"], "confidence": "authored",
                "classifier": "frontmatter"}
+    # Above the author's own frontmatter, because it is the reader's shelf. The
+    # frontmatter says what the skill is; this says where you keep it, and the
+    # two are allowed to disagree.
+    shelved = store["assign"].get(dir_name) or store["assign"].get(display)
+    if shelved:
+        tax = {"category": shelved, "confidence": "authored", "classifier": "you"}
     if tax["confidence"] == "unclassified":
         attention.append("unclassified")
     elif tax["confidence"] == "low":
@@ -576,19 +731,21 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat,
         "description": clip(description, 1024),
         "scope": "bundled" if bundled else root["scope"],
         "linkage": "symlink" if is_link else "real",
-        "mounts": [{"tool": t, "path": mount_path, "link": "symlink" if is_link else "real"}
+        "mounts": [{"tool": t, "path": mount_path, "abs": dir_path,
+                    "link": "symlink" if is_link else "real"}
                    for t in root["tools"]],
         "tools": list(root["tools"]),
         "state": _skill_state(dir_name, root["tools"], overrides, bundled),
         "invocation": {"claude": f"/{dir_name}", "opencode": f"/{display}", "codex": f"${display}"},
-        "argumentHint": fm.get("argument-hint"),
+        "argumentHint": clip(str(fm.get("argument-hint") or ""), 400) or None,
+        "argumentChoices": parse_argument_hint(fm.get("argument-hint")),
         "tokens": {"alwaysOn": token_estimate(dir_name, description, when_to_use, divisor),
                    "method": f"chars/{divisor}"},
         "usage": {"count": u.get("usageCount", 0), "lastUsedAt": last,
                   "daysSinceUse": (int((time.time() * 1000 - last) / 86400000) if last else None),
                   "source": "claude.json" if u else "not tracked"},
         "taxonomy": {**tax, "tags": tags_for(display, description),
-                     "glyph": GLYPH[tax["category"]]},
+                     "glyph": GLYPH.get(tax["category"], CUSTOM_GLYPH)},
         "origin": {"type": "none", "url": None, "confidence": "unknown"},
         "update": {"state": "unknown"},
         "attention": attention,
@@ -749,6 +906,119 @@ def _counts(items: list[dict]) -> dict:
 
 # -------------------------------------------------------------------- main
 
+def category_command(args) -> int:
+    """Every path here either makes the one change it was asked for and says so,
+    or changes nothing and says why. There is no partial outcome: the store is
+    read, edited in memory, validated, and written whole."""
+    store = read_store()
+
+    if args.action == "list":
+        sys.stdout.write(json.dumps({"custom": store["custom"], "assign": store["assign"],
+                                     "labels": store["labels"], "colors": store["colors"],
+                                     "path": STORE_PATH, "known": known_categories(store)},
+                                    ensure_ascii=False) + "\n")
+        return 0
+
+    if args.action == "unassign":
+        skill = clip(args.skill, 128)
+        if skill not in store["assign"]:
+            warn(f"{skill} was not assigned to anything")
+            return 0
+        del store["assign"][skill]
+        write_store(store)
+        print(f"{skill} goes back to the classifier")
+        return 0
+
+    if args.action == "create":
+        name = args.name.strip().lower()
+        if not CATEGORY_NAME.match(name):
+            warn("a category name is lower case letters, digits and dashes, up to 24")
+            return 2
+        if name in CATEGORIES:
+            warn(f"{name} is already one of the built-in categories")
+            return 2
+        if name not in store["custom"]:
+            if len(store["custom"]) >= MAX_CUSTOM_CATEGORIES:
+                warn(f"there is room for {MAX_CUSTOM_CATEGORIES} categories of your own")
+                return 2
+            store["custom"].append(name)
+        if not _apply_style(store, name, args.label, args.color):
+            return 2
+        write_store(store)
+        print(f"{name} created")
+        return 0
+
+    if args.action == "style":
+        name = args.name.strip().lower()
+        if name not in known_categories(store):
+            warn(f"{name} is not a category; create it first")
+            return 2
+        if args.reset:
+            store["labels"].pop(name, None)
+            store["colors"].pop(name, None)
+            write_store(store)
+            print(f"{name} back to its defaults")
+            return 0
+        if args.label is None and args.color is None:
+            warn("nothing to change: pass --label, --color or --reset")
+            return 1
+        if not _apply_style(store, name, args.label, args.color):
+            return 2
+        write_store(store)
+        print(f"{name} restyled")
+        return 0
+
+    # assign
+    skill = clip(args.skill, 128)
+    name = args.category.strip().lower()
+    if not skill:
+        warn("no skill named")
+        return 1
+    if not CATEGORY_NAME.match(name):
+        warn("a category name is lower case letters, digits and dashes, up to 24")
+        return 2
+    if name not in known_categories(store):
+        if not args.create:
+            warn(f"{name} is not a category; pass --create to make it one")
+            return 2
+        if len(store["custom"]) >= MAX_CUSTOM_CATEGORIES:
+            warn(f"there is room for {MAX_CUSTOM_CATEGORIES} categories of your own")
+            return 2
+        store["custom"].append(name)
+    if len(store["assign"]) >= MAX_ASSIGNMENTS and skill not in store["assign"]:
+        warn(f"there is room for {MAX_ASSIGNMENTS} assignments")
+        return 2
+    store["assign"][skill] = name
+    write_store(store)
+    print(f"{skill} filed under {name}")
+    return 0
+
+
+def _apply_style(store: dict, name: str, label, color) -> bool:
+    """Both fields or neither. A half-applied restyle would leave the store
+    saying one thing and the screen another, and the caller has no way to tell
+    which half landed."""
+    if label is not None:
+        label = label.strip()
+        if label == "":
+            store["labels"].pop(name, None)
+        elif CATEGORY_LABEL.match(label):
+            store["labels"][name] = clip(label, 32)
+        else:
+            warn("a label is one line, up to 32 characters")
+            return False
+    if color is not None:
+        color = color.strip()
+        if color == "":
+            store["colors"].pop(name, None)
+        elif HEX_COLOR.match(color):
+            store["colors"][name] = color.upper()
+        else:
+            warn("a colour is #RRGGBB")
+            return False
+    return True
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="agent-ext", description=__doc__.split("\n")[0])
     ap.add_argument("--version", action="version", version=VERSION)
@@ -761,7 +1031,39 @@ def main(argv: list[str]) -> int:
 
     sub.add_parser("doctor", help="human-readable health report on stdout")
 
+    # The write side. Four verbs, each one a single named change to one file
+    # under ~/.config/agent-ext, and every one of them runnable by hand. Nothing
+    # here reads or writes anything belonging to Claude Code, OpenCode or Codex.
+    p_cat = sub.add_parser("category", help="shelve skills without touching their files")
+    cat_sub = p_cat.add_subparsers(dest="action", required=True)
+
+    p_assign = cat_sub.add_parser("assign", help="move one skill into a category")
+    p_assign.add_argument("skill", help="the skill's directory name")
+    p_assign.add_argument("category", help="an existing category, or a new one with --create")
+    p_assign.add_argument("--create", action="store_true",
+                          help="create the category first if it does not exist")
+
+    p_unassign = cat_sub.add_parser("unassign", help="give a skill back to the classifier")
+    p_unassign.add_argument("skill")
+
+    p_create = cat_sub.add_parser("create", help="add a category of your own")
+    p_create.add_argument("name", help="lower case, digits and dashes, 24 characters")
+    p_create.add_argument("--label", default=None, help="how it reads in a group header")
+    p_create.add_argument("--color", default=None, help="#RRGGBB")
+
+    p_style = cat_sub.add_parser("style", help="rename or recolour any category")
+    p_style.add_argument("name")
+    p_style.add_argument("--label", default=None)
+    p_style.add_argument("--color", default=None)
+    p_style.add_argument("--reset", action="store_true",
+                         help="drop the label and colour and go back to the defaults")
+
+    cat_sub.add_parser("list", help="print the store as JSON")
+
     args = ap.parse_args(argv)
+
+    if args.cmd == "category":
+        return category_command(args)
 
     if args.cmd == "scan":
         result = scan(divisor=args.divisor)
