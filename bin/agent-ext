@@ -736,6 +736,7 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
     fm = parse_frontmatter(text)
     dir_name = os.path.basename(dir_path)
     display = str(fm.get("name") or dir_name)
+    declared = clip(str(fm.get("version") or ""), 32)
     description = str(fm.get("description") or "").replace("\n", " ").strip()
     when_to_use = str(fm.get("when_to_use") or "").replace("\n", " ").strip()
 
@@ -778,6 +779,7 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
         "kind": "skill",
         "displayName": clip(display, 128),
         "dirName": clip(dir_name, 128),
+        "declaredVersion": declared or None,
         "description": clip(description, 1024),
         "scope": "bundled" if bundled else root["scope"],
         "linkage": "symlink" if is_link else "real",
@@ -811,12 +813,28 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
 
 
 def _mark_drift(items: list[dict]) -> None:
-    """Flag skills that share a name but not their content.
+    """Tell two copies of one name apart, and only alarm about the bad case.
 
-    Deduplicating on realpath alone reports these as unrelated; on name alone, as
-    identical. Both are wrong, and "same name, different content, both loaded" is
-    a real state on this machine: ~/.claude/skills/omarchy is a copy that has
-    drifted from the /usr/share original the other tools read.
+    Deduplicating on realpath alone reports two copies as unrelated; on name
+    alone, as identical. Both are wrong, and "same name, different content, both
+    loaded" is a real state on this machine: ~/.claude/skills/omarchy is a copy
+    that has drifted from the /usr/share original the other tools read.
+
+    But differing content is not on its own a fault, and treating it as one made
+    the panel cry wolf about the most careful thing in the inventory. Impeccable
+    ships one release compiled per harness on purpose -- its own site says so,
+    and the Codex build carries anti-pattern rules aimed at Codex's habits that
+    the Claude build does not want. Two of those builds sat side by side, both
+    declaring 4.1.1, thirty-four files apart, and got the same red flag as a
+    genuinely stale copy. Merging them, which is what the flag invites, would
+    have thrown away the tuning that is the point of shipping them separately.
+
+    So the version decides. Same declared version means one release built two
+    ways: recorded as `variantPeers`, no attention code, nothing red. A different
+    version means one copy is behind, which is `drift` and always was. A version
+    missing on either side leaves nothing to compare, so content stands in for it
+    and the old behaviour holds -- most hand-written skills declare no version,
+    and for those a content difference really is the only signal there is.
     """
     by_name: dict[str, list[dict]] = {}
     for it in items:
@@ -826,10 +844,16 @@ def _mark_drift(items: list[dict]) -> None:
             continue
         if len({it["contentHash"] for it in group}) == 1:
             continue
+        versions = {it.get("declaredVersion") for it in group}
+        same_release = len(versions) == 1 and None not in versions
         for it in group:
+            peers = [p["realPath"] for p in group if p is not it]
+            if same_release:
+                it["variantPeers"] = peers
+                continue
             if "drift" not in it["attention"]:
                 it["attention"].append("drift")
-            it["driftPeers"] = [p["realPath"] for p in group if p is not it]
+            it["driftPeers"] = peers
 
 
 def _skill_state(dir_name, tools, overrides, bundled):

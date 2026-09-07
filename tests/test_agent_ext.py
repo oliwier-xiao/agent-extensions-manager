@@ -499,3 +499,54 @@ class PluginSkillRoots(unittest.TestCase):
     def test_a_malformed_plugins_file_is_not_an_error(self):
         self.assertEqual(self.roots("{not json"), [])
         self.assertEqual(self.roots("[]"), [])
+
+
+class DriftVersusVariant(unittest.TestCase):
+    """Two copies of one name are not automatically a fault. Impeccable ships one
+    release compiled per harness on purpose, so the declared version decides."""
+
+    def rec(self, name, digest, version=None, attention=None):
+        return {"dirName": name, "contentHash": digest, "realPath": "/p/" + digest,
+                "declaredVersion": version, "attention": list(attention or [])}
+
+    def test_same_version_different_build_is_not_drift(self):
+        items = [self.rec("impeccable", "a", "4.1.1"), self.rec("impeccable", "b", "4.1.1")]
+        ax._mark_drift(items)
+        for it in items:
+            self.assertNotIn("drift", it["attention"])
+            self.assertIn("variantPeers", it)
+            self.assertNotIn("driftPeers", it)
+
+    def test_a_different_version_is_drift(self):
+        items = [self.rec("impeccable", "a", "4.1.1"), self.rec("impeccable", "b", "4.0.4")]
+        ax._mark_drift(items)
+        for it in items:
+            self.assertIn("drift", it["attention"])
+            self.assertIn("driftPeers", it)
+
+    def test_no_declared_version_falls_back_to_content(self):
+        # Most hand-written skills declare no version, and for those a content
+        # difference is the only signal there is. omarchy is the live case.
+        items = [self.rec("omarchy", "a"), self.rec("omarchy", "b")]
+        ax._mark_drift(items)
+        for it in items:
+            self.assertIn("drift", it["attention"])
+
+    def test_one_side_missing_a_version_is_still_drift(self):
+        items = [self.rec("x", "a", "1.0"), self.rec("x", "b", None)]
+        ax._mark_drift(items)
+        for it in items:
+            self.assertIn("drift", it["attention"])
+
+    def test_identical_content_is_neither(self):
+        items = [self.rec("x", "same", "1.0"), self.rec("x", "same", "1.0")]
+        ax._mark_drift(items)
+        for it in items:
+            self.assertEqual(it["attention"], [])
+            self.assertNotIn("variantPeers", it)
+            self.assertNotIn("driftPeers", it)
+
+    def test_a_lone_copy_is_left_alone(self):
+        items = [self.rec("x", "a", "1.0")]
+        ax._mark_drift(items)
+        self.assertEqual(items[0]["attention"], [])

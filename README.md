@@ -20,7 +20,15 @@ Three of these are true on the machine this was written on, and no other tool re
 and as a symlink to `/usr/share/omarchy` under `~/.codex/skills`. The two files are not the same. Claude
 Code and OpenCode read one, Codex reads the other, and nothing says so. Deduplicating on path alone calls
 them unrelated; on name alone, identical. Both are wrong, so the list deduplicates on the resolved path and
-then compares content hashes, and marks the pair as drifted.
+then compares content hashes.
+
+Differing content is not on its own a fault, so the declared version decides which it is. Impeccable ships
+one release compiled per harness on purpose -- the build for each agent carries anti-pattern rules aimed at
+that model's habits -- and two of those sitting side by side, both declaring 4.1.1 and thirty-four files
+apart, is the careful thing to do rather than a mistake. That is reported quietly, as "also built for
+another agent". A copy declaring a different version is behind, which is drift and is flagged. When neither
+declares a version, as with `omarchy`, content is the only signal there is and a difference is treated as
+drift.
 
 **One skill, three agents, five mount points.** `diagnose-crash` is a single `SKILL.md` reachable from
 `~/.claude/skills`, `~/.codex/skills` and `~/.agents/skills`. It is one row carrying three agent marks, not

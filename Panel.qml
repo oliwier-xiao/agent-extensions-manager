@@ -590,12 +590,19 @@ Panel {
                     abs: root.clean(src[m].abs, 400),
                     link: root.clean(src[m].link, 16) })
 
-    // driftPeers is attached after the record is built and only on a drift
-    // group, so it has to be probed rather than assumed.
+    // Both of these are attached after the record is built and only on a group
+    // that has more than one copy, so they have to be probed rather than assumed.
+    // `driftPeers` is the fault -- one copy is behind. `variantPeers` is the same
+    // release built once per harness, which is deliberate and gets said quietly.
     var peers = []
     if (Array.isArray(item.driftPeers))
       for (var p = 0; p < item.driftPeers.length && p < 6; p++)
         peers.push(root.clean(item.driftPeers[p], 160))
+
+    var variants = []
+    if (Array.isArray(item.variantPeers))
+      for (var vp = 0; vp < item.variantPeers.length && vp < 6; vp++)
+        variants.push(root.clean(item.variantPeers[vp], 160))
 
     // The helper has already reduced `argument-hint` to tokens it will vouch
     // for; this re-checks the shape of every one of them before any of it can
@@ -660,6 +667,8 @@ Panel {
       switches: switches,
       mounts: mounts,
       peers: peers,
+      variants: variants,
+      declaredVersion: root.clean(item.declaredVersion, 32),
       invocations: invocations,
       argumentChoices: args,
       argumentHint: root.clean(item.argumentHint, 200),
@@ -2265,6 +2274,32 @@ Panel {
               textFormat: Text.PlainText
               text: "drifted from  " + modelData
               color: Color.urgent
+              font.family: root.face
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideMiddle
+            }
+          }
+        }
+
+        // Said, not warned about. Two copies of one release, each compiled for
+        // the agent that reads it, is the careful thing to do rather than a
+        // mistake -- but it is still worth knowing that the file the other agent
+        // loads is not this one.
+        Column {
+          width: parent.width
+          spacing: Style.spacing.xs
+          visible: er.view.variants.length > 0
+
+          Repeater {
+            model: er.view.variants
+            delegate: Text {
+              required property string modelData
+              width: parent.width
+              textFormat: Text.PlainText
+              text: (er.view.declaredVersion !== ""
+                ? "also built for another agent, same " + er.view.declaredVersion + "  "
+                : "also built for another agent  ") + modelData
+              color: root.soft
               font.family: root.face
               font.pixelSize: Style.font.caption
               elide: Text.ElideMiddle
