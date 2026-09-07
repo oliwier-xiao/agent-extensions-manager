@@ -2675,6 +2675,7 @@ Panel {
         // can drift, and the one thing this row must never do is disagree with
         // the mark it is standing under.
         Item {
+          id: titleBar
           width: parent.width
           height: titleRow.implicitHeight
 
@@ -2713,49 +2714,101 @@ Panel {
           // filtered away, had nowhere to happen. It sits opposite the title
           // because that is the corner nothing else uses and because it is about
           // the panel rather than about any row in it.
-          Rectangle {
-            id: editButton
+          //
+          // It is also the way back out of every overlay. The overlay used to
+          // carry a small chip of its own, three lines down and half the size,
+          // while this corner sat empty behind a scrim -- two backs in two
+          // places, and the bigger, steadier one was the one that did nothing.
+          // Now there is one, and it keeps this corner in every state, because a
+          // control that changes both what it says and where it is is two
+          // changes to follow rather than one.
+          //
+          // Save stands beside it rather than under it. The two of them used to
+          // be a title-sized button with a caption-sized pill tucked below its
+          // left edge -- same corner, different height, different radius, no
+          // alignment between them -- and the smaller, quieter one was the only
+          // one that committed anything. They are one group now: one row, one
+          // height, one radius, and the accent belongs to the button that saves.
+          Row {
+            id: titleActions
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            width: editRow.implicitWidth + Style.space(20)
-            height: Style.space(26)
-            radius: Style.cornerRadius
-            color: root.pickerMode === "shelves" ? Util.alpha(root.hue, 0.26)
-              : (editHover.hovered ? Util.alpha(root.fg, 0.16) : Util.alpha(root.fg, 0.07))
+            // Tight enough to read as one control group rather than two things
+            // that happen to share a corner.
+            spacing: Style.spacing.sm
 
-            Row {
-              id: editRow
-              anchors.centerIn: parent
-              spacing: Style.spacing.sm
-
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                // nf-md-pencil (U+F03EB), as its surrogate pair for the same
-                // reason the bar mark is: a private-use codepoint pasted in is a
-                // box in every editor without the font.
-                text: "\uDB80\uDFEB"
-                color: editHover.hovered || root.pickerMode === "shelves"
-                  ? root.fg : root.readable
-                font.family: root.face
-                font.pixelSize: Style.font.subtitle
-              }
+            // Saving is a decision, so it is a button and not a keystroke you
+            // have to know about. It says "Save" in both states rather than
+            // flipping to "Saved" when there is nothing to do: styleSave() backs
+            // out of the editor the moment it writes, so "Saved" was a word you
+            // could only ever read before you had saved anything. Dimmed is the
+            // honest way to say the draft matches the shelf.
+            Rectangle {
+              id: saveButton
+              visible: root.pickerMode === "style" && !root.styleAsking
+              width: visible ? saveText.implicitWidth + Style.space(20) : 0
+              height: Style.space(26)
+              radius: Style.cornerRadius
+              color: root.styleDirty
+                ? (saveHover.hovered ? Util.alpha(root.hue, 0.46) : Util.alpha(root.hue, 0.30))
+                : Util.alpha(root.fg, 0.07)
 
               Text {
-                anchors.verticalCenter: parent.verticalCenter
+                id: saveText
+                anchors.centerIn: parent
                 textFormat: Text.PlainText
-                text: "Edit"
-                color: editHover.hovered || root.pickerMode === "shelves"
-                  ? root.fg : root.readable
+                text: "Save"
+                color: root.styleDirty ? root.fg : root.soft
                 font.family: root.face
                 font.pixelSize: Style.font.title
               }
+
+              HoverHandler {
+                id: saveHover
+                enabled: root.styleDirty
+                cursorShape: Qt.PointingHandCursor
+              }
+              TapHandler { onTapped: if (root.styleDirty) root.styleSave() }
             }
 
-            HoverHandler { id: editHover; cursorShape: Qt.PointingHandCursor }
-            TapHandler {
-              onTapped: root.pickerMode === "shelves" ? root.closePicker()
-                                                      : root.openShelvesPicker()
+            Rectangle {
+              id: editButton
+              width: editRow.implicitWidth + Style.space(20)
+              height: Style.space(26)
+              radius: Style.cornerRadius
+              color: editHover.hovered ? Util.alpha(root.fg, 0.16) : Util.alpha(root.fg, 0.07)
+
+              Row {
+                id: editRow
+                anchors.centerIn: parent
+                spacing: Style.spacing.sm
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  // nf-md-pencil (U+F03EB), as its surrogate pair for the same
+                  // reason the bar mark is: a private-use codepoint pasted in is a
+                  // box in every editor without the font.
+                  text: root.pickerOpen ? "\u2190" : "\uDB80\uDFEB"
+                  color: editHover.hovered || root.pickerOpen ? root.fg : root.readable
+                  font.family: root.face
+                  font.pixelSize: Style.font.subtitle
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: root.pickerOpen ? "Back" : "Edit"
+                  color: editHover.hovered || root.pickerOpen ? root.fg : root.readable
+                  font.family: root.face
+                  font.pixelSize: Style.font.title
+                }
+              }
+
+              HoverHandler { id: editHover; cursorShape: Qt.PointingHandCursor }
+              TapHandler {
+                onTapped: root.pickerOpen ? root.pickerBack() : root.openShelvesPicker()
+              }
             }
           }
         }
@@ -3497,7 +3550,21 @@ Panel {
       // feels broken however good the curve is.
       Item {
         id: picker
-        anchors.fill: parent
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        // Under the title, not over it. Covering the whole surface left the top
+        // of the panel empty for as long as an overlay was up: the one line that
+        // says which panel this is went away exactly when the panel had stopped
+        // looking like itself. The title row is the one thing here that is true
+        // in every state, so it is the one thing the scrim does not take.
+        //
+        // titleBar sits inside the header Column, which is not this item's
+        // sibling, so its height is read as a number rather than anchored to.
+        // The header is pinned to the top, and the title is its first row, so
+        // the two are the same edge.
+        anchors.top: header.top
+        anchors.topMargin: titleBar.height
         visible: root.pickerOpen
 
         readonly property bool styling: root.pickerMode === "style"
@@ -3524,10 +3591,16 @@ Panel {
         // through to the scrim underneath and dismisses the whole overlay,
         // because a bare Rectangle or Text does not accept mouse events and Qt
         // delivers them to the topmost item that does.
+        // Down from the top, on the same line the search field starts on, so
+        // the top edge of the panel is the same shape whichever of these is up.
+        // Centred, the first thing to read sat a third of the way down behind a
+        // band of nothing, and the panel looked emptier the moment it had asked
+        // you a question.
         Item {
           anchors.left: parent.left
           anchors.right: parent.right
-          anchors.verticalCenter: parent.verticalCenter
+          anchors.top: parent.top
+          anchors.topMargin: Style.spacing.lg
           height: cardColumn.implicitHeight
 
           MouseArea { anchors.fill: parent }
@@ -3536,47 +3609,21 @@ Panel {
           id: cardColumn
           anchors.left: parent.left
           anchors.right: parent.right
-          anchors.verticalCenter: parent.verticalCenter
+          anchors.top: parent.top
           spacing: Style.spacing.xl
 
-          // A way back that is a target, not a keystroke you have to know. The
-          // overlay has the room for it and the alternative was a footer line
-          // telling you to press Escape.
+          // Which question this is. The way back out of it is the button in the
+          // panel's title row, which is on screen for exactly as long as this
+          // overlay is; a second one here would be the same word twice, and the
+          // smaller of the two.
           Item {
             width: parent.width
-            height: backChip.height
-
-            Row {
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.spacing.md
-
-            Rectangle {
-              id: backChip
-              anchors.verticalCenter: parent.verticalCenter
-              width: backText.implicitWidth + Style.space(18)
-              height: Style.space(22)
-              radius: height / 2
-              color: backHover.hovered ? Util.alpha(root.fg, 0.16) : Util.alpha(root.fg, 0.08)
-
-              Text {
-                id: backText
-                anchors.centerIn: parent
-                textFormat: Text.PlainText
-                text: "\u2190  back"
-                color: backHover.hovered ? root.fg : root.readable
-                font.family: root.face
-                font.pixelSize: Style.font.caption
-              }
-
-              HoverHandler { id: backHover; cursorShape: Qt.PointingHandCursor }
-              TapHandler { onTapped: root.pickerBack() }
-            }
+            height: Style.space(22)
 
             Text {
+              anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
-              width: Math.max(0, picker.width - backChip.width
-                                 - saveButton.width - Style.spacing.md * 3)
+              width: picker.width
               textFormat: Text.PlainText
               text: {
                 if (root.styleAsking) return "unsaved changes"
@@ -3592,41 +3639,7 @@ Panel {
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
             }
-            }
 
-            // Save is a button because saving is a decision. It shows only where
-            // there is a draft to save, and it says whether there is anything in
-            // it: dimmed when the shelf is exactly as you found it, lit the
-            // moment you change a letter or try a colour on.
-            Rectangle {
-              id: saveButton
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              visible: picker.styling && !root.styleAsking
-              width: visible ? saveText.implicitWidth + Style.space(20) : 0
-              height: Style.space(22)
-              radius: height / 2
-              color: root.styleDirty
-                ? (saveHover.hovered ? Util.alpha(root.hue, 0.42) : Util.alpha(root.hue, 0.28))
-                : Util.alpha(root.fg, 0.07)
-
-              Text {
-                id: saveText
-                anchors.centerIn: parent
-                textFormat: Text.PlainText
-                text: root.styleDirty ? "Save" : "Saved"
-                color: root.styleDirty ? root.fg : root.soft
-                font.family: root.face
-                font.pixelSize: Style.font.caption
-              }
-
-              HoverHandler {
-                id: saveHover
-                enabled: root.styleDirty
-                cursorShape: Qt.PointingHandCursor
-              }
-              TapHandler { onTapped: if (root.styleDirty) root.styleSave() }
-            }
           }
 
           // What Enter does, at the size of the thing it is. Everything else on
