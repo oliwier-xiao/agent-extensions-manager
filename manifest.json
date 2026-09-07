@@ -16,7 +16,7 @@
   },
   "barWidget": {
     "displayName": "Agent Skills Manager",
-    "description": "Browse, search and switch the skills, plugins and MCP servers behind Claude Code, OpenCode and Codex.",
+    "description": "Every skill, plugin and MCP server behind Claude Code, OpenCode and Codex, with what each one costs you in tokens on every turn.",
     "category": "AI",
     "aliases": [
       "skills",
