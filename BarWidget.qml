@@ -4,7 +4,7 @@ import qs.Commons
 import qs.Ui
 
 // The bar slot: one glyph, an optional figure, and the way in. Panel.qml draws
-// the list and owns the only subprocess in the plugin; bin/agent-ext does every
+// the list and owns the only subprocess in the plugin; bin/agent-skills does every
 // byte of the I/O.
 //
 // Startup cost is nil, deliberately. The panel Loader starts inactive, so
@@ -261,8 +261,12 @@ BarWidget {
   implicitHeight: button.implicitHeight
 
   // Underline what this widget paints rather than 55% of whatever slot it lands
-  // in, which is what the bar assumes when a widget says nothing.
-  readonly property real openPanelIndicatorWidth: row.implicitWidth
+  // in, which is what the bar assumes when a widget says nothing. Worth saying
+  // only when there is a figure beside the mark: icon-only, the row is the whole
+  // slot, so the hint would draw a mark nearly twice the length of every
+  // neighbouring icon's and the odd one out would be this one. Zero hands the
+  // question back to the bar, which is where the answer was already right.
+  readonly property real openPanelIndicatorWidth: root.labelText !== "" ? row.implicitWidth : 0
   readonly property real openPanelIndicatorHeight: Style.bar.iconCanvas
 
   Loader {

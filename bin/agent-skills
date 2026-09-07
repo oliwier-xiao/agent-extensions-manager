@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""agent-ext — the only part of Agent Skills Manager that touches the filesystem.
+"""agent-skills — the only part of Agent Skills Manager that touches the filesystem.
 
 One line of JSON on stdout, diagnostics on stderr. The QML reads and draws; it does
 no I/O of its own beyond spawning this. Every subcommand is runnable by hand, which
 is the point: an action you cannot reproduce in a terminal is one you cannot debug.
 
-Exit codes: 0 done · 1 usage error · 2 refused, nothing written · 3 partial write, restored.
+Exit codes: 0 done · 1 usage error · 2 refused, nothing written. There is no partial-write
+code because there is no partial write: the store is built whole, fsynced, and renamed over
+the old one, so a failed write leaves the previous file exactly as it was.
 """
 
 from __future__ import annotations
@@ -40,12 +42,28 @@ DEADLINE_SECONDS = 20.0
 
 # ---------------------------------------------------------------- safe reading
 
-def safe_read(path: str, *, max_bytes: int = MAX_READ) -> bytes | None:
+def _refused(why: list | None, reason: str) -> None:
+    """Note down why a read was refused, for the callers that print it.
+
+    safe_read hands back None for six different reasons and an absent file is
+    one of them, so a caller that sees only None cannot tell a config that is
+    not there from one we would not touch. The difference is the whole message:
+    a world-writable settings.json is why every skill would read as `on`, and
+    saying nothing about it looks exactly like saying all is well.
+    """
+    if why is not None:
+        why.append(reason)
+    return None
+
+
+def safe_read(path: str, *, max_bytes: int = MAX_READ, why: list | None = None) -> bytes | None:
     """Read a regular file we own, refusing symlinks at the final component.
 
     O_NOFOLLOW so a swapped symlink cannot redirect us, O_NONBLOCK so a fifo
     cannot hang the panel, and fstat on the descriptor rather than stat on the
-    name so the thing we checked is the thing we read.
+    name so the thing we checked is the thing we read. Pass a list as `why` to
+    be told which refusal this was; the return stays bytes-or-None either way,
+    so a caller with nothing to say about it needs no changing.
     """
     fd = None
     try:
@@ -56,21 +74,23 @@ def safe_read(path: str, *, max_bytes: int = MAX_READ) -> bytes | None:
         # race the marketplace reviewer rejects even when the checks themselves
         # are correct.
         if not stat.S_ISREG(st.st_mode):
-            return None
+            return _refused(why, "not a regular file")
         # A regular file with more than one link is reachable under a name we did
         # not vet. Refuse rather than read something a hard link redirected.
         if st.st_nlink != 1:
-            return None
+            return _refused(why, "more than one hard link")
         # Root-owned files are the packaged system skills (Omarchy ships its own
         # under /usr/share). Refusing them would silently drop every distro skill.
         # What we refuse is a file owned by some other unprivileged user.
         if st.st_uid not in (os.getuid(), 0):
-            return None
+            return _refused(why, "owned by another user")
         # World-writable means anyone on the machine chooses what we parse.
         if st.st_mode & stat.S_IWOTH:
-            return None
+            return _refused(why, "world-writable")
         if st.st_size > max_bytes:
-            return None
+            limit = (f"{max_bytes // (1024 * 1024)} MiB" if max_bytes >= 1024 * 1024
+                     else f"{max_bytes} bytes")
+            return _refused(why, f"larger than {limit}")
         os.set_blocking(fd, True)
         # Read to st_size rather than trusting one os.read(). A short read would
         # otherwise hand back a prefix that parses as a whole, valid document.
@@ -86,6 +106,18 @@ def safe_read(path: str, *, max_bytes: int = MAX_READ) -> bytes | None:
     except OSError as exc:
         if exc.errno not in (errno.ENOENT, errno.ELOOP, errno.EACCES, errno.ENOTDIR, errno.EAGAIN):
             warn(f"read {path}: {exc}")
+        # ENOENT and ENOTDIR are silent on purpose. Most machines have no
+        # ~/.codex/config.toml and no ~/.config/opencode/opencode.json, and a
+        # finding for a file nobody ever claimed exists would fire for nearly
+        # every user. Being refused a path that does exist is a different fact.
+        # Worth spelling out rather than saying "a symlink": the common way to
+        # reach this is a dotfiles manager, where the user made the link on
+        # purpose and needs to be told that what it points at went unread --
+        # not merely that something was refused.
+        if exc.errno == errno.ELOOP:
+            return _refused(why, "reached through a symlink, which is not followed")
+        if exc.errno == errno.EACCES:
+            return _refused(why, "permission denied")
         return None
     finally:
         if fd is not None:
@@ -95,8 +127,8 @@ def safe_read(path: str, *, max_bytes: int = MAX_READ) -> bytes | None:
                 pass
 
 
-def read_text(path: str, *, max_bytes: int = MAX_READ) -> str | None:
-    raw = safe_read(path, max_bytes=max_bytes)
+def read_text(path: str, *, max_bytes: int = MAX_READ, why: list | None = None) -> str | None:
+    raw = safe_read(path, max_bytes=max_bytes, why=why)
     if raw is None:
         return None
     return raw.decode("utf-8", "replace")
@@ -104,9 +136,10 @@ def read_text(path: str, *, max_bytes: int = MAX_READ) -> str | None:
 
 def read_json(path: str) -> tuple[dict | list | None, str | None]:
     """Returns (value, error). A malformed config is a finding, not a crash."""
-    txt = read_text(path)
+    why: list[str] = []
+    txt = read_text(path, why=why)
     if txt is None:
-        return None, None
+        return None, (f"refused, {why[0]}" if why else None)
     if not txt.strip():
         return None, "empty"
     try:
@@ -122,9 +155,10 @@ def read_json(path: str) -> tuple[dict | list | None, str | None]:
 
 
 def read_toml(path: str) -> tuple[dict | None, str | None]:
-    raw = safe_read(path)
+    why: list[str] = []
+    raw = safe_read(path, why=why)
     if raw is None:
-        return None, None
+        return None, (f"refused, {why[0]}" if why else None)
     try:
         import tomllib
         return tomllib.loads(raw.decode("utf-8", "replace")), None
@@ -135,22 +169,97 @@ def read_toml(path: str) -> tuple[dict | None, str | None]:
 # A URL query string, a --header argument or an --api-key flag in an MCP command
 # line is a credential. The panel draws `target`, so anything secret-shaped is
 # replaced here, in the only process that ever sees the original.
-SECRET_FLAG = re.compile(
-    r"(?i)(--?(?:header|token|api[-_]?key|password|secret|auth[a-z-]*)[= ])\S+")
-SECRET_ENVISH = re.compile(r"(?i)\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*=)\S+")
+#
+# What each rule eats is the rest of its argument rather than the rest of the
+# word. On the joined command line there is nothing to tell one apart from the
+# other, and a header is routinely written `--header X-Api-Key: one two`, so a
+# match that stopped at whitespace left two thirds of the key on screen.
+_SECRET_WORD = r"(?:header|token|api[-_]?key|password|secret|auth[a-z-]*)"
+SECRET_FLAG = re.compile(r"(?i)(--?%s[= ]).*$" % _SECRET_WORD)
+SECRET_ENVISH = re.compile(r"(?i)\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*=).*$")
+# The same flag written as its own argument, with the value in the next one.
+SECRET_FLAG_ALONE = re.compile(r"(?i)^--?%s$" % _SECRET_WORD)
+# A scheme and an authority, anywhere in an argument: `npx mcp-remote <url>` is
+# how most hosted servers are launched, so the URL is rarely the whole of it.
+URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S*")
 
 
 def redact(text) -> str:
+    """One target string -- a URL, or one argument of a command line."""
     out = clip(text, 512)
     try:
-        parts = out.split("?", 1)
-        if len(parts) == 2 and "://" in parts[0]:
-            out = parts[0] + "?\u2026"
+        out = URL_IN_TEXT.sub(lambda m: redact_url(m.group(0)), out)
+        out = SECRET_FLAG.sub("\\1\u2026", out)
+        out = SECRET_ENVISH.sub("\\1\u2026", out)
     except Exception:
-        pass
-    out = SECRET_FLAG.sub("\\1\u2026", out)
-    out = SECRET_ENVISH.sub("\\1\u2026", out)
+        # A target we could not clean is a target we do not print. No display
+        # string is worth failing a scan for, and the ellipsis is honest.
+        return "\u2026"
     return out
+
+
+def redact_argv(argv) -> str:
+    """The same, for a command line that has not been joined yet.
+
+    Joining first is what loses the boundary between arguments, and both shapes
+    a secret takes need it: a value holding a space is one argument, and
+    `--api-key` and its value are two the moment either of them holds one. The
+    argv list is intact at every call site, so it is redacted before the join
+    rather than after.
+    """
+    out = []
+    value_is_next = False
+    for element in argv:
+        element = clip(element, 512)
+        if value_is_next:
+            out.append("\u2026")
+            value_is_next = False
+            continue
+        value_is_next = bool(SECRET_FLAG_ALONE.match(element))
+        out.append(redact(element))
+    return clip(" ".join(out).strip(), 512)
+
+
+def redact_url(url: str) -> str:
+    """Blank the parts of a URL that carry a key rather than a route.
+
+    Userinfo is a credential outright. The query string goes whole, as it always
+    did. The third shape is a token sitting in the path -- `/mcp/<forty opaque
+    characters>` -- which several hosted endpoints use in place of a header and
+    which reads as an ordinary path segment until you look at its length.
+    """
+    try:
+        # Imported here rather than at the top: it drags in `ipaddress` and costs
+        # a third of the scan's whole budget, and most machines have no MCP
+        # target with a scheme in it at all.
+        import urllib.parse
+        parts = urllib.parse.urlsplit(url)
+    except Exception:  # noqa: BLE001 - an unparseable target is simply not shown
+        return "\u2026"
+    if not parts.scheme or not parts.netloc:
+        return url
+    host = parts.netloc.rsplit("@", 1)[-1]
+    if "@" in parts.netloc:
+        host = "\u2026@" + host
+    path = "/".join("\u2026" if _opaque_segment(s) else s for s in parts.path.split("/"))
+    tail = "?\u2026" if parts.query else ""
+    if parts.fragment:
+        tail += "#\u2026"
+    return f"{parts.scheme}://{host}{path}{tail}"
+
+
+def _opaque_segment(segment: str) -> bool:
+    """A path segment long enough to be a key and shaped like nothing else.
+
+    A route is words: `messages`, `streamable-http`, `v1`. A key is one long run
+    with digits in it, or a run longer than any word. Judging by length alone
+    would redact the longer route names, and judging by shape alone would keep a
+    thirty-character base64 blob, so it takes both.
+    """
+    if len(segment) <= 20:
+        return False
+    return not all(word.isalpha() and len(word) <= 16
+                   for word in re.split(r"[-_.]", segment) if word)
 
 
 def as_dict(value) -> dict:
@@ -172,7 +281,7 @@ def clip(text, limit: int = 512) -> str:
 
 
 def warn(msg: str) -> None:
-    print(f"agent-ext: {msg}", file=sys.stderr)
+    print(f"agent-skills: {msg}", file=sys.stderr)
 
 
 def tilde(path: str) -> str:
@@ -387,7 +496,7 @@ TAG_RULES = {
 # Deleting it restores every classifier guess and loses nothing else. No agent
 # configuration is touched to make a category, and none is touched to move a
 # skill between them.
-STORE_DIR = os.path.join(HOME, ".config", "agent-ext")
+STORE_DIR = os.path.join(HOME, ".config", "agent-skills")
 STORE_PATH = os.path.join(STORE_DIR, "categories.json")
 
 # Categories of your own get one mark rather than a guessed one. It is filled
@@ -401,13 +510,28 @@ CATEGORY_NAME = re.compile(r"^[a-z][a-z0-9-]{0,23}$")
 # only a six-digit hex triple, never a named colour or a function call.
 HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 CATEGORY_LABEL = re.compile(r"^[^\x00-\x1f]{1,32}$")
+# A skill is named by its directory, and a directory name is not a word: `-h`
+# is a legal one, and argparse reads it as a request for help and exits before
+# anything is written. Passing `--` gets it to this side. What is refused here
+# is only what cannot name a directory at all -- a slash, a control character,
+# and the two names that mean a directory rather than name one. A charset
+# narrower than the filesystem's would refuse `data science` and `mój-skill`,
+# both of which are skills somebody has, and refuse them with no way out: the
+# panel offers no other route to filing a row.
+SKILL_NAME = re.compile(r"^(?!\.\.?$)[^/\x00-\x1f\x7f]{1,128}$")
 MAX_CUSTOM_CATEGORIES = 32
 MAX_ASSIGNMENTS = 2000
 
 
-def read_store() -> dict:
+def read_store(findings: list | None = None) -> dict:
     value, err = read_json(STORE_PATH)
     if err or not isinstance(value, dict):
+        # The one file this plugin owns is the one whose loss is least visible:
+        # falling back to an empty store puts every skill back under the
+        # classifier's guess, which looks exactly like a machine nobody has
+        # filed anything on. Say so where there is anywhere to say it.
+        if err and findings is not None:
+            findings.append({"what": "categories.json", "detail": err})
         return {"custom": [], "assign": {}, "labels": {}, "colors": {}}
     custom = [c for c in as_list(value.get("custom"))
               if isinstance(c, str) and CATEGORY_NAME.match(c)][:MAX_CUSTOM_CATEGORIES]
@@ -680,12 +804,16 @@ def scan(divisor: int = 4) -> dict:
     usage = as_dict(as_dict(claude_state).get("skillUsage"))
 
     catalog_cat = _catalog_categories()
-    store = read_store()
+    store = read_store(findings)
 
     for root in skill_roots():
         base = root["path"]
         try:
-            entries = sorted(os.scandir(base), key=lambda e: e.name)
+            # Closed rather than left to the collector: one descriptor per root
+            # is nothing on its own, and a helper that leaks them is a helper
+            # nobody can call in a loop later.
+            with os.scandir(base) as listing:
+                entries = sorted(listing, key=lambda e: e.name)
         except OSError:
             continue
         if len(entries) > MAX_DIR_ENTRIES:
@@ -693,25 +821,53 @@ def scan(divisor: int = 4) -> dict:
                              "detail": f"{len(entries)} entries, reading the first {MAX_DIR_ENTRIES}"})
             entries = entries[:MAX_DIR_ENTRIES]
         for entry in entries:
-            if time.monotonic() > deadline:
-                findings.append({"what": tilde(base), "detail": "scan deadline reached, listing is partial"})
-                break
-            if len(by_real) >= MAX_ITEMS:
-                findings.append({"what": "inventory", "detail": f"capped at {MAX_ITEMS} items"})
+            if _walk_exhausted(by_real, findings, deadline, tilde(base)):
                 break
             if entry.name.startswith("."):
                 if entry.name != ".system":
                     continue
-            if not (entry.is_dir(follow_symlinks=True) or entry.is_symlink()):
+            # Deciding what an entry is, and listing a `.system` directory, both
+            # follow the name to whatever it points at, and the kernel says no
+            # far more often than it says "missing": a link pointing at itself
+            # is ELOOP, and ~/.codex/skills/.system is rewritten by Codex on
+            # every launch, so it can be caught as a dangling link, a link to a
+            # file, or a directory this user may not read. Any one of them used
+            # to end the scan with a traceback and leave the panel empty, so an
+            # entry we cannot classify is one finding and the walk goes on.
+            targets = [(entry.path, False)]
+            try:
+                if not (entry.is_dir(follow_symlinks=True) or entry.is_symlink()):
+                    continue
+                if entry.name == ".system":
+                    with os.scandir(entry.path) as listing:
+                        packaged = sorted(listing, key=lambda e: e.name)
+                    if len(packaged) > MAX_DIR_ENTRIES:
+                        findings.append({"what": tilde(entry.path),
+                                         "detail": f"{len(packaged)} entries, "
+                                                   f"reading the first {MAX_DIR_ENTRIES}"})
+                        packaged = packaged[:MAX_DIR_ENTRIES]
+                    # Each child is asked about separately. Inside one `try` a
+                    # single bad entry raises out of the whole listing, and the
+                    # `continue` below would then drop every healthy skill
+                    # beside it and blame the directory that read perfectly
+                    # well -- which is the one thing this guard exists to stop.
+                    targets = []
+                    for child in packaged:
+                        try:
+                            if child.is_dir(follow_symlinks=True):
+                                targets.append((child.path, True))
+                        except OSError as exc:
+                            findings.append({"what": tilde(child.path),
+                                             "detail": f"unreadable, {clip(exc.strerror or exc, 96).lower()}"})
+            except OSError as exc:
+                findings.append({"what": tilde(entry.path),
+                                 "detail": f"unreadable, {clip(exc.strerror or exc, 96).lower()}"})
                 continue
-            if entry.name == ".system":
-                for sub in sorted(os.scandir(entry.path), key=lambda e: e.name):
-                    if sub.is_dir(follow_symlinks=True):
-                        _ingest(by_real, sub.path, base, root, overrides, usage,
-                                catalog_cat, store, divisor, findings, bundled=True)
-                continue
-            _ingest(by_real, entry.path, base, root, overrides, usage,
-                    catalog_cat, store, divisor, findings)
+            for path, bundled in targets:
+                if _walk_exhausted(by_real, findings, deadline, tilde(entry.path)):
+                    break
+                _ingest(by_real, path, base, root, overrides, usage,
+                        catalog_cat, store, divisor, findings, bundled=bundled)
 
     items = list(by_real.values())
     _mark_drift(items)
@@ -741,6 +897,24 @@ def scan(divisor: int = 4) -> dict:
     }
 
 
+def _walk_exhausted(by_real: dict, findings: list, deadline: float, where: str) -> bool:
+    """The deadline and the item cap, asked once per directory we are about to
+    open. A `.system` directory used to be walked outside both, which left the
+    one place a packaged skill set writes into as the only unbounded part of the
+    walk. Reported once per place: the same limit reached again is the same
+    fact, and a findings list is read by a person.
+    """
+    if time.monotonic() > deadline:
+        finding = {"what": where, "detail": "scan deadline reached, listing is partial"}
+    elif len(by_real) >= MAX_ITEMS:
+        finding = {"what": "inventory", "detail": f"capped at {MAX_ITEMS} items"}
+    else:
+        return False
+    if finding not in findings:
+        findings.append(finding)
+    return True
+
+
 def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
             divisor, findings, bundled=False):
     skill_md = os.path.join(dir_path, "SKILL.md")
@@ -765,9 +939,12 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
                                  existing["flags"]["builtin"]))
         return
 
-    text = read_text(skill_md)
+    why: list[str] = []
+    text = read_text(skill_md, why=why)
     if text is None:
-        if not os.path.exists(skill_md):
+        if why:
+            findings.append({"what": tilde(skill_md), "detail": f"refused, {why[0]}"})
+        elif not os.path.exists(skill_md):
             findings.append({"what": tilde(dir_path),
                              "detail": "broken symlink" if is_link and not os.path.exists(real)
                              else "directory without SKILL.md"})
@@ -801,8 +978,8 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
 
     meta = fm.get("metadata") if isinstance(fm.get("metadata"), dict) else {}
     tax = classify(display, description, dir_path, catalog_cat.get(dir_name))
-    if meta.get("agent-ext.category") in CATEGORIES:
-        tax = {"category": meta["agent-ext.category"], "confidence": "authored",
+    if meta.get("agent-skills.category") in CATEGORIES:
+        tax = {"category": meta["agent-skills.category"], "confidence": "authored",
                "classifier": "frontmatter"}
     # Above the author's own frontmatter, because it is the reader's shelf. The
     # frontmatter says what the skill is; this says where you keep it, and the
@@ -947,7 +1124,8 @@ def scan_mcp(findings: list[dict]) -> list[dict]:
         servers.append({
             "kind": "mcp", "tool": "opencode", "name": clip(name, 128),
             "transport": clip(cfg.get("type", "local"), 32),
-            "target": redact(cfg.get("url") or " ".join(str(a) for a in as_list(cfg.get("command")))),
+            "target": (redact(cfg["url"]) if cfg.get("url")
+                       else redact_argv(as_list(cfg.get("command")))),
             "enabled": cfg.get("enabled", True) is not False, "scope": "user",
             "auth": _opencode_auth(name), "writable": False,
         })
@@ -960,7 +1138,7 @@ def scan_mcp(findings: list[dict]) -> list[dict]:
         argv = [str(cfg.get("command", ""))] + [str(a) for a in as_list(cfg.get("args"))]
         servers.append({
             "kind": "mcp", "tool": "codex", "name": clip(name, 128), "transport": "stdio",
-            "target": redact(" ".join(argv).strip()),
+            "target": redact_argv(argv),
             "enabled": cfg.get("enabled", True) is not False, "scope": "user",
             "auth": "unknown", "writable": False,
         })
@@ -972,7 +1150,7 @@ def scan_mcp(findings: list[dict]) -> list[dict]:
         servers.append({
             "kind": "mcp", "tool": "claude", "name": clip(name, 128),
             "transport": clip(cfg.get("type", "stdio"), 32),
-            "target": redact(cfg.get("url") or " ".join(argv).strip()),
+            "target": redact(cfg["url"]) if cfg.get("url") else redact_argv(argv),
             "enabled": True, "scope": "user", "auth": "unknown", "writable": False,
         })
 
@@ -1097,11 +1275,18 @@ def category_command(args) -> int:
         return 0
 
     # assign
-    skill = clip(args.skill, 128)
+    skill = args.skill
     name = args.category.strip().lower()
     if not skill:
         warn("no skill named")
         return 1
+    # Matched rather than cleaned, and matched before anything trims it. A name
+    # that had to be tidied up to get through is not the name of any directory,
+    # and filing a skill under a name nothing on disk has is a change nobody
+    # asked for -- the panel would report the move and the shelf stay empty.
+    if not SKILL_NAME.match(skill):
+        warn("a skill is named by its directory: anything but a slash, and not . or ..")
+        return 2
     if not CATEGORY_NAME.match(name):
         warn("a category name is lower case letters, digits and dashes, up to 24")
         return 2
@@ -1148,7 +1333,7 @@ def _apply_style(store: dict, name: str, label, color) -> bool:
 
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="agent-ext", description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(prog="agent-skills", description=__doc__.split("\n")[0])
     ap.add_argument("--version", action="version", version=VERSION)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -1160,7 +1345,7 @@ def main(argv: list[str]) -> int:
     sub.add_parser("doctor", help="human-readable health report on stdout")
 
     # The write side. Four verbs, each one a single named change to one file
-    # under ~/.config/agent-ext, and every one of them runnable by hand. Nothing
+    # under ~/.config/agent-skills, and every one of them runnable by hand. Nothing
     # here reads or writes anything belonging to Claude Code, OpenCode or Codex.
     p_cat = sub.add_parser("category", help="shelve skills without touching their files")
     cat_sub = p_cat.add_subparsers(dest="action", required=True)
@@ -1204,7 +1389,7 @@ def main(argv: list[str]) -> int:
                 "version": VERSION, "generatedAt": result["generatedAt"],
                 "items": [], "mcp": [], "plugins": [], "counts": result["counts"],
                 "findings": [{"what": "inventory",
-                              "detail": "too large to return; run agent-ext doctor in a terminal"}],
+                              "detail": "too large to return; run agent-skills doctor in a terminal"}],
             }, ensure_ascii=False)
             sys.stdout.write(payload + "\n")
             return 2
@@ -1214,7 +1399,7 @@ def main(argv: list[str]) -> int:
     if args.cmd == "doctor":
         result = scan()
         c = result["counts"]
-        print(f"agent-ext {VERSION}   scan {result['elapsedMs']} ms")
+        print(f"agent-skills {VERSION}   scan {result['elapsedMs']} ms")
         print(f"skills            {c['skills']}")
         for tool, n in sorted(c["perTool"].items()):
             print(f"  {tool:<14}{n:>4}   ~{c['alwaysOnTokens'].get(tool, 0)} tok always on")

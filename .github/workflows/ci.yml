@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Syntax check
-        run: python3 -m py_compile bin/agent-ext
+        run: python3 -m py_compile bin/agent-skills
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
       - name: Runs identically without PyYAML
@@ -24,76 +24,31 @@ jobs:
           PYTHONPATH=/tmp/noyaml python3 -m unittest discover -s tests
       - name: Helper imports no third-party module
         run: |
-          ! grep -nE '^\s*(import|from)\s+(yaml|requests|toml[^l]|tomlkit)' bin/agent-ext
+          ! grep -nE '^\s*(import|from)\s+(yaml|requests|toml[^l]|tomlkit)' bin/agent-skills
       - name: Scan survives an empty HOME
         # No agent installed at all is a normal first run, not an error.
         run: |
-          HOME=$(mktemp -d) python3 bin/agent-ext scan | python3 -c \
+          HOME=$(mktemp -d) python3 bin/agent-skills scan | python3 -c \
             'import json,sys; d=json.load(sys.stdin); assert d["items"]==[], d; print("empty HOME ok")'
 
-  qml:
-    name: qml checks
+  preflight:
+    name: marketplace preflight
+    # The one gate that measures the tree against the marketplace's published
+    # rules: the structural validator, the automated security baseline, and the
+    # demands its manual review raised on this author twice. It subsumes the
+    # manifest shape and the QML rules -- among them the property name that
+    # begins with a capital, which QML reserves for type names and refuses to
+    # declare at all. The error aborts the whole document, so a lazily loaded
+    # Panel.qml becomes a null Loader item and the bar widget opens nothing,
+    # with a WARN line in the shell journal as the only symptom. That is how it
+    # survived a review and a release.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: No property name begins with a capital
-        # QML reserves a leading capital for type names and refuses to declare
-        # such a property at all. The declaration is an error, the error aborts
-        # the whole document, and the component never compiles -- so a lazily
-        # loaded Panel.qml becomes a null Loader item and the bar widget opens
-        # nothing at all. The only symptom is a WARN line in the shell journal,
-        # which is why it survived a review and a release.
-        run: |
-          if grep -rnE '^[[:space:]]*(readonly[[:space:]]+)?property[[:space:]]+[A-Za-z_][A-Za-z0-9_<>]*[[:space:]]+[A-Z]' -- *.qml; then
-            echo "::error::a QML property name begins with a capital; QML will refuse the whole file"
-            exit 1
-          fi
-          echo "every property name starts lower case"
-      - name: Every Text has a textFormat
-        # Everything this plugin draws was written by somebody else. A Text
-        # without an explicit textFormat is the marketplace reviewer's most
-        # cited manual finding, and it is a real injection surface.
-        run: |
-          rc=0
-          for q in *.qml; do
-            t=$(grep -cE '^[[:space:]]*(Text|Label)[[:space:]]*\{' "$q" || true)
-            f=$(grep -c 'textFormat:' "$q" || true)
-            echo "$q: $t Text/Label, $f textFormat"
-            [ "$t" -le "$f" ] || { echo "::error file=$q::$t Text/Label but only $f textFormat"; rc=1; }
-          done
-          exit $rc
-
-  manifest:
-    name: manifest shape
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Valid JSON
-        run: jq -e . manifest.json > /dev/null
-      - name: schemaVersion is the number 1
-        run: jq -e '.schemaVersion == 1' manifest.json > /dev/null
-      - name: Declared entry points exist
-        run: |
-          for ep in $(jq -r '.entryPoints[]' manifest.json); do
-            test -f "$ep" || { echo "missing entry point: $ep"; exit 1; }
-          done
-      - name: Every kind has its entry point
-        run: |
-          jq -e '(.kinds | index("service") | not) or (.entryPoints | has("service"))' manifest.json > /dev/null
-          jq -e '(.kinds | index("bar-widget") | not) or (.entryPoints | has("barWidget"))' manifest.json > /dev/null
-      - name: Every setting in the schema has a default
-        run: |
-          jq -e 'all(.barWidget.schema[]; has("key") and has("type") and has("label") and has("defaultValue"))' \
-            manifest.json > /dev/null
-      - name: Schema keys and defaults agree
-        run: |
-          diff <(jq -r '.barWidget.schema[].key' manifest.json | sort) \
-               <(jq -r '.barWidget.defaults | keys[]' manifest.json | sort)
-      - name: No symlinks anywhere
-        # The marketplace validator refuses a symlink anywhere in a plugin folder.
-        run: |
-          found=$(find . -path ./.git -prune -o -type l -print)
-          test -z "$found" || { echo "symlinks are not allowed: $found"; exit 1; }
-      - name: Id is not in the reserved omarchy namespace
-        run: |
-          jq -e '.id | startswith("omarchy.") | not' manifest.json > /dev/null
+      - name: Every marketplace and reviewer rule
+        # The script reads the git index and the origin URL, never the history,
+        # so the default shallow checkout is all it needs, and it makes no
+        # network calls. qmllint and omarchy-plugin-validate exist only on an
+        # Omarchy box; preflight runs every rule it can and skips those two
+        # where they are absent, which on a runner is always.
+        run: bash tests/preflight.sh

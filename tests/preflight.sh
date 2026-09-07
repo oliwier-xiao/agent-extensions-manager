@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# bin/preflight — every machine-checkable marketplace and reviewer rule, offline.
+# tests/preflight.sh — every machine-checkable marketplace and reviewer rule, offline.
 #
-#   bin/preflight [DIR] [--submission=BODY.md] [--strict] [--marketplace-only]
+#   tests/preflight.sh [DIR] [--submission=BODY.md] [--strict] [--marketplace-only]
 #
 # Mirrors, rule for rule:
 #   scripts/build-catalog.mjs               validateManifest / validateManifestFiles /
@@ -14,11 +14,15 @@
 #   /usr/bin/omarchy-plugin-validate        run directly when present
 #   HANCORE-linux's manual review           the demands raised on THIS author twice
 #
+# Out of scope for an offline run: validate-submission.mjs's assertSubmissionIsUnlisted
+# rejects a submission whose repository is already listed, whose plugin id is already
+# listed, or whose plugin id was retired by an earlier listing. All three ask the
+# marketplace about its own state, which nothing here can see. Check them by hand
+# against site/catalog.json and registry.json in omacom/omarchy-plugin-marketplace
+# before opening the issue.
+#
 # WARN never fails the run unless --strict. FAIL always does. No network calls.
 # Needs: bash, jq, python3, git, find, grep. Safe in CI.
-#
-# UNTESTED: bash was non-functional in the session that wrote this. Run it once
-# by hand (bash -n bin/preflight && bin/preflight) before wiring it into CI.
 set -uo pipefail
 
 DIR="."; SUBMISSION=""; STRICT=0; MKT_ONLY=0
@@ -27,7 +31,7 @@ for arg in "$@"; do
     --submission=*)     SUBMISSION="${arg#*=}" ;;
     --strict)           STRICT=1 ;;
     --marketplace-only) MKT_ONLY=1 ;;
-    -h|--help)          sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help)          sed -n '2,25p' "$0"; exit 0 ;;
     -*) printf 'preflight: unknown option %s\n' "$arg" >&2; exit 2 ;;
     *)  DIR="$arg" ;;
   esac
@@ -39,7 +43,8 @@ done
 
 WORK="$(mktemp -d)" || exit 2
 trap 'rm -rf "$WORK"' EXIT
-FILES="$WORK/files"; LINKS="$WORK/links"; TALLY="$WORK/tally"; : >"$TALLY"
+FILES="$WORK/files"; LINKS="$WORK/links"; MODES="$WORK/modes"; TALLY="$WORK/tally"
+: >"$TALLY"; : >"$MODES"
 
 if [ -t 1 ]; then G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; Z=$'\033[0m'
 else G=""; R=""; Y=""; Z=""; fi
@@ -52,6 +57,9 @@ soft() { if [ "$STRICT" -eq 1 ]; then fail "$@"; else warn "$@"; fi; }
 if git rev-parse --git-dir >/dev/null 2>&1; then
   git ls-files >"$FILES"
   git ls-files -s | awk -F'\t' '$1 ~ /^120000/ { print $2 }' >"$LINKS"
+  # The scan scope admits a file for being mode 100755, and that mode is read off the
+  # pushed tree, not off the worktree -- a lost +x bit locally changes nothing there.
+  git ls-files -s | awk -F'\t' '{ split($1, m, " "); print m[1] "\t" $2 }' >"$MODES"
   SRC="git tree"
 else
   find . -path ./.git -prune -o -type f -print 2>/dev/null | sed 's|^\./||' | LC_ALL=C sort >"$FILES"
@@ -239,7 +247,14 @@ echo
 
 # ------------------------------------------------ (a) optional preview
 echo "-- (a) marketplace validation: optional root preview --"
-PREVIEW="$(grep -iE '^preview\.(png|jpe?g|webp|avif)$' "$FILES" | head -1 || true)"
+# previewPathFor does not take the alphabetically first root candidate: it sorts them
+# against a fixed format priority, so a repository shipping both preview.png and
+# preview.jpg is listed with the png. Ties within one format fall back to sort order.
+PREVIEW=""
+for ext in png webp jpg jpeg avif; do
+  [ -n "$PREVIEW" ] && continue
+  PREVIEW="$(grep -iE "^preview\.$ext\$" "$FILES" | LC_ALL=C sort | head -1 || true)"
+done
 if [ -z "$PREVIEW" ]; then
   soft "preview-absent" "no root preview -- the bot prints the fallback notice, not an error"
 else
@@ -248,11 +263,29 @@ import os, struct, sys
 p, tally = sys.argv[1], sys.argv[2]
 T = open(tally, "a", encoding="utf-8")
 size = os.path.getsize(p); BYTE, PIX = 50*1024*1024, 40000000
-d = open(p, "rb").read(64); w = h = 0
+# Far more than a header needs, but an AVIF's ispe sits behind a whole meta box.
+d = open(p, "rb").read(65536); w = h = 0
 if d[:8] == b"\x89PNG\r\n\x1a\n" and d[12:16] == b"IHDR":
     w, h = struct.unpack(">II", d[16:24])
-elif d[:4] == b"RIFF" and d[8:12] == b"WEBP" and d[12:16] == b"VP8X":
-    w = int.from_bytes(d[24:27], "little") + 1; h = int.from_bytes(d[27:30], "little") + 1
+elif d[:4] == b"RIFF" and d[8:12] == b"WEBP":
+    # Three WebP dialects share one container. Reading only the extended VP8X form
+    # blinds the check to every plain lossy and lossless preview sharp accepts.
+    if d[12:16] == b"VP8X":
+        w = int.from_bytes(d[24:27], "little") + 1; h = int.from_bytes(d[27:30], "little") + 1
+    elif d[12:16] == b"VP8 " and d[23:26] == b"\x9d\x01\x2a":
+        w = int.from_bytes(d[26:28], "little") & 0x3fff
+        h = int.from_bytes(d[28:30], "little") & 0x3fff
+    elif d[12:16] == b"VP8L" and d[20:21] == b"\x2f":
+        bits = int.from_bytes(d[21:25], "little")
+        w = (bits & 0x3fff) + 1; h = ((bits >> 14) & 0x3fff) + 1
+elif d[4:8] == b"ftyp":
+    # An AVIF carries one ispe per item -- the primary image, then any alpha plane or
+    # thumbnail. Take the largest, so the pixel budget is never under-reported.
+    i = d.find(b"ispe")
+    while i > 0:
+        aw = int.from_bytes(d[i+8:i+12], "big"); ah = int.from_bytes(d[i+12:i+16], "big")
+        if aw * ah > w * h: w, h = aw, ah
+        i = d.find(b"ispe", i + 4)
 elif d[:2] == b"\xff\xd8":
     f = open(p, "rb"); f.seek(2)
     while True:
@@ -265,13 +298,18 @@ elif d[:2] == b"\xff\xd8":
         ln = f.read(2)
         if len(ln) < 2: break
         f.seek(struct.unpack(">H", ln)[0] - 2, 1)
-bad  = size < 1 or size > BYTE or (w and h and w * h > PIX)
 note = "%s %dB %dx%d" % (p, size, w, h)
-if bad:
+if size < 1 or size > BYTE or (w and h and w * h > PIX):
     print("FAIL  %-44s %s exceeds the 50MB / 40MP limit" % ("preview-invalid", note)); T.write("FAIL\n")
+elif not (w and h):
+    # validatePreviewMetadata demands a width and a height of at least 1, so a header
+    # this parser could not read is an open question and must not be reported as 0x0
+    # within the limits -- the one shape of answer that is certainly wrong.
+    print("WARN  %-44s %s header unread; confirm the 40MP limit by hand" % ("preview-invalid", note))
+    T.write("WARN\n")
 else:
     print("PASS  %-44s %s within 50MB / 40MP" % ("preview-invalid", note))
-    if w and w < 1600:
+    if w < 1600:
         print("WARN  %-44s long edge %d < 1600; withoutEnlargement leaves it small" % ("preview-small", w))
         T.write("WARN\n")
 T.close()
@@ -281,10 +319,14 @@ echo
 
 # ------------------------------------------------ (b) security baseline
 echo "-- (b) automated security baseline (scope, limits, findings, capabilities) --"
-python3 - "$FILES" "$TALLY" "$STRICT" <<'PY'
+python3 - "$FILES" "$MODES" "$TALLY" "$STRICT" <<'PY'
 import json, os, re, sys
-flist, tally, strict = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+flist, mlist, tally, strict = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1"
 files = [l for l in open(flist, encoding="utf-8").read().split("\n") if l]
+MODES = dict(l.split("\t", 1)[::-1] for l in open(mlist, encoding="utf-8").read().split("\n") if "\t" in l)
+def mode_of(p):
+    # Outside a checkout there is no index to read, so fall back to the bit on disk.
+    return MODES.get(p) or ("100755" if os.access(p, os.X_OK) else "100644")
 T = open(tally, "a", encoding="utf-8")
 def ok(r, n=""): print("PASS  %-44s %s" % (r, n))
 def no(r, m):    print("FAIL  %-44s %s" % (r, m)); T.write("FAIL\n")
@@ -294,9 +336,17 @@ def soft(r, m):  (no if strict else wa)(r, m)
 EXCL = {".github","coverage","docs","fixtures","node_modules","spec","specs","test","tests"}
 SCANNED = {".bash",".cjs",".desktop",".fish",".js",".lua",".mjs",".pl",".py",".qml",".rb",
            ".service",".sh",".sudoers",".toml",".yaml",".yml",".zsh"}
-ASSET = {".png",".jpg",".jpeg",".webp",".avif",".gif",".ico",".svg",".pdf",".zip",".tar",".gz",
-         ".xz",".bz2",".7z",".mp4",".mp3",".wav",".ogg",".webm",".ttf",".otf",".woff",".woff2",".bin"}
-SETUP = re.compile(r"(?:^|[-_])(install|installer|setup|uninstall)(?:[-_.]|$)", re.I)
+# isBinaryAssetPath exempts images and nothing else. An archive, a font or a video is
+# not exempt at all -- it simply is not a scanned extension, which the clauses below
+# already settle, and widening this set silently drops files upstream still reads.
+ASSET = {".apng",".avif",".bmp",".gif",".heic",".heif",".ico",".jfif",".jpe",".jpeg",
+         ".jpg",".jxl",".png",".tif",".tiff",".webp"}
+# Two readings of one name. setupLikeBasename is an unanchored substring match, so
+# preinstall.sh and reinstall-notes are setup-named to the scanner; the anchored form
+# is the narrower one, kept where a false hit would invent a runtime or a capability
+# the reviewer would then have to be argued out of.
+SETUP       = re.compile(r"(?:^|[-_])(install|installer|setup|uninstall)(?:[-_.]|$)", re.I)
+SETUP_LOOSE = re.compile(r"install|installer|setup|uninstall", re.I)
 
 def is_root_readme(p):
     return "/" not in p and re.match(r"^readme(\.[^/]+)?$", p, re.I) is not None
@@ -308,10 +358,15 @@ def is_scan_path(p):
     parts = p.lower().split("/")
     if any(x in EXCL for x in parts[:-1]): return False
     b = parts[-1]; e = extof(b)
+    # resolveSecuritySnapshot drops an excluded directory FIRST and only then admits a
+    # blob for being executable or extensionless, so neither clause can drag docs/ or
+    # tests/ back into the scan. Order matters here; the union below does not.
+    if mode_of(p) == "100755": return True
+    if "." not in b: return True
     if e in SCANNED: return True
     if e in ASSET:   return False
     if parts[0] in ("bin", "scripts"): return "." not in b
-    return SETUP.search(b) is not None
+    return SETUP_LOOSE.search(b) is not None
 
 FORCED = set()
 try:
@@ -320,24 +375,30 @@ try:
 except Exception:
     pass
 
-# resolveSecuritySnapshot also admits any EXTENSIONLESS file, so LICENSE is read.
-scanned = [p for p in files
-           if p in FORCED or is_scan_path(p) or "." not in p.split("/")[-1]]
+# A declared entry point is forced in even from an excluded directory; everything else
+# has already been through the exclusion inside is_scan_path.
+scanned = [p for p in files if p in FORCED or is_scan_path(p)]
 ok("scan-scope", "%d scanned: %s" % (len(scanned), ", ".join(sorted(scanned)[:8])))
 
-FILE_LIMIT, TOTAL_LIMIT, PER_FILE = 1000, 8*1024*1024, 512*1024
+FILE_LIMIT, TOTAL_LIMIT, PER_FILE, PROBE = 1000, 8*1024*1024, 512*1024, 4096
 sizes = dict((p, os.path.getsize(p) if os.path.exists(p) else 0) for p in scanned)
-total = sum(sizes.values()); big = [p for p, s in sizes.items() if s > PER_FILE]
+# readSnapshotFile lets an oversized mode-100755 blob through on a 4096-byte probe of
+# its magic instead of refusing the scan, and declaredTextSize then charges the budget
+# that probe rather than the blob -- so a committed binary cannot exhaust the 8 MiB.
+charged = dict((p, PROBE if (s > PER_FILE and mode_of(p) == "100755") else s)
+               for p, s in sizes.items())
+big   = [p for p, s in sizes.items() if s > PER_FILE and mode_of(p) != "100755"]
+total = sum(charged.values())
 (ok if len(scanned) <= FILE_LIMIT else no)(
     "security-baseline-scan-limit/files", "%d relevant files (limit %d)" % (len(scanned), FILE_LIMIT))
 (ok if total <= TOTAL_LIMIT else no)(
     "security-baseline-scan-limit/bytes", "%d B relevant text (limit %d)" % (total, TOTAL_LIMIT))
 (ok if not big else no)(
     "security-baseline-scan-limit/per-file",
-    ("largest %d B (limit %d)" % (max(sizes.values()) if sizes else 0, PER_FILE)) if not big
+    ("largest %d B charged (limit %d)" % (max(charged.values()) if charged else 0, PER_FILE)) if not big
     else "%s exceeds 512 KiB" % big[0])
 setup_bin = [p for p in files if extof(p.split("/")[-1]) in ASSET
-             and SETUP.search(p.split("/")[-1])
+             and SETUP_LOOSE.search(p.split("/")[-1])
              and not any(s in EXCL for s in p.lower().split("/")[:-1])]
 (ok if not setup_bin else no)(
     "security-baseline-unavailable/setup-asset",
@@ -355,7 +416,7 @@ def read(p):
 def is_shell_runtime(p):
     b = p.split("/")[-1]
     if re.search(r"\.(ba|z|fi)?sh$", b, re.I): return True
-    if "." not in b and re.match(r"^(bin|scripts)/", p, re.I): return True   # bin/agent-ext
+    if "." not in b and re.match(r"^(bin|scripts)/", p, re.I): return True   # bin/agent-skills
     if SETUP.search(b) and not re.search(r"\.(md|json)$", b, re.I): return True
     return False
 def units(p):
@@ -513,7 +574,7 @@ echo
 # ------------------------------------------------ (c) reviewer bar
 if [ "$MKT_ONLY" -eq 0 ]; then
 echo "-- (c) reviewer bar: helper I/O and bounds (HANCORE-linux) --"
-H="bin/agent-ext"
+H="bin/agent-skills"
 if [ ! -f "$H" ]; then
   warn "helper/present" "$H not found -- skipping reviewer checks"
 else
@@ -603,15 +664,59 @@ while IFS= read -r q; do
 done <<EOF
 $QML_LIST
 EOF
+# /usr/bin/qmllint is Qt5's v1.0 on Omarchy, and it is useless as a gate twice over:
+# it writes every diagnostic to journald rather than to stdout, so a grep over its
+# output can never match whatever it found, and its parser predates typed function
+# signatures, so it calls `function open(): void` a syntax error in a file Qt6 accepts.
+# Only a Qt6 binary is worth believing. Gate on its exit status, which is the one
+# signal the journald redirection cannot swallow: Qt6 exits non-zero on an error and
+# zero on warnings, so the unresolved qs.* imports on a machine without Quickshell
+# installed stay warnings and no allowlist is needed to keep the gate usable.
+QLINT=""
+if [ -x /usr/lib/qt6/bin/qmllint ]; then
+  QLINT=/usr/lib/qt6/bin/qmllint
+elif command -v qmllint >/dev/null 2>&1 \
+  && qmllint --version 2>&1 | grep -qE 'qmllint ([6-9]|[1-9][0-9])\.'; then
+  QLINT="$(command -v qmllint)"
+fi
+QINC=""
+[ -d /usr/share/omarchy/shell ] && QINC="-I /usr/share/omarchy/shell"
 if [ "$QML_N" -eq 0 ]; then
   warn "qml/present" "no .qml file in the tree yet"
-elif command -v qmllint >/dev/null 2>&1; then
-  # /usr/bin/qmllint on some boxes is Qt5 v1.0 and exits 0 on a broken file.
-  if qmllint -I /usr/share/omarchy/shell $QML_LIST 2>&1 | grep -q '\[unqualified\]'; then
-    fail "qml/qmllint-unqualified" "qmllint reports unqualified identifiers"
-  else
-    pass "qml/qmllint-unqualified" "zero [unqualified] warnings"
-  fi
+elif [ -z "$QLINT" ]; then
+  warn "qml/qmllint" "no Qt6 qmllint found -- install qt6-declarative to run this gate"
+else
+  # Lint a copy under a neutral name, in a directory holding nothing else. A QML file
+  # is implicitly a component named after itself, so Panel.qml, whose root element is
+  # the imported Panel, resolves that name back to itself through the directory
+  # import -- and on a document this size 6.11.2 never comes back from it. The same
+  # bytes named Subject.qml finish in two seconds. Both of this repository's entry points
+  # are written that way on purpose and both run, so the cycle qmllint sees is an
+  # artifact of resolving qs.Ui here, not a defect, and giving it up costs the gate
+  # nothing it was asked to find: whether the document itself compiles.
+  mkdir -p "$WORK/qml"; QB="$WORK/qml/Subject.qml"
+  while IFS= read -r q; do
+    [ -n "$q" ] && [ -f "$q" ] || continue
+    cp "$q" "$QB"
+    # A file that wedges the parser anyway must not wedge CI with it, and a run that
+    # never finished is an unread verdict rather than a broken document, so it warns.
+    timeout 60 "$QLINT" $QINC "$QB" >"$WORK/qmllint" 2>&1; QRC=$?
+    QN="$(grep -c '^Warning:' "$WORK/qmllint" || true)"
+    if [ "$QRC" -eq 0 ]; then
+      pass "qml/qmllint $q" "compiles; ${QN:-0} warning(s)"
+    elif [ "$QRC" -eq 124 ]; then
+      warn "qml/qmllint $q" "qmllint did not finish within 60s -- verdict unknown"
+    else
+      # Qt6 prints its diagnostics on stdout, so quoting the first one names the defect.
+      # A build that routed them elsewhere would leave the line blank, and a FAIL with no
+      # reason on it is the same unread verdict as a grep that never matches, so fall
+      # back to the exit status -- the signal that arrives either way.
+      QMSG="$(grep -m1 -E '^(Warning|Error):' "$WORK/qmllint" | sed "s|$QB|$q|")"
+      fail "qml/qmllint $q" "${QMSG:-exit $QRC}"
+    fi
+  done <<EOF
+$QML_LIST
+EOF
 fi
 if command -v omarchy-plugin-validate >/dev/null 2>&1; then
   if omarchy-plugin-validate . >/dev/null 2>"$WORK/opv"; then
@@ -684,7 +789,11 @@ TAGS = ["ai","bar","education","games","hyprland","kids","launcher","media",
 ALIAS = set(["autohide","bar-widget","battery","command-palette","coming-soon","dell","dev",
              "firmware","hardware","hardware-control","laptop","music","ollama","omarchy",
              "overlay","overviews","plugin","power-profiles","previews","quickapps",
-             "screenshot","shell-suite","sidebar","system-monitoring","updates","visualizer"])
+             "search","screenshot","shell-suite","sidebar","system-monitoring","updates",
+             "visualizer"])
+# The three aliases that map to null rather than to a tag. They are accepted on the
+# way in and then vanish, which is why the count has to be taken twice.
+DROPPED = set(["coming-soon","omarchy","plugin"])
 CHECK = ["The repository is public and contains installation and removal instructions.",
          "I have documented the plugin license and any external dependencies.",
          "I confirm that I own or have permission to submit this plugin and its preview assets.",
@@ -735,6 +844,10 @@ if not uniq or len(uniq) > 3:
 elif bad:
     no("submission-tags-invalid",
        "unsupported tags: %s. Choose from: %s" % (", ".join(bad), ", ".join(TAGS)))
+elif not [t for t in uniq if t not in DROPPED]:
+    no("submission-tag-count-invalid",
+       "every tag maps to nothing once aliased (%s); the count is taken AGAIN afterwards"
+       % ", ".join(uniq))
 else:
     ok("submission-tags-invalid", ", ".join(uniq))
 

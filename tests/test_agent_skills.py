@@ -1,10 +1,13 @@
-"""Unit tests for the parts of agent-ext that do not touch this machine's config.
+"""Unit tests for the parts of agent-skills that do not touch this machine's config.
 
 Run: python3 -m unittest discover -s tests -v
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -13,15 +16,48 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load():
-    spec = importlib.util.spec_from_loader("agent_ext", None)
+    spec = importlib.util.spec_from_loader("agent_skills", None)
     mod = importlib.util.module_from_spec(spec)
-    mod.__dict__["__name__"] = "agent_ext"
-    with open(os.path.join(ROOT, "bin", "agent-ext"), encoding="utf-8") as fh:
-        exec(compile(fh.read(), "agent-ext", "exec"), mod.__dict__)  # noqa: S102
+    mod.__dict__["__name__"] = "agent_skills"
+    with open(os.path.join(ROOT, "bin", "agent-skills"), encoding="utf-8") as fh:
+        exec(compile(fh.read(), "agent-skills", "exec"), mod.__dict__)  # noqa: S102
     return mod
 
 
 ax = load()
+
+
+def scan_with_home(build):
+    """Run a whole scan against a throwaway HOME the caller has just filled.
+
+    The walk is the one part of this program that meets a stranger's
+    filesystem, so the cases below are worth running end to end rather than
+    against a helper: what used to break was scan() itself, and what it cost
+    was every row on the panel rather than the one row at fault.
+    """
+    d = tempfile.mkdtemp()
+    try:
+        build(d)
+        saved_home, saved_store = ax.HOME, ax.STORE_PATH
+        try:
+            ax.HOME = d
+            ax.STORE_PATH = os.path.join(d, "categories.json")
+            return ax.scan()
+        finally:
+            ax.HOME, ax.STORE_PATH = saved_home, saved_store
+    finally:
+        # A directory a test made unreadable has to be handed back before the
+        # tree can be removed.
+        for base, dirs, _ in os.walk(d):
+            for name in dirs:
+                os.chmod(os.path.join(base, name), 0o700)
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def write_skill(root, name, description="One skill, for the walk to find."):
+    os.makedirs(os.path.join(root, name), exist_ok=True)
+    with open(os.path.join(root, name, "SKILL.md"), "w", encoding="utf-8") as fh:
+        fh.write(f"---\nname: {name}\ndescription: {description}\n---\nbody\n")
 
 
 class Frontmatter(unittest.TestCase):
@@ -338,6 +374,53 @@ class Redaction(unittest.TestCase):
         cmd = "npx -y @modelcontextprotocol/server-filesystem /home/me"
         self.assertEqual(ax.redact(cmd), cmd)
 
+    def test_a_secret_with_a_space_in_it_does_not_survive(self):
+        # Every case above uses a secret with no whitespace in it, which is how
+        # a rule that stopped at the next space passed for years. A header is
+        # one argument and is routinely written with spaces in it.
+        got = ax.redact_argv(["npx", "srv", "--header", "X-Api-Key: one two three"])
+        self.assertNotIn("one", got)
+        self.assertNotIn("three", got)
+
+    def test_a_flag_and_its_value_are_two_arguments(self):
+        got = ax.redact_argv(["npx", "srv", "--api-key", "sk live DEADBEEF"])
+        self.assertNotIn("DEADBEEF", got)
+        self.assertIn("--api-key", got)
+
+    def test_url_userinfo_is_a_credential_too(self):
+        got = ax.redact("https://someone:hunter2@host/mcp")
+        self.assertNotIn("hunter2", got)
+        self.assertNotIn("someone", got)
+        self.assertIn("host", got)
+
+    def test_a_token_in_the_path_is_removed(self):
+        # Several hosted endpoints carry their key as a path segment rather than
+        # in the query string, where dropping everything after `?` never saw it.
+        got = ax.redact("https://host/mcp/eyJhbGciOiJIUzI1NiJ9abcdefghijkl")
+        self.assertNotIn("eyJhbGciOiJIUzI1NiJ9abcdefghijkl", got)
+        self.assertIn("/mcp/", got)
+
+    def test_a_uuid_in_the_path_is_removed(self):
+        got = ax.redact("https://host/v1/3f2b8c1e-4a5b-6c7d-8e9f-0a1b2c3d4e5f/sse")
+        self.assertNotIn("3f2b8c1e", got)
+        self.assertTrue(got.endswith("/sse"), got)
+
+    def test_a_long_route_is_not_mistaken_for_a_token(self):
+        url = "https://mcp.example.com/streamable-http/messages"
+        self.assertEqual(ax.redact(url), url)
+
+    def test_a_url_inside_a_command_is_cleaned_where_it_sits(self):
+        got = ax.redact_argv(["npx", "mcp-remote", "https://me:pw@host/sse?k=1"])
+        self.assertNotIn("pw", got)
+        self.assertNotIn("k=1", got)
+        self.assertIn("npx mcp-remote", got)
+
+    def test_an_unparseable_target_is_not_an_exception(self):
+        self.assertEqual(ax.redact("http://[oops/mcp"), "\u2026")
+
+    def test_argv_that_is_not_strings_is_not_an_exception(self):
+        self.assertIsInstance(ax.redact_argv([None, 12, {"a": 1}]), str)
+
 
 class ArgumentHint(unittest.TestCase):
     IMPECCABLE = ("[craft|shape · audit|critique · animate|bolder|colorize|delight|"
@@ -448,7 +531,7 @@ class CategoryStore(unittest.TestCase):
     def test_a_missing_store_is_not_an_error(self):
         saved = ax.STORE_PATH
         try:
-            ax.STORE_PATH = "/nonexistent/agent-ext/categories.json"
+            ax.STORE_PATH = "/nonexistent/agent-skills/categories.json"
             store = ax.read_store()
         finally:
             ax.STORE_PATH = saved
@@ -469,7 +552,7 @@ class CategoryStore(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             saved_dir, saved_path = ax.STORE_DIR, ax.STORE_PATH
             try:
-                ax.STORE_DIR = os.path.join(d, "agent-ext")
+                ax.STORE_DIR = os.path.join(d, "agent-skills")
                 ax.STORE_PATH = os.path.join(ax.STORE_DIR, "categories.json")
                 ax.write_store({"custom": ["ui"], "assign": {"a": "ui"},
                                 "labels": {}, "colors": {}})
@@ -614,6 +697,267 @@ class DriftVersusVariant(unittest.TestCase):
         items = [self.rec("x", "a", "1.0")]
         ax._mark_drift(items)
         self.assertEqual(items[0]["attention"], [])
+
+
+class ScanWalk(unittest.TestCase):
+    """A skills root holds whatever someone put there, and not all of it is a
+    directory. Each case below used to end the scan with a traceback, which is
+    not one bad row on the panel but no panel at all."""
+
+    def test_a_symlink_cycle_is_a_finding_and_the_rest_still_lists(self):
+        def build(d):
+            root = os.path.join(d, ".claude", "skills")
+            os.makedirs(root)
+            os.symlink("loop", os.path.join(root, "loop"))
+            write_skill(root, "ok")
+        result = scan_with_home(build)
+        self.assertEqual([i["dirName"] for i in result["items"]], ["ok"])
+        self.assertTrue(any(f["what"].endswith("/loop") for f in result["findings"]),
+                        result["findings"])
+
+    def test_a_dangling_system_link_does_not_end_the_scan(self):
+        # ~/.codex/skills/.system is the one that happens: it exists wherever
+        # Codex is installed and Codex rewrites it on every launch, so it can be
+        # caught mid-change by any scan the panel runs.
+        def build(d):
+            root = os.path.join(d, ".codex", "skills")
+            os.makedirs(root)
+            os.symlink(os.path.join(d, "nowhere"), os.path.join(root, ".system"))
+            write_skill(root, "ok")
+        result = scan_with_home(build)
+        self.assertEqual([i["dirName"] for i in result["items"]], ["ok"])
+        self.assertTrue(any(f["what"].endswith("/.system") for f in result["findings"]),
+                        result["findings"])
+
+    def test_a_system_link_to_a_file_does_not_end_the_scan(self):
+        def build(d):
+            root = os.path.join(d, ".codex", "skills")
+            os.makedirs(root)
+            with open(os.path.join(d, "notadir"), "w", encoding="utf-8") as fh:
+                fh.write("x")
+            os.symlink(os.path.join(d, "notadir"), os.path.join(root, ".system"))
+            write_skill(root, "ok")
+        result = scan_with_home(build)
+        self.assertEqual([i["dirName"] for i in result["items"]], ["ok"])
+        self.assertTrue(any(f["what"].endswith("/.system") for f in result["findings"]),
+                        result["findings"])
+
+    def test_an_unreadable_system_directory_does_not_end_the_scan(self):
+        def build(d):
+            root = os.path.join(d, ".codex", "skills")
+            write_skill(root, "ok")
+            os.mkdir(os.path.join(root, ".system"))
+            os.chmod(os.path.join(root, ".system"), 0o000)
+        result = scan_with_home(build)
+        self.assertEqual([i["dirName"] for i in result["items"]], ["ok"])
+        self.assertTrue(any(f["what"].endswith("/.system") for f in result["findings"]),
+                        result["findings"])
+
+    def test_a_healthy_system_directory_still_yields_its_skills(self):
+        # The guard above must not have cost the thing it guards: a packaged
+        # skill set is still read, and still reads as bundled.
+        def build(d):
+            root = os.path.join(d, ".codex", "skills")
+            write_skill(os.path.join(root, ".system"), "packaged")
+            write_skill(root, "ok")
+        result = scan_with_home(build)
+        items = {i["dirName"]: i for i in result["items"]}
+        self.assertEqual(sorted(items), ["ok", "packaged"])
+        self.assertEqual(items["packaged"]["scope"], "bundled")
+        self.assertTrue(items["packaged"]["flags"]["builtin"])
+        self.assertEqual(result["findings"], [])
+
+    def test_one_bad_child_does_not_take_its_siblings_with_it(self):
+        # The guard around the `.system` listing used to cover the per-child
+        # test as well, so a single self-referential link raised out of the
+        # whole comprehension and every healthy skill beside it disappeared --
+        # blamed on a directory that had read perfectly well. Codex rewrites
+        # this directory on every launch, which is exactly when a half-made
+        # entry is there to be caught.
+        def build(d):
+            root = os.path.join(d, ".codex", "skills")
+            system = os.path.join(root, ".system")
+            write_skill(system, "packaged-a")
+            write_skill(system, "packaged-b")
+            os.symlink("loop", os.path.join(system, "loop"))
+            write_skill(root, "ok")
+        result = scan_with_home(build)
+        self.assertEqual(sorted(i["dirName"] for i in result["items"]),
+                         ["ok", "packaged-a", "packaged-b"])
+        self.assertEqual([f["what"] for f in result["findings"]],
+                         ["~/.codex/skills/.system/loop"], result["findings"])
+
+    def test_a_packaged_skill_counts_against_the_same_ceiling(self):
+        # MAX_ITEMS, MAX_DIR_ENTRIES and the deadline were all checked in the
+        # outer loop only, which left `.system` -- the one directory a stranger's
+        # package writes into -- as the only unbounded part of the walk.
+        def build(d):
+            root = os.path.join(d, ".codex", "skills")
+            for i in range(4):
+                write_skill(os.path.join(root, ".system"), "packaged%d" % i)
+        saved = ax.MAX_ITEMS
+        try:
+            ax.MAX_ITEMS = 2
+            result = scan_with_home(build)
+        finally:
+            ax.MAX_ITEMS = saved
+        self.assertEqual(len(result["items"]), 2)
+        self.assertTrue(any(f["what"] == "inventory" for f in result["findings"]),
+                        result["findings"])
+
+
+class RefusedReads(unittest.TestCase):
+    """A file we would not read and a file that is not there are two different
+    facts, and safe_read reported both as None. That is how a world-writable
+    settings.json came out as `every skill is on and everything is fine`."""
+
+    def test_a_world_writable_config_says_so(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "settings.json")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write("{}")
+            os.chmod(p, 0o666)
+            value, err = ax.read_json(p)
+        self.assertIsNone(value)
+        self.assertIn("world-writable", err)
+
+    def test_a_config_over_the_read_cap_says_so(self):
+        # An oversized ~/.claude.json took the MCP list and the usage figures
+        # with it and left the panel claiming there were none.
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "claude.json")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write('{"x":"' + "y" * ax.MAX_READ + '"}')
+            value, err = ax.read_json(p)
+        self.assertIsNone(value)
+        self.assertIn("larger than 1 MiB", err)
+
+    def test_a_refused_store_is_reported_rather_than_forgotten(self):
+        # The one file this plugin owns is the one whose loss is least visible:
+        # an empty store puts every skill back under the classifier's guess,
+        # which looks exactly like a machine nobody has filed anything on.
+        with tempfile.TemporaryDirectory() as d:
+            saved_dir, saved_path = ax.STORE_DIR, ax.STORE_PATH
+            try:
+                ax.STORE_DIR = d
+                ax.STORE_PATH = os.path.join(d, "categories.json")
+                with open(ax.STORE_PATH, "w", encoding="utf-8") as fh:
+                    fh.write('{"assign": {"nextjs": "design"}}')
+                os.chmod(ax.STORE_PATH, 0o666)
+                findings = []
+                store = ax.read_store(findings)
+            finally:
+                ax.STORE_DIR, ax.STORE_PATH = saved_dir, saved_path
+        self.assertEqual(store["assign"], {})
+        self.assertEqual([f["what"] for f in findings], ["categories.json"])
+        self.assertIn("world-writable", findings[0]["detail"])
+
+    def test_a_symlinked_config_says_so(self):
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, "real.json")
+            with open(real, "w", encoding="utf-8") as fh:
+                fh.write("{}")
+            link = os.path.join(d, "link.json")
+            os.symlink(real, link)
+            value, err = ax.read_json(link)
+        self.assertIsNone(value)
+        self.assertIn("symlink", err)
+
+    def test_a_toml_config_reports_the_same_way(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "config.toml")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write("[mcp_servers]\n")
+            os.chmod(p, 0o666)
+            value, err = ax.read_toml(p)
+        self.assertIsNone(value)
+        self.assertIn("world-writable", err)
+
+    def test_an_absent_config_is_not_a_finding(self):
+        # The regression guard for the whole change. Most machines have no
+        # ~/.codex/config.toml and no ~/.config/opencode/opencode.json, so a
+        # finding here would fire for nearly every user, every scan.
+        missing = "/nonexistent/agent-skills/none"
+        self.assertEqual(ax.read_json(missing + ".json"), (None, None))
+        self.assertEqual(ax.read_toml(missing + ".toml"), (None, None))
+        self.assertIsNone(ax.read_text(missing + ".md"))
+
+    def test_an_empty_home_produces_no_findings_at_all(self):
+        result = scan_with_home(lambda d: None)
+        self.assertEqual(result["findings"], [])
+        self.assertEqual(result["items"], [])
+
+    def test_the_reason_reaches_the_panel(self):
+        def build(d):
+            os.makedirs(os.path.join(d, ".claude"))
+            p = os.path.join(d, ".claude", "settings.json")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write('{"skillOverrides": {"x": "off"}}')
+            os.chmod(p, 0o666)
+        result = scan_with_home(build)
+        self.assertEqual([f["what"] for f in result["findings"]], ["claude settings.json"])
+        self.assertIn("world-writable", result["findings"][0]["detail"])
+
+
+class CategoryAssign(unittest.TestCase):
+    """A skill directory can be called `-h`, and argparse reads that as a
+    request for help: it printed usage, exited 0, wrote nothing, and the panel
+    reported a move that never happened."""
+
+    def run_cli(self, *argvs):
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            saved_dir, saved_path = ax.STORE_DIR, ax.STORE_PATH
+            try:
+                ax.STORE_DIR = os.path.join(d, "agent-skills")
+                ax.STORE_PATH = os.path.join(ax.STORE_DIR, "categories.json")
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    for argv in argvs:
+                        code = ax.main(list(argv))
+                return code, ax.read_store()
+            finally:
+                ax.STORE_DIR, ax.STORE_PATH = saved_dir, saved_path
+
+    def test_a_double_dash_gets_an_option_shaped_name_through(self):
+        code, store = self.run_cli(["category", "assign", "--", "-h", "design"])
+        self.assertEqual(code, 0)
+        self.assertEqual(store["assign"], {"-h": "design"})
+
+    def test_without_it_the_parser_takes_the_name_for_itself(self):
+        # Left as a test rather than a comment: this is the behaviour the `--`
+        # exists to get past, and it exits 0 having written nothing.
+        with self.assertRaises(SystemExit):
+            self.run_cli(["category", "assign", "-h", "design"])
+
+    def test_the_same_name_can_be_taken_back_off_the_shelf(self):
+        code, store = self.run_cli(["category", "assign", "--", "-h", "design"],
+                                   ["category", "unassign", "--", "-h"])
+        self.assertEqual(code, 0)
+        self.assertEqual(store["assign"], {})
+
+    def test_a_name_no_directory_could_have_is_refused(self):
+        for bad in ("a/b", "..", ".", "new\nline", "a" * 129):
+            code, store = self.run_cli(["category", "assign", "--", bad, "design"])
+            self.assertEqual(code, 2, bad)
+            self.assertEqual(store["assign"], {}, bad)
+
+    def test_a_name_only_a_shell_would_object_to_is_kept(self):
+        # Nothing here is ever handed to a shell -- the panel spawns the helper
+        # with an argv list -- so a name a shell would choke on is just a name,
+        # and refusing it would strand a skill nobody could file.
+        for good in ("with space", "mój-skill", "weird;name", "$(id)"):
+            code, store = self.run_cli(["category", "assign", "--", good, "design"])
+            self.assertEqual((code, store["assign"]), (0, {good: "design"}), good)
+
+    def test_an_ordinary_name_still_lands(self):
+        code, store = self.run_cli(["category", "assign", "nextjs", "web"])
+        self.assertEqual((code, store["assign"]), (0, {"nextjs": "web"}))
+
+    def test_a_name_shaped_like_a_directory_is_kept(self):
+        for good in ("-h", "--help", "n8n-mcp", "a_b.c", "3d", "a b", "mój-skill"):
+            self.assertRegex(good, ax.SKILL_NAME)
+        for bad in ("", ".", "..", "a/b", "a\tb", "a" * 129):
+            self.assertNotRegex(bad, ax.SKILL_NAME)
 
 
 if __name__ == "__main__":

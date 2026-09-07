@@ -5,17 +5,24 @@ import qs.Commons
 import qs.Ui
 
 // The panel: one grouped, searchable list of every skill, MCP server and Claude
-// Code plugin the three agents load. bin/agent-ext does all the I/O and prints
+// Code plugin the three agents load. bin/agent-skills does all the I/O and prints
 // one line of JSON; this file reads it and draws it, and the only process it
-// ever runs is that helper.
+// runs to read or change any of that is the helper, wrapped in a /bin/bash
+// one-liner that caps the read and takes the whole job group down with it.
+// wl-copy and xdg-open are the other two, and neither is handed anything but a
+// string the user has just asked to have put somewhere.
 //
-// v0.1 is read-only on purpose. bin/agent-ext registers exactly two subcommands
-// (`scan` and `doctor`) and has no write path, and the settled decision is that
-// the helper is the only thing that touches the filesystem -- so a switch drawn
-// here would be a button that cannot work. Instead every row says where its
-// state is written and what it currently is, which is the honest version of the
-// same information and is a claim a reviewer can check: this plugin writes
-// nothing, anywhere.
+// The helper registers three subcommands. `scan` and `doctor` only read;
+// `category` is the whole write path, and it writes one file this plugin owns,
+// ~/.config/agent-skills/categories.json, which records nothing but which shelf a
+// skill was filed on and what that shelf is called. Nothing here ever opens a
+// file for writing -- a shelf change is a helper run with the change in argv --
+// so what a reviewer has to read to believe that is the helper's argument
+// handling rather than the whole of this file. And the claim that matters, the
+// one the README leads with: no file belonging to Claude Code, OpenCode or Codex
+// is written at any point. Every row still says where its own state is written
+// and what it currently is, because that state is theirs and this panel only
+// reads it.
 Panel {
   id: root
   moduleName: "oliwier.agent-skills-manager"
@@ -124,7 +131,13 @@ Panel {
     try { return decodeURIComponent(s) } catch (e) { return s }
   }
   readonly property string pluginDir: root.fromFileUrl(Qt.resolvedUrl("."))
-  readonly property string helperPath: root.pluginDir + "/bin/agent-ext"
+  readonly property string helperPath: root.pluginDir + "/bin/agent-skills"
+  // The helper's shebang is `#!/usr/bin/env python3`, and that is a PATH lookup
+  // done by env at a moment nothing here has a say in. Naming the interpreter and
+  // handing it the helper as a script means the shebang is never reached, so
+  // which Python runs stops being a search result and becomes a decision written
+  // down in one place.
+  readonly property string pythonPath: "/usr/bin/python3"
   readonly property string homeDir: String(Quickshell.env("HOME") || "")
 
   readonly property int maxScanBytes: 2 * 1024 * 1024
@@ -142,7 +155,7 @@ Panel {
   //                while bash waits on a foreground command. `wait` is the one
   //                builtin a signal interrupts, which is what makes the trap
   //                fire the moment Process.running is set false.
-  //   head -c $3   caps the read before StdioCollector allocates it -- the
+  //   head -c $4   caps the read before StdioCollector allocates it -- the
   //                collector has no ceiling of its own, its whole surface being
   //                text/data/waitForEnd. The trailing `cat >/dev/null` drains
   //                the rest so the producer never takes SIGPIPE and reports a
@@ -152,20 +165,22 @@ Panel {
   //                `kill -- -$!` would signal the wrong group or none at all.
   //                Bash resolves %1 to the job's own group.
   //
-  // The helper path, the divisor and the cap land in positional parameters and
-  // are never interpolated into the script text, so bash cannot re-tokenize
-  // them. /bin/bash is absolute because the interpreter of a plugin's own helper
-  // must not be resolved through the inherited PATH.
+  // The interpreter, the helper path, the divisor and the cap land in positional
+  // parameters and are never interpolated into the script text, so bash cannot
+  // re-tokenize them. Both interpreters are named absolutely -- /bin/bash for
+  // this wrapper and /usr/bin/python3 for what it runs -- because neither of
+  // them is a thing to go looking for in an inherited PATH.
   readonly property string scanScript:
       "set -m\n"
-    + "\"$1\" scan --divisor \"$2\" | { head -c \"$3\"; cat >/dev/null; } &\n"
+    + "\"$1\" \"$2\" scan --divisor \"$3\" | { head -c \"$4\"; cat >/dev/null; } &\n"
     + "trap 'kill -TERM %1 2>/dev/null; exit 143' TERM INT\n"
     + "wait %1\n"
 
   // A cleared environment with three variables put back, each for a stated
-  // reason. PATH is fixed so `#!/usr/bin/env python3` in the helper cannot be
-  // pointed at an interpreter of somebody else's choosing, and so head and cat
-  // resolve. HOME is the root of everything the helper scans.
+  // reason. PATH is fixed so head and cat in the scan wrapper resolve to the
+  // system copies; it is no longer what decides which Python runs, because both
+  // spawn sites name /usr/bin/python3 themselves and the helper's shebang is
+  // never reached. HOME is the root of everything the helper scans.
   // PYTHONIOENCODING is not optional: with the environment cleared the locale is
   // C, Python would give stdout an ASCII codec, and the helper's
   // ensure_ascii=False dump would die on the first em dash in a description.
@@ -187,12 +202,18 @@ Panel {
   // the reading goes through rather than by writing a file from QML. Arguments
   // land in argv, never in a script, so nothing here can be re-tokenized by a
   // shell -- there is no shell.
+  //
+  // Every caller puts its options first and ends them with a `--`, so the
+  // arguments after it are positional whatever they look like. A skill directory
+  // is named by whoever wrote the skill and can be called `-h`; the helper's
+  // parser would read that as a request for help, print it and exit 0, and an
+  // exit 0 is what this panel reports back as a change that has been saved.
   function runCategory(argv, done) {
     if (catProc.running) { root.flashResult("One at a time", "error"); return }
     catProc.pending = done || ""
     catProc.clearEnvironment = true
     catProc.environment = root.scanEnvironment()
-    catProc.command = [root.helperPath, "category"].concat(argv)
+    catProc.command = [root.pythonPath, root.helperPath, "category"].concat(argv)
     catProc.running = true
   }
 
@@ -318,7 +339,7 @@ Panel {
     claude: "Claude Code", opencode: "OpenCode", codex: "Codex"
   })
 
-  // The codes bin/agent-ext can attach, ranked. Only 2 and above light the urgent
+  // The codes bin/agent-skills can attach, ranked. Only 2 and above light the urgent
   // colour. `unclassified` and `low-confidence` used to be here at 1: they were
   // the classifier hedging rather than anything wrong, sixteen skills on a
   // machine like this one carried one of them, and a list where most rows are
@@ -421,8 +442,9 @@ Panel {
     root.scanError = ""
     scanProc.clearEnvironment = true
     scanProc.environment = root.scanEnvironment()
-    scanProc.command = ["/bin/bash", "-c", root.scanScript, "agent-ext-scan",
-                        root.helperPath, String(root.divisor), String(root.maxScanBytes)]
+    scanProc.command = ["/bin/bash", "-c", root.scanScript, "agent-skills-scan",
+                        root.pythonPath, root.helperPath,
+                        String(root.divisor), String(root.maxScanBytes)]
     scanProc.running = true
     scanWatchdog.restart()
   }
@@ -443,7 +465,7 @@ Panel {
     root.scanConsumed = true
     var text = String(raw || "")
     if (text.length === 0) {
-      root.scanError = "bin/agent-ext printed nothing. Run it in a terminal: "
+      root.scanError = "bin/agent-skills printed nothing. Run it in a terminal: "
         + root.helperPath + " doctor"
       return
     }
@@ -460,7 +482,7 @@ Panel {
     var parsed = null
     try { parsed = JSON.parse(text) } catch (e) { parsed = null }
     if (!parsed || !Array.isArray(parsed.items)) {
-      root.scanError = "bin/agent-ext did not return a scan. Run it in a terminal: "
+      root.scanError = "bin/agent-skills did not return a scan. Run it in a terminal: "
         + root.helperPath + " doctor"
       return
     }
@@ -474,7 +496,7 @@ Panel {
   // one turn later, when both have certainly landed.
   function settleScan() {
     if (root.scanConsumed || root.scanning || root.scanError !== "") return
-    root.scanError = "bin/agent-ext could not be run. Check that " + root.helperPath
+    root.scanError = "bin/agent-skills could not be run. Check that " + root.helperPath
       + " exists and is executable."
   }
 
@@ -578,7 +600,7 @@ Panel {
         // The helper's refusals are one line each and already say what is wrong;
         // repeating them here in the panel's own words would be a second, worse
         // version of the same sentence.
-        root.flashResult("The change was refused. Run bin/agent-ext category by hand to see why", "error")
+        root.flashResult("The change was refused. Run bin/agent-skills category by hand to see why", "error")
       }
     }
   }
@@ -762,7 +784,7 @@ Panel {
       attentionText: expired ? ["The stored token has expired"] : [],
       severity: expired ? 2 : 0,
       description: "",
-      // D3: MCP servers are read-only in v0.1. There is no CLI for the toggle, it
+      // MCP servers are read-only in this version. There is no CLI for the toggle, it
       // is per project, and it would mean writing ~/.claude.json underneath
       // whatever Claude Code sessions happen to be running.
       switches: [{ tool: root.toolLabel[entry.tool] || root.clean(entry.tool, 24),
@@ -1237,7 +1259,7 @@ Panel {
 
   // Ctrl+C on a row that takes arguments opens the picker instead of copying,
   // because `/impeccable` on its own is not what anybody wanted off that row:
-  // the skill documents twenty-three actions and the one you meant is the whole
+  // the skill documents twenty-two actions and the one you meant is the whole
   // point of copying it. Every other row copies straight through, unchanged.
   function copyCurrent() {
     var r = root.currentRow()
@@ -1257,7 +1279,7 @@ Panel {
   // trip converts a nested JavaScript array into a QVariantList: it still has a
   // length and still indexes, but Array.isArray answers false. The first version
   // asked Array.isArray and so every row reported no arguments, including the
-  // one whose twenty-three actions the picker exists for. Length is the property
+  // one whose twenty-two actions the picker exists for. Length is the property
   // being relied on, so length is what gets checked.
   function pickerOptions(view) {
     var groups = view ? view.argumentChoices : null
@@ -1277,7 +1299,7 @@ Panel {
   function pickerChips() {
     if (root.pickerNaming) return []
     if (root.pickerMode === "argument") {
-      var opts = root.pickerOptions(root.pickerRow.view)
+      var opts = root.pickerRow ? root.pickerOptions(root.pickerRow.view) : []
       var out = [""]
       for (var i = 0; i < opts.length; i++) out.push(String(opts[i]))
       return out
@@ -1354,16 +1376,23 @@ Panel {
     return root.categoryTint(cat)
   }
 
+  // The row before the mode, which is the order closePicker and the other
+  // openers already use in reverse. `pickerMode` is what the overlay's model and
+  // its command line are bound to, so setting it first re-evaluated both against
+  // a row that was still the last pick's null and each threw on the dereference.
+  // Nothing was drawn wrong -- the second assignment put it right in the same
+  // frame -- but a warning about nothing is how a journal stops being read. Both
+  // readers guard the row as well, so reordering this cannot bring it back.
   function openPicker(row) {
-    root.pickerMode = "argument"
     root.pickerRow = row
+    root.pickerMode = "argument"
     root.pickerText = ""
     root.pickerIndex = 0
   }
 
   function openCategoryPicker(row) {
-    root.pickerMode = "category"
     root.pickerRow = row
+    root.pickerMode = "category"
     root.pickerText = ""
     root.pickerIndex = 0
   }
@@ -1394,7 +1423,7 @@ Panel {
   function styleSave() {
     var label = root.pickerText.trim()
     var cat = root.pickerCategory
-    var argv = ["style", cat]
+    var argv = ["style"]
     // The label always travels, so one save both renames and recolours and
     // there is no way to write half of what is on screen. An unchanged label is
     // sent empty, which is how the helper is told to drop its override and go
@@ -1404,6 +1433,8 @@ Panel {
     argv.push("--color")
     argv.push(root.styleColourIndex >= 0 && root.styleColourIndex < root.swatches.length
       ? String(root.swatches[root.styleColourIndex]) : "")
+    argv.push("--")
+    argv.push(cat)
     root.runCategory(argv, root.categoryLabelFor(cat) + " saved")
     root.styleAsking = false
     root.styleBaseIndex = root.styleColourIndex
@@ -1494,6 +1525,7 @@ Panel {
   // rather than assembled in the reader's head.
   function pickerCommand() {
     if (root.pickerMode === "argument") {
+      if (!root.pickerRow) return ""
       var base = root.pickerRow.view.invocations[0].text
       var chips = root.pickerChips()
       if (root.pickerIndex <= 0 || root.pickerIndex >= chips.length) return base
@@ -1540,10 +1572,10 @@ Panel {
       if (pick === "\u0000new") {
         var fresh = root.newCategoryName()
         if (fresh === "") { root.closePicker(); return }
-        root.runCategory(["assign", dir, fresh, "--create"],
+        root.runCategory(["assign", "--create", "--", dir, fresh],
                          dir + " filed under " + fresh)
       } else if (pick !== undefined) {
-        root.runCategory(["assign", dir, String(pick)],
+        root.runCategory(["assign", "--", dir, String(pick)],
                          dir + " filed under " + root.categoryLabelFor(pick))
       }
       root.closePicker()
@@ -1553,7 +1585,7 @@ Panel {
     if (root.pickerNaming) {
       var named = root.newCategoryName()
       if (named === "") return          // nothing typed yet, or the name is taken
-      root.runCategory(["create", named], named + " created")
+      root.runCategory(["create", "--", named], named + " created")
       root.pickerNaming = false
       root.pickerText = ""
       root.pickerIndex = 0
@@ -1574,7 +1606,7 @@ Panel {
         // Created empty and left empty. It shows up in the index and in the move
         // picker straight away; the filter strip only lists shelves with
         // something on them, so it appears there once you put a skill on it.
-        root.runCategory(["create", made], made + " created")
+        root.runCategory(["create", "--", made], made + " created")
         root.pickerText = ""
         root.pickerIndex = 0
         return
@@ -1994,7 +2026,7 @@ Panel {
 
     // A skill that documents alternatives says how many, on the line, before you
     // reach for it. Without this the only way to find out that `impeccable` takes
-    // twenty-three actions was to copy it and get `/impeccable` on its own.
+    // twenty-two actions was to copy it and get `/impeccable` on its own.
     Rectangle {
       id: argChip
       anchors.right: badge.left
@@ -2292,8 +2324,8 @@ Panel {
           }
         }
 
-        // Where the state lives. This panel writes nothing, so the useful thing it
-        // can say is which file holds the switch and what it currently says.
+        // Where the state lives. This panel does not write these switches, so the
+        // useful thing it can say is which file holds one and what it says now.
         Column {
           width: parent.width
           spacing: Style.spacing.xs
@@ -3777,7 +3809,7 @@ Panel {
             visible: root.loaded && root.filterText === "" && !root.attentionOnly
             text: root.report && (root.report.items || []).length > 0 && !root.showBundled
               ? "Turn on “Show built-in skills” to count them."
-              : "Install a skill, or run bin/agent-ext doctor to see what was read."
+              : "Install a skill, or run bin/agent-skills doctor to see what was read."
             color: root.soft
             font.family: root.face
             font.pixelSize: Style.font.caption
