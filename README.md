@@ -240,11 +240,18 @@ cycles the same four from the keyboard, and the boxes follow it. They are there 
 footer is worth nothing to somebody who arrived with a mouse: the only way to find out this list could be
 grouped by agent at all was to read that hint and try it.
 
-Three, once you have picked an agent. Grouping by agent with one agent already chosen is a heading over a
-list that is entirely that agent, and worse than redundant: a skill three agents carry opens a group under
-each of them, so filtering to OpenCode and grouping by agent used to put a **Claude Code** heading at the
-top of the list you had asked to be OpenCode's. The box steps aside while a filter is on. It is not a
-change to what you chose — clear the agent and the grouping you had comes back on its own.
+Fewer than four once you have filtered, because a grouping you have already filtered by is not a grouping.
+Pick one agent and grouping by agent is a heading over a list that is entirely that agent; pick **33
+skills** and grouping by kind is a heading that says *Skills* over nothing but skills; pick the Design
+shelf and grouping by shelf is one header over the three rows you asked for.
+
+The agent case was worse than merely redundant. A skill three agents carry opens a group under each of
+them, so filtering to OpenCode and grouping by agent used to put a **Claude Code** heading at the top of
+the list you had asked to be OpenCode's, with OpenCode's own group somewhere below the fold.
+
+Each box steps aside for as long as its filter is on, and the list falls back to shelves — or to a flat
+list, if the shelf is the thing you filtered by. None of it changes what you chose: clear the filter and
+the grouping you had comes back on its own.
 
 By shelf answers the question you open the panel with — where is the thing that does X. By agent is right
 when you are about to switch agents and want to know what that one alone can see. By kind separates skills

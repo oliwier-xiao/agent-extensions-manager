@@ -93,15 +93,25 @@ Panel {
   readonly property string groupingWanted:
     root.groupOverride !== "" ? root.groupOverride : root.groupMode
 
-  // Grouping by agent while one agent is already picked is a heading over a list
-  // that is entirely that agent. Worse than redundant: an item three agents carry
+  // A grouping you have already filtered by is not a grouping. Pick one agent and
+  // grouping by agent is a heading over a list that is entirely that agent; pick
+  // skills and grouping by kind is a heading that says "Skills" over nothing but
+  // skills. The agent case was worse than redundant -- an item three agents carry
   // opens a group under each of them, so filtering to OpenCode and grouping by
-  // agent puts a Claude Code heading at the top of the list you asked to be
-  // OpenCode's, and the OpenCode group is somewhere below the fold. So the
-  // grouping steps aside while a filter is on -- not a change to what you chose,
-  // only to what applies, and clearing the agent brings it back on its own.
-  readonly property string grouping:
-    root.toolFilter !== "" && root.groupingWanted === "Tool" ? "Category" : root.groupingWanted
+  // agent put a Claude Code heading at the top of the list you had asked to be
+  // OpenCode's, with OpenCode's own group below the fold.
+  //
+  // So the grouping steps aside for as long as the filter is on. Not a change to
+  // what you chose, only to what applies: clearing the filter brings it back.
+  readonly property string grouping: {
+    var want = root.groupingWanted
+    for (var i = 0; i < root.groupModes.length; i++)
+      if (root.groupModes[i].key === want) return want
+    // Shelf is what the panel opens on and what it falls back to -- unless the
+    // shelf is the thing you filtered by, in which case a flat list is the
+    // honest answer, because there is nothing left to group.
+    return root.categoryFilter === "" ? "Category" : "Nothing"
+  }
 
   // ---- Helper -------------------------------------------------------------
 
@@ -1631,15 +1641,19 @@ Panel {
     { key: "Nothing", label: "none" }
   ]
 
-  // What can be picked right now. The box for a grouping that cannot apply is
-  // not drawn at all, for the same reason a kind box that would filter to
-  // nothing is not: a control that is on screen and does nothing is worse than
-  // one that is absent, because absence is information and a dead button is not.
+  // What can be picked right now. The box for a grouping that cannot apply is not
+  // drawn at all, for the same reason a kind box that would filter to nothing is
+  // not: a control that is on screen and does nothing is worse than one that is
+  // absent, because absence is information and a dead button is not.
   readonly property var groupModes: {
-    if (root.toolFilter === "") return root.groupModesAll
     var out = []
-    for (var i = 0; i < root.groupModesAll.length; i++)
-      if (root.groupModesAll[i].key !== "Tool") out.push(root.groupModesAll[i])
+    for (var i = 0; i < root.groupModesAll.length; i++) {
+      var k = root.groupModesAll[i].key
+      if (k === "Tool" && root.toolFilter !== "") continue
+      if (k === "Kind" && root.kindFilter !== "") continue
+      if (k === "Category" && root.categoryFilter !== "") continue
+      out.push(root.groupModesAll[i])
+    }
     return out
   }
 
@@ -3441,6 +3455,10 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.spacing.xs
             height: Style.space(24)
+            // Filter by all three dimensions at once and the only grouping left
+            // is the flat list you are already looking at. One box that cannot
+            // be pressed is not a switch.
+            visible: root.groupModes.length > 1
 
             Repeater {
               model: root.groupModes
