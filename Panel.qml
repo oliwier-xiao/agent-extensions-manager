@@ -170,6 +170,11 @@ Panel {
   // was the one question the list could not be asked without typing a word that
   // happened to appear in the right descriptions.
   property string categoryFilter: ""
+  // Whether the shelf strip shows every chip or only the row that fits. Kept
+  // across opens, the way the folded groups and the grouping override already
+  // are: it is a view preference, and re-collapsing it on every open would be
+  // the panel forgetting something the user just told it.
+  property bool filtersExpanded: false
   property bool attentionOnly: false
   property var collapsed: ({})
   property string expandedKey: ""
@@ -1462,6 +1467,7 @@ Panel {
     required property var view
     property bool hasCursor: false
     property bool expanded: false
+    property bool copied: false
     signal activated()
     signal entered()
     signal copyRequested(string text)
@@ -1710,6 +1716,41 @@ Panel {
       radius: width / 2
       visible: er.view.attention.length > 0
       color: er.broken ? Color.urgent : root.soft
+    }
+
+    // The confirmation, in the bottom corner of the open card -- the same card
+    // that holds the invocation chips you clicked. It was on the row line for a
+    // while, where it covered the token count and the usage count, and then in
+    // the footer, a panel's height away from the thing it was about. Here it is
+    // out of every column's way and still inside the one card the copy came
+    // from. It appears only once the clipboard write has been attempted and
+    // reported back, never on the keystroke.
+    Row {
+      anchors.right: parent.right
+      anchors.rightMargin: Style.spacing.md
+      anchors.bottom: parent.bottom
+      anchors.bottomMargin: Style.spacing.md
+      spacing: Style.spacing.xs
+      visible: er.copied && er.expanded
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        textFormat: Text.PlainText
+        text: "\u2713"
+        color: root.hue
+        font.family: root.face
+        font.pixelSize: Style.font.caption
+        font.bold: true
+      }
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        textFormat: Text.PlainText
+        text: "copied"
+        color: root.hue
+        font.family: root.face
+        font.pixelSize: Style.font.caption
+      }
     }
 
     MouseArea {
@@ -2289,28 +2330,66 @@ Panel {
           elide: Text.ElideRight
         }
 
-        // The shelves, as one line you can point at. A single row that scrolls
-        // sideways rather than a block that wraps: the list underneath is what
-        // the panel is for, and a filter bar that takes three rows of it on a
-        // machine with fifteen categories has taken more than it gives.
-        Flickable {
+        // The shelves, as chips you can point at: one row of them, and the
+        // rest one click below it.
+        //
+        // The first version scrolled sideways instead. That is the wrong shape
+        // for this control -- a strip you have to drag is a strip whose contents
+        // you cannot see, and the entire point of naming every shelf is that you
+        // find the one you want without hunting for it. Wrapping the whole set
+        // unasked is the other wrong shape: the list underneath is what the
+        // panel is for, and three rows of filter on a machine with fifteen
+        // categories takes more than it gives. So it is one row until you say
+        // otherwise, and it stays open once you have.
+        Item {
+          id: filterStrip
           width: parent.width
-          height: root.categoryChips.length > 0 ? Style.space(24) : 0
-          visible: height > 0
-          contentWidth: chipRow.implicitWidth
+          visible: root.categoryChips.length > 0
+          height: visible ? (root.filtersExpanded ? catFlow.implicitHeight
+                                                  : catFlow.rowHeight) : 0
           clip: true
-          flickableDirection: Flickable.HorizontalFlick
-          boundsBehavior: Flickable.StopAtBounds
 
-          Row {
-            id: chipRow
-            height: parent.height
+          // A click, not a keystroke, and not one you make often. Short enough
+          // to stay out of the way and long enough that the rows are seen to
+          // arrive rather than to appear.
+          Behavior on height {
+            NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+          }
+
+          Flow {
+            id: catFlow
+            // The toggle keeps its corner in both states and at a width that
+            // does not depend on its own label, so opening the strip never
+            // reflows the row you were already reading, and the count changing
+            // from 9 to 10 never nudges a chip onto the next line. Reserving the
+            // space unconditionally is also what keeps this out of a binding
+            // loop: the flow's width would otherwise depend on the toggle, whose
+            // visibility depends on how the flow wrapped.
+            width: parent.width - moreBox.width - Style.space(16) - Style.spacing.sm
             spacing: Style.spacing.sm
 
+            readonly property int rowHeight: Style.space(20)
+
+            // How many chips the first row could not take. Counted off the
+            // laid-out children rather than measured from their text, so it is
+            // right at any panel width, font scale or category name. `width` and
+            // `implicitHeight` are read to make this re-evaluate when the flow
+            // relayouts; the Repeater is a child here too and has no size of its
+            // own, which is what the width test excludes.
+            readonly property int hidden: {
+              var w = catFlow.width
+              var h = catFlow.implicitHeight
+              var n = 0
+              for (var i = 0; i < catFlow.children.length; i++) {
+                var c = catFlow.children[i]
+                if (c && c.visible && c.width > 0 && c.y > 0) n++
+              }
+              return n
+            }
+
             Rectangle {
-              anchors.verticalCenter: parent.verticalCenter
               width: allText.implicitWidth + Style.space(16)
-              height: Style.space(20)
+              height: catFlow.rowHeight
               radius: height / 2
               color: root.categoryFilter === "" ? Util.alpha(root.hue, 0.24)
                                                 : Util.alpha(root.fg, 0.07)
@@ -2337,9 +2416,8 @@ Panel {
                 required property var modelData
                 readonly property bool on: root.categoryFilter === catChip.modelData.key
 
-                anchors.verticalCenter: parent.verticalCenter
                 width: catRow.implicitWidth + Style.space(16)
-                height: Style.space(20)
+                height: catFlow.rowHeight
                 radius: height / 2
                 color: catChip.on ? Util.alpha(catChip.modelData.colour, 0.34)
                                   : Util.alpha(root.fg, 0.07)
@@ -2392,6 +2470,39 @@ Panel {
                 }
               }
             }
+          }
+
+          // The widest label this control can ever hold, measured once. The
+          // toggle is sized to it rather than to what it currently says.
+          TextMetrics {
+            id: moreBox
+            font.family: root.face
+            font.pixelSize: Style.font.caption
+            text: "+99 more"
+          }
+
+          Rectangle {
+            anchors.right: parent.right
+            anchors.top: parent.top
+            visible: catFlow.hidden > 0
+            width: moreBox.width + Style.space(16)
+            height: catFlow.rowHeight
+            radius: height / 2
+            color: moreHover.hovered ? Util.alpha(root.fg, 0.18) : Util.alpha(root.fg, 0.07)
+
+            Text {
+              anchors.centerIn: parent
+              textFormat: Text.PlainText
+              // Says what is behind it while it is shut, and what it does while
+              // it is open. "+3 more" and "less" are the two true sentences.
+              text: root.filtersExpanded ? "less" : "+" + String(catFlow.hidden) + " more"
+              color: moreHover.hovered ? root.fg : root.readable
+              font.family: root.face
+              font.pixelSize: Style.font.caption
+            }
+
+            HoverHandler { id: moreHover; cursorShape: Qt.PointingHandCursor }
+            TapHandler { onTapped: root.filtersExpanded = !root.filtersExpanded }
           }
         }
 
@@ -2686,6 +2797,7 @@ Panel {
                 root.expandedKey = root.expandedKey === rowHost.modelData.key
                   ? "" : rowHost.modelData.key
               }
+              copied: root.copiedKey === rowHost.modelData.key
               onRevealRequested: function (path) { root.openInFiles(path) }
               onCopyRequested: function (text) {
                 root.cursorActive = true
@@ -2709,64 +2821,33 @@ Panel {
         PanelSeparator { width: parent.width; foreground: root.fg }
 
         // The promise on screen switches with the mode, so it is always true.
-        // The copy tick sits in the corner beside it rather than on the row it
-        // came from, where it covered the two numbers the row exists to show.
-        Item {
+        // Nothing else lives on this line: the copy tick was here for a while
+        // and it was the wrong place twice over, competing with the controls for
+        // a corner and sitting a panel's height away from the row it was about.
+        Text {
           width: parent.width
-          height: hintText.implicitHeight
-
-          Row {
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.spacing.xs
-            visible: root.copiedKey !== ""
-
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              textFormat: Text.PlainText
-              text: "\u2713"
-              color: root.hue
-              font.family: root.face
-              font.pixelSize: Style.font.caption
-              font.bold: true
-            }
-
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              textFormat: Text.PlainText
-              text: "copied"
-              color: root.hue
-              font.family: root.face
-              font.pixelSize: Style.font.caption
-            }
+          horizontalAlignment: Text.AlignHCenter
+          textFormat: Text.PlainText
+          text: {
+            var typing = root.filterText !== ""
+            var cur = root.currentRow()
+            var picks = cur && cur.rowType !== "header"
+              && root.pickerOptions(cur.view).length > 0
+            var parts = [typing ? "Backspace to erase" : "Type to search"]
+            parts.push("Enter to open")
+            // The promise changes with the row, because on a row that documents
+            // actions Ctrl+C does not copy: it asks which one.
+            parts.push(picks ? "^C to pick an action" : "^C to copy")
+            parts.push("^G to regroup")
+            parts.push("^R to rescan")
+            parts.push(root.expandedKey !== "" || typing || root.attentionOnly
+              || root.categoryFilter !== "" ? "Esc to go back" : "Esc to close")
+            return parts.join("  \u00b7  ")
           }
-
-          Text {
-            id: hintText
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
-            textFormat: Text.PlainText
-            text: {
-              var typing = root.filterText !== ""
-              var cur = root.currentRow()
-              var picks = cur && cur.rowType !== "header"
-                && root.pickerOptions(cur.view).length > 0
-              var parts = [typing ? "Backspace to erase" : "Type to search"]
-              parts.push("Enter to open")
-              // The promise changes with the row, because on a row that
-              // documents actions Ctrl+C does not copy: it asks which one.
-              parts.push(picks ? "^C to pick an action" : "^C to copy")
-              parts.push("^G to regroup")
-              parts.push("^R to rescan")
-              parts.push(root.expandedKey !== "" || typing || root.attentionOnly
-                || root.categoryFilter !== "" ? "Esc to go back" : "Esc to close")
-              return parts.join("  \u00b7  ")
-            }
-            color: root.soft
-            font.family: root.face
-            font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
-          }
+          color: root.soft
+          font.family: root.face
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
         }
       }
 
@@ -2933,12 +3014,16 @@ Panel {
 
               // What Down and Up step by. Measured from the laid-out chips
               // rather than assumed, so it stays right at any panel width or
-              // font scale.
+              // font scale. The width test matters: the Repeater is a child of
+              // the Flow as well, sits at y 0 with no size, and would otherwise
+              // be counted as a chip and put every Down one place too far.
               readonly property int perRow: {
+                var w = optionFlow.width
+                var h = optionFlow.implicitHeight
                 var n = 0
                 for (var i = 0; i < optionFlow.children.length; i++) {
                   var c = optionFlow.children[i]
-                  if (c && c.visible && c.y === 0) n++
+                  if (c && c.visible && c.width > 0 && c.y === 0) n++
                 }
                 return Math.max(1, n)
               }
