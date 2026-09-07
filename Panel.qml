@@ -170,6 +170,11 @@ Panel {
   // was the one question the list could not be asked without typing a word that
   // happened to appear in the right descriptions.
   property string categoryFilter: ""
+  // The other two dimensions the summary boxes stand for: what a thing is, and
+  // which agent can see it. One value each, because two of anything here would
+  // be a query language and the search field is already the place for that.
+  property string kindFilter: ""
+  property string toolFilter: ""
   // Whether the shelf strip shows every chip or only the row that fits. Kept
   // across opens, the way the folded groups and the grouping override already
   // are: it is a view preference, and re-collapsing it on every open would be
@@ -754,9 +759,7 @@ Panel {
     var source = root.catalogue
     for (var i = 0; i < source.length; i++) {
       var v = source[i]
-      if (root.attentionOnly && v.severity < 2) continue
-      if (root.categoryFilter !== "" && v.category !== root.categoryFilter) continue
-      if (query !== "" && v.haystack.indexOf(query) < 0) continue
+      if (!root.passes(v, "", query)) continue
 
       if (mode === "Tool") {
         // A skill mounted in three tools belongs in all three groups: the question
@@ -833,6 +836,29 @@ Panel {
   // Recomputed from the visible rows, never from report.counts: the helper's
   // counts include the bundled skills that `showBundled` is hiding, and they know
   // nothing about the filter.
+  // One row against every filter except the one dimension that is asking.
+  //
+  // Faceting, and it is not a nicety: a chip has to keep saying what picking it
+  // would give you. Counted against its own filter, "6 servers" becomes "0
+  // servers" the moment you click "17 skills", the chip vanishes, and there is
+  // no way back to it except a keystroke nobody was told about. So the kind
+  // boxes are counted with every filter but the kind, the agent boxes with
+  // every filter but the agent, and the shelf chips with every filter but the
+  // shelf. The list itself, below, is counted against all of them.
+  //
+  // The search text is never excepted: typing narrows everything, including the
+  // things you could narrow to next.
+  function passes(v, except, query) {
+    if (except !== "attention" && root.attentionOnly && v.severity < 2) return false
+    if (except !== "category" && root.categoryFilter !== ""
+        && v.category !== root.categoryFilter) return false
+    if (except !== "kind" && root.kindFilter !== "" && v.kind !== root.kindFilter) return false
+    if (except !== "tool" && root.toolFilter !== ""
+        && v.toolList.indexOf(root.toolFilter) < 0) return false
+    if (query !== "" && v.haystack.indexOf(query) < 0) return false
+    return true
+  }
+
   // Everything the current filter admits, before grouping and before anything is
   // collapsed. `rows` cannot answer this: a folded group has no rows in it, and
   // the summary was reporting fourteen skills on a machine with sixteen because
@@ -845,13 +871,8 @@ Panel {
     if (!root.loaded) return out
     var query = root.fold(root.filterText.trim())
     var src = root.catalogue
-    for (var i = 0; i < src.length; i++) {
-      var v = src[i]
-      if (root.attentionOnly && v.severity < 2) continue
-      if (root.categoryFilter !== "" && v.category !== root.categoryFilter) continue
-      if (query !== "" && v.haystack.indexOf(query) < 0) continue
-      out.push(v)
-    }
+    for (var i = 0; i < src.length; i++)
+      if (root.passes(src[i], "", query)) out.push(src[i])
     return out
   }
 
@@ -861,11 +882,13 @@ Panel {
   readonly property var categoryChips: {
     var out = []
     if (!root.loaded) return out
+    var query = root.fold(root.filterText.trim())
     var counts = ({})
     var src = root.catalogue
     for (var i = 0; i < src.length; i++) {
       var v = src[i]
       if (v.kind !== "skill") continue
+      if (!root.passes(v, "category", query)) continue
       counts[v.category] = (counts[v.category] || 0) + 1
     }
     var order = root.knownCategories()
@@ -885,43 +908,63 @@ Panel {
   readonly property var countChips: {
     var out = []
     if (!root.loaded) return out
+    var query = root.fold(root.filterText.trim())
+    var src = root.catalogue
     var skills = 0, mcp = 0, plugins = 0, attention = 0
-    for (var i = 0; i < root.visibleItems.length; i++) {
-      var v = root.visibleItems[i]
-      if (v.kind === "skill") skills++
-      else if (v.kind === "mcp") mcp++
-      else plugins++
-      if (v.severity >= 2) attention++
+    for (var i = 0; i < src.length; i++) {
+      var v = src[i]
+      if (root.passes(v, "kind", query)) {
+        if (v.kind === "skill") skills++
+        else if (v.kind === "mcp") mcp++
+        else plugins++
+      }
+      // Attention is its own dimension and counts against its own exception, so
+      // the box keeps saying how many there are while you are looking at them.
+      if (v.severity >= 2 && root.passes(v, "attention", query)) attention++
     }
-    out.push({ n: String(skills), what: skills === 1 ? "skill" : "skills", urgent: false })
-    if (mcp > 0) out.push({ n: String(mcp), what: mcp === 1 ? "server" : "servers", urgent: false })
-    if (plugins > 0) out.push({ n: String(plugins), what: plugins === 1 ? "plugin" : "plugins", urgent: false })
-    if (attention > 0) out.push({ n: String(attention), what: "need attention", urgent: true })
+    // Every box that is drawn can be clicked, so no box is drawn that would
+    // filter to nothing. A dead end you can only back out of is worse than an
+    // absence, and the empty list underneath already says when there is nothing.
+    if (skills > 0) out.push({ kind: "skill", n: String(skills),
+                               what: skills === 1 ? "skill" : "skills", urgent: false })
+    if (mcp > 0) out.push({ kind: "mcp", n: String(mcp),
+                            what: mcp === 1 ? "server" : "servers", urgent: false })
+    if (plugins > 0) out.push({ kind: "plugin", n: String(plugins),
+                                what: plugins === 1 ? "plugin" : "plugins", urgent: false })
+    if (attention > 0) out.push({ kind: "attention", n: String(attention),
+                                  what: "need attention", urgent: true })
     return out
   }
 
   readonly property var toolChips: {
     var out = []
-    if (!root.loaded || !root.showTokens) return out
+    if (!root.loaded) return out
+    var query = root.fold(root.filterText.trim())
+    var src = root.catalogue
     var order = ["claude", "opencode", "codex"]
     var per = ({})
-    var lines = ({})
-    for (var i = 0; i < root.visibleItems.length; i++) {
-      var v = root.visibleItems[i]
-      if (v.kind !== "skill") continue
+    var seen = ({})
+    for (var i = 0; i < src.length; i++) {
+      var v = src[i]
+      if (!root.passes(v, "tool", query)) continue
       for (var x = 0; x < order.length; x++) {
+        if (v.toolList.indexOf(order[x]) < 0) continue
+        seen[order[x]] = (seen[order[x]] || 0) + 1
+        // Only a skill has an always-on cost, and only a switched-on one is
+        // being paid for. The count beside it is everything that agent can see.
+        if (v.kind !== "skill") continue
         var st = v.tools[order[x]]
         if (!st || st === "off") continue
         per[order[x]] = (per[order[x]] || 0) + (Number(v.tokens) || 0)
-        lines[order[x]] = (lines[order[x]] || 0) + 1
       }
     }
     for (var o = 0; o < order.length; o++) {
-      var n = per[order[o]]
-      if (!n) continue
+      if (!seen[order[o]]) continue
+      var n = per[order[o]] || 0
       out.push({ tool: order[o], label: root.toolLabel[order[o]],
-                 count: String(lines[order[o]]),
-                 tokens: n >= 1000 ? "~" + (n / 1000).toFixed(1) + "k" : "~" + String(n),
+                 count: String(seen[order[o]]),
+                 tokens: !root.showTokens || n === 0 ? ""
+                   : (n >= 1000 ? "~" + (n / 1000).toFixed(1) + "k" : "~" + String(n)),
                  colour: root.markColour(order[o]) })
     }
     return out
@@ -972,6 +1015,17 @@ Panel {
     root.filterText = next
     root.selectedIndex = 0
     root.cursorActive = true
+  }
+
+  readonly property bool anyChipFilter: root.categoryFilter !== "" || root.kindFilter !== ""
+    || root.toolFilter !== "" || root.attentionOnly
+
+  function clearChipFilters() {
+    root.categoryFilter = ""
+    root.kindFilter = ""
+    root.toolFilter = ""
+    root.attentionOnly = false
+    root.selectedIndex = 0
   }
 
   function setCollapsed(key, value) {
@@ -2136,9 +2190,11 @@ Panel {
         }
 
         if (event.key === Qt.Key_Escape) {
+          // The boxes at the top come off together rather than one Escape each.
+          // Four presses to undo four clicks is a chain nobody can predict the
+          // middle of; one press puts the header back the way it started.
           if (root.expandedKey !== "") root.expandedKey = ""
-          else if (root.categoryFilter !== "") root.categoryFilter = ""
-          else if (root.attentionOnly) root.attentionOnly = false
+          else if (root.anyChipFilter) root.clearChipFilters()
           else if (typing) root.setFilter("")
           else root.close()
           event.accepted = true
@@ -2391,21 +2447,24 @@ Panel {
               width: allText.implicitWidth + Style.space(16)
               height: catFlow.rowHeight
               radius: height / 2
-              color: root.categoryFilter === "" ? Util.alpha(root.hue, 0.24)
-                                                : Util.alpha(root.fg, 0.07)
+              color: !root.anyChipFilter ? Util.alpha(root.hue, 0.24)
+                                         : Util.alpha(root.fg, 0.07)
 
               Text {
                 id: allText
                 anchors.centerIn: parent
                 textFormat: Text.PlainText
                 text: "all"
-                color: root.categoryFilter === "" ? root.fg : root.readable
+                color: !root.anyChipFilter ? root.fg : root.readable
                 font.family: root.face
                 font.pixelSize: Style.font.caption
               }
 
               HoverHandler { cursorShape: Qt.PointingHandCursor }
-              TapHandler { onTapped: { root.categoryFilter = ""; root.selectedIndex = 0 } }
+              // Clears every box, not just the shelves. It is the one control on
+              // screen that means "show me everything again", and leaving an
+              // agent or a kind still on after clicking it would be a lie.
+              TapHandler { onTapped: root.clearChipFilters() }
             }
 
             Repeater {
@@ -2519,11 +2578,19 @@ Panel {
             Rectangle {
               id: countChip
               required property var modelData
+              readonly property bool urgent: countChip.modelData.urgent
+              readonly property bool on: countChip.modelData.kind === "attention"
+                ? root.attentionOnly : root.kindFilter === countChip.modelData.kind
+
               width: countChipRow.implicitWidth + Style.space(18)
               height: Style.space(24)
               radius: Style.cornerRadius
-              color: countChip.modelData.urgent ? Util.alpha(Color.urgent, 0.14)
-                                                : Util.alpha(root.fg, 0.07)
+              color: {
+                var base = countChip.urgent ? Color.urgent : root.fg
+                if (countChip.on) return Util.alpha(countChip.urgent ? Color.urgent : root.hue, 0.30)
+                if (countHover.hovered) return Util.alpha(base, 0.16)
+                return Util.alpha(base, countChip.urgent ? 0.14 : 0.07)
+              }
 
               Row {
                 id: countChipRow
@@ -2534,7 +2601,7 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
                   text: countChip.modelData.n
-                  color: countChip.modelData.urgent ? Color.urgent : root.fg
+                  color: countChip.urgent ? Color.urgent : root.fg
                   font.family: root.face
                   font.pixelSize: Style.font.bodySmall
                   font.bold: true
@@ -2544,9 +2611,24 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
                   text: countChip.modelData.what
-                  color: countChip.modelData.urgent ? Color.urgent : root.soft
+                  color: countChip.urgent ? Color.urgent
+                    : (countChip.on || countHover.hovered ? root.readable : root.soft)
                   font.family: root.face
                   font.pixelSize: Style.font.caption
+                }
+              }
+
+              HoverHandler { id: countHover; cursorShape: Qt.PointingHandCursor }
+              TapHandler {
+                // Clicking the one already on turns it off, the same gesture as
+                // the shelf chips below. "need attention" is not a kind, so it
+                // drives the attention filter rather than the kind filter.
+                onTapped: {
+                  if (countChip.modelData.kind === "attention")
+                    root.attentionOnly = !root.attentionOnly
+                  else
+                    root.kindFilter = countChip.on ? "" : String(countChip.modelData.kind)
+                  root.selectedIndex = 0
                 }
               }
             }
@@ -2568,10 +2650,13 @@ Panel {
             Rectangle {
               id: toolChip
               required property var modelData
+              readonly property bool on: root.toolFilter === toolChip.modelData.tool
+
               width: toolChipRow.implicitWidth + Style.space(18)
               height: Style.space(24)
               radius: Style.cornerRadius
-              color: Util.alpha(toolChip.modelData.colour, 0.13)
+              color: Util.alpha(toolChip.modelData.colour,
+                                toolChip.on ? 0.34 : (toolHover.hovered ? 0.22 : 0.13))
 
               Row {
                 id: toolChipRow
@@ -2589,7 +2674,7 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
                   text: toolChip.modelData.label
-                  color: root.readable
+                  color: toolChip.on ? root.fg : root.readable
                   font.family: root.face
                   font.pixelSize: Style.font.caption
                 }
@@ -2605,11 +2690,20 @@ Panel {
 
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
+                  visible: text !== ""
                   textFormat: Text.PlainText
                   text: toolChip.modelData.tokens
                   color: root.fg
                   font.family: root.face
                   font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              HoverHandler { id: toolHover; cursorShape: Qt.PointingHandCursor }
+              TapHandler {
+                onTapped: {
+                  root.toolFilter = toolChip.on ? "" : String(toolChip.modelData.tool)
+                  root.selectedIndex = 0
                 }
               }
             }
@@ -2840,8 +2934,8 @@ Panel {
             parts.push(picks ? "^C to pick an action" : "^C to copy")
             parts.push("^G to regroup")
             parts.push("^R to rescan")
-            parts.push(root.expandedKey !== "" || typing || root.attentionOnly
-              || root.categoryFilter !== "" ? "Esc to go back" : "Esc to close")
+            parts.push(root.expandedKey !== "" || typing || root.anyChipFilter
+              ? "Esc to go back" : "Esc to close")
             return parts.join("  \u00b7  ")
           }
           color: root.soft
