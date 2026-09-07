@@ -1511,7 +1511,7 @@ Panel {
       if (at === undefined) return ""
       if (at === "\u0000addnew") return "new category"
       if (at === "\u0000new") return "new category  " + root.newCategoryName()
-      return "edit  " + root.categoryLabelFor(at)
+      return root.categoryLabelFor(at)
     }
     if (root.pickerMode === "style")
       return root.pickerText.trim() === "" ? root.pickerCategory : root.pickerText.trim()
@@ -3978,13 +3978,20 @@ Panel {
               width: picker.width
               textFormat: Text.PlainText
               text: {
-                if (root.styleAsking) return "unsaved changes"
-                if (root.pickerNaming) return "new category"
-                if (picker.managing) return "categories"
-                if (picker.styling) return "the " + root.pickerCategory + " category"
+                // One grammar for all six states: the thing you are working
+                // on, then what this screen does to it. The line sits in the
+                // same place at the same size every time, so it cannot be a
+                // status here, a bare noun there and a dangling preposition in
+                // the third -- the reader learns to read it once.
+                var cat = root.categoryLabelFor(root.pickerCategory)
+                if (root.styleAsking) return cat + "  \u00b7  unsaved changes"
+                if (root.pickerNaming) return "categories  \u00b7  name a new one"
+                if (picker.managing) return "categories  \u00b7  pick one to edit"
+                if (picker.styling) return cat + "  \u00b7  rename or recolour"
                 if (!root.pickerOpen || !root.pickerRow) return ""
                 var n = root.clean(root.pickerRow.view.name, 60)
-                return picker.shelving ? n + "  \u00b7  move to" : n + "  \u00b7  pick an action"
+                return picker.shelving ? n + "  \u00b7  move to a category"
+                                       : n + "  \u00b7  pick an action"
               }
               color: root.soft
               font.family: root.face
@@ -4084,16 +4091,29 @@ Panel {
             textFormat: Text.PlainText
             visible: text !== ""
             text: {
-              if (root.styleAsking) return "Keep the new name and colour, or go back to what was there?"
-              if (root.pickerNaming) return "Lower case letters, digits and dashes. It starts empty; put something on it with ^M from any row."
-              if (picker.managing) return "Pick a category to rename it or change its colour. Type a name nothing answers to and it becomes a new one."
-              if (picker.styling) return "Type to rename it. Pick a colour, or clear it to go back to the theme."
-              if (picker.shelving) return "Type a name nothing answers to and it becomes a new category."
+              // Each line names the same action the control beside it names.
+              // The question used to ask you to "keep" or "go back" and then
+              // offered buttons that said Save and Discard: four words for two
+              // actions, and the reader has to map them.
+              // Name only what actually changed. Offering to save "the new name
+              // and colour" after you only tried a colour is a prompt about a
+              // change you did not make, and the reader has to go and check.
+              if (root.styleAsking) {
+                var renamed = root.pickerText.trim() !== root.styleBaseLabel
+                var recoloured = root.styleColourIndex !== root.styleBaseIndex
+                var both = renamed && recoloured
+                return "Save the new " + (both ? "name and colour" : renamed ? "name" : "colour")
+                     + ", or discard " + (both ? "them" : "it") + " and keep what was there?"
+              }
+              if (root.pickerNaming) return "Lower case letters, digits and dashes. The new category starts empty \u2014 put something on it with ^M from any row."
+              if (picker.managing) return "Pick one to rename it or change its colour. Type a name no category has yet to make a new one."
+              if (picker.styling) return "Type to rename it. Pick a colour, or choose theme default to let the theme decide."
+              if (picker.shelving) return "Type a name no category has yet to make a new one."
               if (!root.pickerOpen || !root.pickerRow) return ""
               var args = root.pickerRow.view.argumentChoices || []
               for (var i = 0; i < args.length; i++)
                 if (args[i].kind === "value")
-                  return "Then type the " + args[i].label + " after pasting."
+                  return "This copies the command only \u2014 type the " + args[i].label + " after you paste it."
               return ""
             }
             color: root.soft
@@ -4247,9 +4267,9 @@ Panel {
             horizontalAlignment: Text.AlignHCenter
             textFormat: Text.PlainText
             text: {
-              if (root.styleAsking) return "Enter to save  \u00b7  Esc to drop the changes"
+              if (root.styleAsking) return "Enter to save  \u00b7  Esc to discard"
               if (root.pickerNaming) return "Type the name  \u00b7  Enter to create it  \u00b7  Esc to go back"
-              if (picker.managing) return "Type to filter or name a new one  \u00b7  Enter to open it  \u00b7  Esc to go back"
+              if (picker.managing) return "Type to filter or name a new one  \u00b7  Enter to edit it  \u00b7  Esc to go back"
               if (picker.styling) return "Type to rename  \u00b7  arrows to try a colour  \u00b7  Enter to save  \u00b7  Esc to go back"
               if (picker.shelving) return "Type to filter  \u00b7  arrows to choose  \u00b7  Enter to move it  \u00b7  Esc to go back"
               return "Arrows or a letter to choose  \u00b7  Enter to copy  \u00b7  Esc to go back"
