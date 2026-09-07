@@ -430,3 +430,72 @@ class CategoryStore(unittest.TestCase):
         self.assertEqual(written["assign"], {})
         self.assertEqual(written["version"], 1)
         self.assertEqual(leftovers, [])
+
+
+class PluginSkillRoots(unittest.TestCase):
+    """A plugin's own skills. They were invisible: the panel listed the plugin as
+    one row and never opened it, so on a machine where a skill is installed as a
+    plugin rather than copied into ~/.claude/skills, its documented actions did
+    not exist as far as this program was concerned."""
+
+    def roots(self, doc):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, ".claude", "plugins"))
+            p = os.path.join(d, ".claude", "plugins", "installed_plugins.json")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(doc)
+            saved = ax.HOME
+            try:
+                ax.HOME = d
+                return ax.plugin_skill_roots()
+            finally:
+                ax.HOME = saved
+
+    def test_the_recorded_install_path_is_used_verbatim(self):
+        # Not the highest version directory in the cache: several can sit there
+        # and only the recorded one is the version Claude Code actually loaded.
+        roots = self.roots('{"version":2,"plugins":{"impeccable@impeccable":['
+                           '{"scope":"user","installPath":"/x/cache/impeccable/impeccable/4.1.1"}]}}')
+        self.assertEqual(len(roots), 1)
+        self.assertEqual(roots[0]["path"], "/x/cache/impeccable/impeccable/4.1.1/skills")
+        self.assertEqual(roots[0]["plugin"], "impeccable")
+        self.assertEqual(roots[0]["scope"], "user")
+
+    def test_only_claude_sees_them(self):
+        # OpenCode reads ~/.claude/skills natively; it does not read another
+        # agent's plugin cache.
+        roots = self.roots('{"plugins":{"a@m":[{"installPath":"/x/a"}]}}')
+        self.assertEqual(roots[0]["tools"], ["claude"])
+
+    def test_the_namespace_is_the_plugin_not_the_marketplace(self):
+        # The id is `plugin@marketplace` and Claude Code addresses the skill as
+        # `/plugin:skill`, so the half before the @ is the one that matters.
+        roots = self.roots('{"plugins":{"superpowers@claude-plugins-official":'
+                           '[{"installPath":"/x/sp"}]}}')
+        self.assertEqual(roots[0]["plugin"], "superpowers")
+
+    def test_a_relative_or_missing_install_path_is_refused(self):
+        for doc in ('{"plugins":{"a@m":[{"installPath":"relative/path"}]}}',
+                    '{"plugins":{"a@m":[{"installPath":123}]}}',
+                    '{"plugins":{"a@m":[{}]}}',
+                    '{"plugins":{"a@m":"not a list"}}'):
+            self.assertEqual(self.roots(doc), [], doc)
+
+    def test_a_plugin_name_that_is_not_a_bare_word_is_refused(self):
+        # The name is interpolated into an invocation that lands in a prompt.
+        for bad in ("../etc@m", "a b@m", "$(id)@m", "@m"):
+            doc = '{"plugins":{"%s":[{"installPath":"/x/a"}]}}' % bad
+            self.assertEqual(self.roots(doc), [], bad)
+
+    def test_no_plugins_file_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            saved = ax.HOME
+            try:
+                ax.HOME = d
+                self.assertEqual(ax.plugin_skill_roots(), [])
+            finally:
+                ax.HOME = saved
+
+    def test_a_malformed_plugins_file_is_not_an_error(self):
+        self.assertEqual(self.roots("{not json"), [])
+        self.assertEqual(self.roots("[]"), [])

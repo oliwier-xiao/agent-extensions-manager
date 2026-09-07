@@ -522,7 +522,48 @@ def skill_roots() -> list[dict]:
         {"path": f"{HOME}/.config/opencode/skills", "tools": ["opencode"], "scope": "user"},
         {"path": f"{HOME}/.codex/skills", "tools": ["codex"], "scope": "user"},
         {"path": f"{HOME}/.agents/skills", "tools": agents_tools, "scope": "shared"},
-    ]
+    ] + plugin_skill_roots()
+
+
+def plugin_skill_roots() -> list[dict]:
+    """The skills a Claude Code plugin brings with it.
+
+    These were invisible. The four roots above are the ones a user drops a
+    directory into; a plugin's skills live inside its cached checkout, and until
+    now the panel listed the plugin as one row and never opened it. On a machine
+    where `impeccable` is installed as a plugin rather than copied into
+    ~/.claude/skills, that meant its twenty-three documented actions did not
+    exist as far as this program was concerned, and copying it gave you a bare
+    invocation with nothing to pick from.
+
+    The active version is not guessed. `installed_plugins.json` records an
+    `installPath` per plugin, which is the one Claude Code loaded; the cache can
+    hold several versions and picking the highest-numbered directory would
+    eventually pick the wrong one.
+
+    Only Claude Code sees these. OpenCode reads ~/.claude/skills natively but
+    not another agent's plugin cache, so `tools` is Claude alone.
+    """
+    value, err = read_json(f"{HOME}/.claude/plugins/installed_plugins.json")
+    if err or not isinstance(value, dict):
+        return []
+    out = []
+    for pid, entries in as_dict(value.get("plugins")).items():
+        if not isinstance(pid, str) or len(out) >= MAX_CUSTOM_CATEGORIES * 8:
+            continue
+        # `plugin@marketplace`; the invocation namespace is the plugin.
+        name = pid.split("@", 1)[0]
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", name):
+            continue
+        for entry in as_list(entries):
+            path = as_dict(entry).get("installPath")
+            if not isinstance(path, str) or not path.startswith("/"):
+                continue
+            out.append({"path": os.path.join(path, "skills"),
+                        "tools": ["claude"],
+                        "scope": clip(as_dict(entry).get("scope") or "plugin", 16),
+                        "plugin": name})
+    return out
 
 
 # A skill that takes arguments says so in `argument-hint`, the frontmatter field
@@ -745,7 +786,12 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
                    for t in root["tools"]],
         "tools": list(root["tools"]),
         "state": _skill_state(dir_name, root["tools"], overrides, bundled),
-        "invocation": {"claude": f"/{dir_name}", "opencode": f"/{display}", "codex": f"${display}"},
+        # A plugin's skill is addressed through its plugin: Claude Code calls it
+        # `/impeccable:impeccable`, not `/impeccable`. Getting this wrong hands
+        # the user a command their agent does not have.
+        "invocation": ({"claude": f"/{root['plugin']}:{dir_name}"} if root.get("plugin")
+                       else {"claude": f"/{dir_name}",
+                             "opencode": f"/{display}", "codex": f"${display}"}),
         "argumentHint": clip(str(fm.get("argument-hint") or ""), 400) or None,
         "argumentChoices": parse_argument_hint(fm.get("argument-hint")),
         "tokens": {"alwaysOn": token_estimate(dir_name, description, when_to_use, divisor),
@@ -758,7 +804,8 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
         "origin": {"type": "none", "url": None, "confidence": "unknown"},
         "update": {"state": "unknown"},
         "attention": attention,
-        "flags": {"builtin": bundled, "readOnly": bundled, "pluginProvided": False},
+        "flags": {"builtin": bundled, "readOnly": bundled,
+                  "pluginProvided": bool(root.get("plugin"))},
     }
     by_real[real] = record
 

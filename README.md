@@ -34,12 +34,18 @@ parser away from vanishing.
 ## Copying the command, with its arguments
 
 A skill that takes arguments says so in its frontmatter, in `argument-hint`. `impeccable` documents
-twenty-three of them. Copying that row and getting `/impeccable` on its own is not what anybody wanted, so
+twenty-two of them in the version installed here. Copying that row and getting `/impeccable` on its own is not what anybody wanted, so
 the row says **23 actions** and `^C` opens them as a grid instead of copying. The assembled command is
 drawn above the options at reading size and updates as you move, so what lands on your clipboard is on
 screen before you press Enter rather than something you assemble in your head.
 
 Rows without documented arguments copy straight through, unchanged.
+
+A skill that arrives inside a Claude Code plugin is addressed through it, so that row copies
+`/impeccable:impeccable typeset` rather than `/impeccable typeset`. Those skills used to be missing
+entirely: the four directories a user drops a skill into were scanned, the plugin was listed as a single
+row, and nothing ever opened it. Which version is read is not guessed either — the cache can hold several
+and `installed_plugins.json` records the one Claude Code actually loaded.
 
 Nothing is claimed until it happens. The panel attempts the clipboard write, reads the clipboard back, and
 says **Copied** only when the read back agrees. When the write went to a helper whose exit code has not
