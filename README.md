@@ -16,9 +16,22 @@ command that invokes it — on your clipboard, in the spelling that particular a
 
 The mark is what you click. Next to it the bar can carry one figure, and the one worth carrying is the
 number above: what every skill listing adds to every turn of every session before you have typed a word.
-It only moves when you install or remove something, so it is a number you can leave on the bar and
-believe. The default is the mark on its own, because a bar is contested space and this is a thing you open
-when you want it rather than a number you watch.
+
+It is the figure for the agent you are actually running. Three agents read three different sets of skills
+off one disk and are charged three different bills for them — on this machine OpenCode carries three times
+what Claude Code does — so a single number was never honest. The helper reads which of the three has a
+live process, straight out of `/proc` and without starting anything, and the bar prints that agent's own
+bill. Two of them up prints the two added together, because both are paying. Hover the mark and it says
+whose figure you are looking at.
+
+With nothing running it falls back to the heaviest of the three rather than to zero: zero is the true
+answer and a useless one, because the bar would read it most of the day and stop being a figure anybody
+watches.
+
+The default is the mark on its own, because a bar is contested space and this is a thing you open when you
+want it rather than a number you watch. Turn the figure on and the widget re-reads once a minute so it
+keeps up with sessions starting and stopping; leave it off and nothing runs at all until you open the
+panel.
 
 An Omarchy **Quattro** shell plugin (`bar-widget`). It needs `omarchy-shell` and `python3`, which a stock
 Omarchy install already has — ten packages in the base set depend on it. Nothing else.
@@ -227,6 +240,12 @@ cycles the same four from the keyboard, and the boxes follow it. They are there 
 footer is worth nothing to somebody who arrived with a mouse: the only way to find out this list could be
 grouped by agent at all was to read that hint and try it.
 
+Three, once you have picked an agent. Grouping by agent with one agent already chosen is a heading over a
+list that is entirely that agent, and worse than redundant: a skill three agents carry opens a group under
+each of them, so filtering to OpenCode and grouping by agent used to put a **Claude Code** heading at the
+top of the list you had asked to be OpenCode's. The box steps aside while a filter is on. It is not a
+change to what you chose — clear the agent and the grouping you had comes back on its own.
+
 By shelf answers the question you open the panel with — where is the thing that does X. By agent is right
 when you are about to switch agents and want to know what that one alone can see. By kind separates skills
 from plugins from MCP servers. None gives one flat alphabetical list, which is the fastest thing to
@@ -279,7 +298,7 @@ restating its label.
 
 | Setting | Default | What it decides |
 |---|---|---|
-| Next to the bar icon | Nothing | whether the bar carries the always-on token figure, the number of skills, the count of what is flagged, or nothing at all |
+| Next to the bar icon | Nothing | whether the bar carries the always-on token figure for whichever agent is running, the number of skills, the count of what is flagged, or nothing at all |
 | Group the list by | Category | the grouping the panel opens on |
 | Show built-in skills | off | whether the skills each agent ships with are counted; you did not install them and cannot turn them off, so by default only your own things are counted |
 | Estimate token cost as | chars/4 | the divisor, or hiding the figure entirely |
@@ -331,6 +350,7 @@ skills            39
   opencode        32   ~4186 tok always on
 mcp servers       7
 claude plugins    1
+running now       claude, opencode
 categories        automation 16, agents 5, code 4, design 3, content 2, infra 2, media 2, system 2, ...
 ```
 

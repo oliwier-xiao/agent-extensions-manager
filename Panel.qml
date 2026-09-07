@@ -90,7 +90,18 @@ Panel {
 
   // `g` cycles this for the session; the setting owns the default.
   property string groupOverride: ""
-  readonly property string grouping: root.groupOverride !== "" ? root.groupOverride : root.groupMode
+  readonly property string groupingWanted:
+    root.groupOverride !== "" ? root.groupOverride : root.groupMode
+
+  // Grouping by agent while one agent is already picked is a heading over a list
+  // that is entirely that agent. Worse than redundant: an item three agents carry
+  // opens a group under each of them, so filtering to OpenCode and grouping by
+  // agent puts a Claude Code heading at the top of the list you asked to be
+  // OpenCode's, and the OpenCode group is somewhere below the fold. So the
+  // grouping steps aside while a filter is on -- not a change to what you chose,
+  // only to what applies, and clearing the agent brings it back on its own.
+  readonly property string grouping:
+    root.toolFilter !== "" && root.groupingWanted === "Tool" ? "Category" : root.groupingWanted
 
   // ---- Helper -------------------------------------------------------------
 
@@ -482,13 +493,17 @@ Panel {
     }
     attention += Array.isArray(root.report.findings) ? root.report.findings.length : 0
     // alwaysOnTokens is counted per tool and a session runs one agent, so the
-    // bar shows the largest of them -- what the heaviest agent carries on every
-    // turn. Adding the three together prints a bill nobody is ever handed.
+    // figure that stands for all three is the largest of them -- what the
+    // heaviest agent carries on every turn. Adding the three together prints a
+    // bill nobody is ever handed. It is the fallback, though, not the answer:
+    // the helper says which agents have a live process, and the bar spends that
+    // to print the figure for the one you are actually paying for.
     var peak = 0
     for (var t in tokens) peak = Math.max(peak, tokens[t])
     root.summary = { at: Date.now(), divisor: root.divisor, skills: skills,
                      enabled: enabled, tokens: peak, attention: attention,
-                     perTool: tokens }
+                     perTool: tokens,
+                     running: root.report.running || ({}) }
   }
 
   function severityOf(codes) {
@@ -1609,12 +1624,24 @@ Panel {
     root.openInFiles(m[0].abs)
   }
 
-  readonly property var groupModes: [
+  readonly property var groupModesAll: [
     { key: "Category", label: "category" },
     { key: "Tool", label: "tool" },
     { key: "Kind", label: "kind" },
     { key: "Nothing", label: "none" }
   ]
+
+  // What can be picked right now. The box for a grouping that cannot apply is
+  // not drawn at all, for the same reason a kind box that would filter to
+  // nothing is not: a control that is on screen and does nothing is worse than
+  // one that is absent, because absence is information and a dead button is not.
+  readonly property var groupModes: {
+    if (root.toolFilter === "") return root.groupModesAll
+    var out = []
+    for (var i = 0; i < root.groupModesAll.length; i++)
+      if (root.groupModesAll[i].key !== "Tool") out.push(root.groupModesAll[i])
+    return out
+  }
 
   // One way in, two ways to reach it: the key cycles, the boxes above the list
   // pick. Both land here so neither can forget to drop the folds, which belong

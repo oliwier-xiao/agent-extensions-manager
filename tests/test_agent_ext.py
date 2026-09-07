@@ -119,6 +119,64 @@ class Classifier(unittest.TestCase):
             self.assertIn(target, ax.CATEGORIES)
 
 
+class RunningAgents(unittest.TestCase):
+    """The bar prints the figure for the agent that is up, so being wrong about
+    which one is up is being wrong about the number."""
+
+    def _fake_proc(self, comms):
+        root = tempfile.mkdtemp()
+        for pid, comm in comms.items():
+            os.mkdir(os.path.join(root, str(pid)))
+            with open(os.path.join(root, str(pid), "comm"), "w", encoding="utf-8") as fh:
+                fh.write(comm + "\n")
+        # Not a pid, and must be skipped rather than opened.
+        os.mkdir(os.path.join(root, "self"))
+        return root
+
+    def _run(self, root):
+        real = os.listdir
+        os.listdir = lambda p: real(root) if p == "/proc" else real(p)
+        realopen = open
+        def patched(path, *a, **k):
+            if isinstance(path, str) and path.startswith("/proc/"):
+                return realopen(os.path.join(root, path[len("/proc/"):]), *a, **k)
+            return realopen(path, *a, **k)
+        ax.__dict__["open"] = patched
+        try:
+            return ax.running_agents()
+        finally:
+            os.listdir = real
+            ax.__dict__.pop("open", None)
+
+    def test_reports_only_the_agents_that_are_up(self):
+        live = self._run(self._fake_proc({11: "opencode", 12: "bash", 13: "Xwayland"}))
+        self.assertEqual(live, {"claude": False, "opencode": True, "codex": False})
+
+    def test_reports_several_at_once(self):
+        live = self._run(self._fake_proc({7: "claude", 8: "codex", 9: "node"}))
+        self.assertTrue(live["claude"] and live["codex"])
+        self.assertFalse(live["opencode"])
+
+    def test_a_name_that_merely_contains_an_agent_is_not_one(self):
+        live = self._run(self._fake_proc({21: "claude-helper", 22: "myopencode"}))
+        self.assertEqual(live, {"claude": False, "opencode": False, "codex": False})
+
+    def test_no_proc_at_all_is_none_rather_than_an_exception(self):
+        real = os.listdir
+        os.listdir = lambda p: (_ for _ in ()).throw(OSError(2, "no /proc")) if p == "/proc" else real(p)
+        try:
+            self.assertEqual(ax.running_agents(),
+                             {"claude": False, "opencode": False, "codex": False})
+        finally:
+            os.listdir = real
+
+    def test_a_pid_that_vanishes_mid_read_is_skipped(self):
+        root = self._fake_proc({31: "claude"})
+        os.remove(os.path.join(root, "31", "comm"))
+        self.assertEqual(self._run(root),
+                         {"claude": False, "opencode": False, "codex": False})
+
+
 class SafeRead(unittest.TestCase):
     def test_refuses_a_symlink_at_the_final_component(self):
         with tempfile.TemporaryDirectory() as d:

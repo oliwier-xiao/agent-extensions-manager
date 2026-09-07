@@ -68,6 +68,13 @@ BarWidget {
   readonly property bool summaryUsable: root.summary !== null
     && root.summary.divisor === root.divisor
 
+  // What is drawn is gated on having an answer; what is re-read is gated on that
+  // answer being current. Both used to be summaryUsable, which made the comment
+  // above a description of something the code did not do: changing the token
+  // model flipped it false on the spot, labelText returned the empty string, and
+  // the figure blanked for the minute it took a rescan to land. It stays up.
+  readonly property bool summaryPresent: root.summary !== null
+
   onDivisorChanged: root.scanAttempts = 0
   onPanelSummaryChanged: if (root.panelSummary) root.publish(root.panelSummary)
 
@@ -98,7 +105,8 @@ BarWidget {
   function requestSummary(force) {
     if (root.scanning) return
     if (force !== true) {
-      if (root.summaryUsable && Date.now() - (Number(root.summary.at) || 0) < root.summaryTtlMs) return
+      if (root.summaryUsable
+          && Date.now() - (Number(root.summary.at) || 0) < summaryTimer.settledInterval) return
       var live = root.peers()
       for (var i = 0; i < live.length; i++)
         if (live[i] && live[i] !== root && live[i].scanning === true) return
@@ -120,13 +128,52 @@ BarWidget {
   }
 
   readonly property int attentionCount:
-    root.summaryUsable ? (Number(root.summary.attention) || 0) : 0
+    root.summaryPresent ? (Number(root.summary.attention) || 0) : 0
+
+  // Which agents have a live process, in the order the panel lists them. The
+  // helper reads it off /proc during the scan; an older summary from before this
+  // field existed answers "none", which falls the figure back to what it was.
+  readonly property var liveAgents: {
+    var out = []
+    if (!root.summaryPresent || !root.summary.running) return out
+    var order = ["claude", "opencode", "codex"]
+    for (var i = 0; i < order.length; i++)
+      if (root.summary.running[order[i]] === true) out.push(order[i])
+    return out
+  }
+
+  readonly property string liveNames: {
+    var names = { claude: "Claude Code", opencode: "OpenCode", codex: "Codex" }
+    var out = []
+    for (var i = 0; i < root.liveAgents.length; i++) out.push(names[root.liveAgents[i]])
+    return out.join(" \u00b7 ")
+  }
+
+  // The figure the bar prints. Three agents read three different sets of skills
+  // off one disk and are charged three different bills for them, so "the tokens"
+  // was never one number: it was the largest of the three, which is the right
+  // answer only when the heaviest agent happens to be the one you are sitting in
+  // front of. With a live process to point at it is that agent's own bill, and
+  // with two of them up it is the two added together, because both are paying.
+  //
+  // Nothing running falls back to the peak rather than to zero. Zero is the true
+  // answer and a useless one: the bar would read 0 for most of the day and stop
+  // being a figure anybody watches.
+  readonly property int liveTokens: {
+    if (!root.summaryPresent) return 0
+    var per = root.summary.perTool
+    if (!per || root.liveAgents.length === 0) return Number(root.summary.tokens) || 0
+    var n = 0
+    for (var i = 0; i < root.liveAgents.length; i++)
+      n += Number(per[root.liveAgents[i]]) || 0
+    return n
+  }
 
   readonly property string labelText: {
     // A vertical bar has no room for a figure beside the mark, so an edge bar is
     // icon-only whatever the setting says. The tooltip still carries the numbers.
-    if (root.vertical || !root.numbersWanted || !root.summaryUsable) return ""
-    if (root.labelMode === "Always-on tokens") return root.compact(root.summary.tokens)
+    if (root.vertical || !root.numbersWanted || !root.summaryPresent) return ""
+    if (root.labelMode === "Always-on tokens") return root.compact(root.liveTokens)
     if (root.labelMode === "Skills enabled") return String(Number(root.summary.enabled) || 0)
     // Attention is meant to be invisible most of the time: a clean machine gets
     // the bare mark back and its width returned to its neighbours.
@@ -152,11 +199,17 @@ BarWidget {
   // Nothing read off another author's disk is ever put here; that stays inside
   // the panel, where every sink is explicitly PlainText.
   readonly property string tooltipText: {
-    if (!root.summaryUsable) return "Agent Extensions\nClaude Code · OpenCode · Codex"
+    if (!root.summaryPresent) return "Agent Extensions\nClaude Code · OpenCode · Codex"
     var line = String(root.summary.enabled) + " of " + String(root.summary.skills) + " enabled"
     if (!root.tokensHidden)
-      line += "  ·  ~" + root.compact(root.summary.tokens) + " tokens on every turn"
+      line += "  ·  ~" + root.compact(root.liveTokens) + " tokens on every turn"
     var out = "Agent Extensions\n" + line
+    // Whose figure that is. Without this the number changes when a session
+    // starts and nothing on screen says why it changed.
+    if (!root.tokensHidden)
+      out += "\n" + (root.liveAgents.length > 0
+        ? root.liveNames + (root.liveAgents.length > 1 ? " are running" : " is running")
+        : "no agent running \u00b7 showing the heaviest")
     if (root.attentionCount > 0) out += "\n" + String(root.attentionCount) + " need attention"
     return out
   }
@@ -247,7 +300,16 @@ BarWidget {
     // moves these numbers is a skill being installed or switched, and both happen
     // outside this widget. A helper that will not run gets four tries and is then
     // left alone; explaining a broken helper is the panel's job, not the bar's.
-    interval: root.summaryUsable ? root.summaryTtlMs : (root.scanAttempts === 0 ? 6000 : 60000)
+    // The inventory only moves when something is installed, which is why the
+    // settled figure is re-read a quarter of an hour apart. Which agent is up
+    // moves whenever a session starts, and the tokens figure is an answer about
+    // that now -- so in the one mode that asks the question the heartbeat is a
+    // minute. A scan is thirty milliseconds of stat calls, only this mode pays
+    // for it, and the default setting still opens no panel and runs nothing.
+    readonly property int settledInterval:
+      root.labelMode === "Always-on tokens" ? 60000 : root.summaryTtlMs
+    interval: root.summaryUsable ? summaryTimer.settledInterval
+                                 : (root.scanAttempts === 0 ? 6000 : 60000)
     repeat: true
     running: root.numbersWanted && root.bar !== null
       && (root.summaryUsable || root.scanAttempts < 4)

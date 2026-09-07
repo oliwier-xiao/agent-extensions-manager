@@ -627,6 +627,42 @@ def token_estimate(name: str, description: str, when_to_use: str, divisor: int =
 
 # -------------------------------------------------------------------- scan
 
+# Which of the three agents has a live process. Read out of /proc rather than by
+# asking pgrep, because this helper starts nothing: it is called by a shell that
+# is one process for the whole desktop, and a fork per bar tick is not a cost the
+# bar is allowed to impose. One open and one short read per pid, and a directory
+# that is not there -- another kernel, a container without /proc -- answers "none
+# of them" rather than raising.
+#
+# comm is what the process calls itself, so a process that wants to be counted as
+# an agent can be. The consequence of believing it is which of three numbers the
+# bar prints, which is not worth a defence.
+AGENT_COMMS = ("claude", "opencode", "codex")
+
+
+def running_agents() -> dict:
+    live = {name: False for name in AGENT_COMMS}
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return live
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/comm", "rb") as fh:
+                comm = fh.read(64).decode("utf-8", "replace").strip()
+        except OSError:
+            # A pid that exited between the listing and the read, or one this
+            # user may not look at. Both are ordinary.
+            continue
+        if comm in live:
+            live[comm] = True
+            if all(live.values()):
+                break
+    return live
+
+
 def scan(divisor: int = 4) -> dict:
     started = time.monotonic()
     deadline = started + DEADLINE_SECONDS
@@ -689,6 +725,10 @@ def scan(divisor: int = 4) -> dict:
         "plugins": scan_claude_plugins(findings),
         "findings": findings,
         "counts": _counts(items),
+        # Which agents are up right now. The inventory only moves when something
+        # is installed; this moves whenever a session starts, and the bar needs
+        # both to print the figure for the agent you are actually paying for.
+        "running": running_agents(),
         # What the panel needs to draw a group header: the order categories are
         # listed in, whichever of them you renamed or recoloured, and which are
         # yours rather than built in.
@@ -1180,6 +1220,8 @@ def main(argv: list[str]) -> int:
             print(f"  {tool:<14}{n:>4}   ~{c['alwaysOnTokens'].get(tool, 0)} tok always on")
         print(f"mcp servers       {len(result['mcp'])}")
         print(f"claude plugins    {len(result['plugins'])}")
+        up = [t for t, on in sorted(result["running"].items()) if on]
+        print("running now       " + (", ".join(up) if up else "none"))
         print("categories        " + ", ".join(
             f"{k} {v}" for k, v in sorted(result["counts"]["perCategory"].items(),
                                           key=lambda kv: -kv[1])))
