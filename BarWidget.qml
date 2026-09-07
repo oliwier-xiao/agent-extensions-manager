@@ -13,7 +13,7 @@ import qs.Ui
 // what it is until somebody changes it.
 BarWidget {
   id: root
-  moduleName: "oliwier.ai-skills-manager"
+  moduleName: "oliwier.agent-extensions-manager"
 
   // nf-md-brain (U+F09D1), written as its surrogate pair rather than pasted in.
   // A private-use codepoint is invisible in a diff, in a review, and in any
@@ -230,7 +230,7 @@ BarWidget {
   // way for any process on the session bus to make the shell fork on demand is a
   // surface this plugin does not need. Middle-clicking the mark does that job.
   IpcHandler {
-    target: "oliwier.ai-skills-manager"
+    target: "oliwier.agent-extensions-manager"
 
     function open(): void { root.open() }
     function close(): void { root.close() }

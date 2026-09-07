@@ -18,8 +18,8 @@ import qs.Ui
 // nothing, anywhere.
 Panel {
   id: root
-  moduleName: "oliwier.ai-skills-manager"
-  ipcTarget: "oliwier.ai-skills-manager"
+  moduleName: "oliwier.agent-extensions-manager"
+  ipcTarget: "oliwier.agent-extensions-manager"
   // The bar widget owns the single live handler for this target. Leaving the
   // base's own handler enabled would register the target twice.
   manageIpc: false
@@ -895,7 +895,15 @@ Panel {
     for (var c = 0; c < order.length; c++)
       if (counts[order[c]])
         out.push({ key: order[c], label: root.categoryLabelFor(order[c]),
-                   count: counts[order[c]], colour: root.categoryColourFor(order[c]) })
+                   count: counts[order[c]], colour: root.categoryColourFor(order[c]),
+                   rank: c })
+    // Fullest shelf first, so the row that survives the fold is the row worth
+    // keeping. The stored order breaks ties rather than leaving it to the sort,
+    // so two shelves of equal size never swap places between rescans.
+    //
+    // The counts are faceted, so picking a shelf does not reorder the shelves;
+    // only changing a different filter, or typing, can move them.
+    out.sort(function (a, b) { return b.count - a.count || a.rank - b.rank })
     return out
   }
 
@@ -925,13 +933,18 @@ Panel {
     // Every box that is drawn can be clicked, so no box is drawn that would
     // filter to nothing. A dead end you can only back out of is worse than an
     // absence, and the empty list underneath already says when there is nothing.
-    if (skills > 0) out.push({ kind: "skill", n: String(skills),
+    if (skills > 0) out.push({ kind: "skill", n: skills, rank: 0,
                                what: skills === 1 ? "skill" : "skills", urgent: false })
-    if (mcp > 0) out.push({ kind: "mcp", n: String(mcp),
+    if (mcp > 0) out.push({ kind: "mcp", n: mcp, rank: 1,
                             what: mcp === 1 ? "server" : "servers", urgent: false })
-    if (plugins > 0) out.push({ kind: "plugin", n: String(plugins),
+    if (plugins > 0) out.push({ kind: "plugin", n: plugins, rank: 2,
                                 what: plugins === 1 ? "plugin" : "plugins", urgent: false })
-    if (attention > 0) out.push({ kind: "attention", n: String(attention),
+    // Biggest first among the kinds. "Needs attention" is not a kind -- it is the
+    // alarm, and it drives a different filter -- so it is appended after the
+    // sort rather than ranked among them: an alarm that moves around depending
+    // on how many other things there are is an alarm you have to look for.
+    out.sort(function (a, b) { return b.n - a.n || a.rank - b.rank })
+    if (attention > 0) out.push({ kind: "attention", n: attention,
                                   what: "need attention", urgent: true })
     return out
   }
@@ -962,11 +975,16 @@ Panel {
       if (!seen[order[o]]) continue
       var n = per[order[o]] || 0
       out.push({ tool: order[o], label: root.toolLabel[order[o]],
+                 seen: seen[order[o]], rank: o,
                  count: String(seen[order[o]]),
                  tokens: !root.showTokens || n === 0 ? ""
                    : (n >= 1000 ? "~" + (n / 1000).toFixed(1) + "k" : "~" + String(n)),
                  colour: root.markColour(order[o]) })
     }
+    // Whichever agent loads the most, first. Sorted on how many things it can
+    // see rather than on what they cost, because the box is a filter before it
+    // is a bill and the count is what picking it will give you.
+    out.sort(function (a, b) { return b.seen - a.seen || a.rank - b.rank })
     return out
   }
 
@@ -2293,15 +2311,65 @@ Panel {
         anchors.top: parent.top
         spacing: Style.spacing.lg
 
+        // Which panel this is. Several bar widgets open surfaces that look alike
+        // from three feet away -- a search field over a grouped list is a shape
+        // this desktop uses more than once -- and the mark you clicked is now
+        // hidden behind the panel it opened. The name and that same mark, at the
+        // top, close both gaps.
+        //
+        // The glyph is read off the bar widget rather than written again here.
+        // Two copies of a private-use codepoint in two files is two things that
+        // can drift, and the one thing this row must never do is disagree with
+        // the mark it is standing under.
+        Row {
+          width: parent.width
+          spacing: Style.spacing.md
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            visible: text !== ""
+            textFormat: Text.PlainText
+            text: root.hostWidget && root.hostWidget.glyph ? root.hostWidget.glyph : ""
+            color: root.readable
+            font.family: root.face
+            font.pixelSize: Style.font.title
+          }
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: "Agent Extensions"
+            color: root.fg
+            font.family: root.face
+            font.pixelSize: Style.font.title
+            font.bold: true
+            font.letterSpacing: 0.3
+            elide: Text.ElideRight
+          }
+        }
+
         // A display of the filter, not a field. A focused editor would eat every
         // key, and the key catcher above owns the keyboard.
+        //
+        // Which left it looking like nothing in particular. It was drawn in the
+        // resting state until you had already typed something, so the one
+        // control that always has the keyboard was the one control that never
+        // looked like it did; and hovering it gave an arrow, so it did not read
+        // as somewhere you could type at all. It is drawn focused for as long as
+        // the panel is open, because for as long as the panel is open that is
+        // the truth, it carries a caret, and the pointer over it is an I-beam.
         BorderSurface {
+          id: searchField
           width: parent.width
           height: Style.spacing.controlHeight
           radius: Style.cornerRadius
-          color: Style.controlFill(false, root.filterText !== "", root.fg, root.hue)
-          borderSpec: Border.controlSpec(root.filterText !== "" ? "hover-cursor" : "normal",
-                                         root.fg, root.hue)
+          color: Style.controlFill(false, true, root.fg, root.hue)
+          borderSpec: Border.controlSpec("hover-cursor", root.fg, root.hue)
+
+          // No click handler, only a shape. There is nothing to click: the
+          // keyboard is already here. Saying so with the pointer is the whole
+          // job, and a MouseArea would also swallow the wheel over the header.
+          HoverHandler { cursorShape: Qt.IBeamCursor }
 
           Text {
             anchors.left: parent.left
@@ -2316,10 +2384,11 @@ Panel {
           }
 
           Text {
+            id: filterDisplay
             anchors.left: parent.left
-            anchors.leftMargin: Style.spacing.controlPaddingX + Style.space(20)
-            anchors.right: filterMeta.left
-            anchors.rightMargin: Style.spacing.md
+            // The extra step is the caret's slot, held open whether or not the
+            // caret is standing in it, so the text never moves under the words.
+            anchors.leftMargin: Style.spacing.controlPaddingX + Style.space(25)
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
             text: root.filterText !== "" ? root.filterText : "Type to search"
@@ -2327,7 +2396,47 @@ Panel {
             opacity: root.filterText !== "" ? 1 : 0.58
             font.family: root.face
             font.pixelSize: Style.font.body
+            // Elides at the front so the end you are typing stays on screen.
             elide: Text.ElideLeft
+            // Width, not an anchor to the caret: the caret anchors to this, and
+            // anchoring both ways would be the two of them measuring each other.
+            // Only as wide as it needs to be, so the caret sits against the last
+            // character rather than at the far end of the row.
+            width: Math.max(0, Math.min(implicitWidth,
+                     filterMeta.x - x - Style.spacing.md - Style.space(3)))
+            horizontalAlignment: Text.AlignLeft
+          }
+
+          // The caret. Not a TextInput's: this panel deliberately has no focused
+          // editor, so the blink is drawn rather than inherited. 530ms is the
+          // interval every toolkit has used since Windows 3.1 and the one every
+          // reader is calibrated to.
+          Rectangle {
+            id: caret
+            // Where a caret actually goes: at the insertion point. With nothing
+            // typed that is the start of the field, in front of the placeholder,
+            // not trailing after it -- a caret parked at the end of "Type to
+            // search" reads as though those words were something you typed. The
+            // text keeps its position either way, so the first keystroke moves
+            // the caret and nothing else.
+            anchors.left: root.filterText === "" ? filterDisplay.left : filterDisplay.right
+            anchors.leftMargin: root.filterText === "" ? -Style.space(5) : Style.space(1)
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.max(1, Style.space(1))
+            height: Style.font.body + Style.space(2)
+            color: root.hue
+            visible: root.opened
+
+            SequentialAnimation on opacity {
+              running: caret.visible
+              loops: Animation.Infinite
+              // A hard swap, not a fade: a caret that eases is a caret you have
+              // to look at to be sure it is blinking.
+              PropertyAnimation { to: 1; duration: 0 }
+              PauseAnimation { duration: 530 }
+              PropertyAnimation { to: 0; duration: 0 }
+              PauseAnimation { duration: 530 }
+            }
           }
 
           Text {
@@ -2600,7 +2709,7 @@ Panel {
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
-                  text: countChip.modelData.n
+                  text: String(countChip.modelData.n)
                   color: countChip.urgent ? Color.urgent : root.fg
                   font.family: root.face
                   font.pixelSize: Style.font.bodySmall

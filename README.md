@@ -9,7 +9,7 @@ plugin inject MCP servers at runtime that never appear in any list. Codex keeps 
 is the same skill, symlinked into two places, and no view anywhere shows you that.
 
 This widget is that view. One searchable list of everything all three agents can load, grouped by what the
-thing is for, with what each one costs you in tokens on every single turn, which tool can see it, and the
+thing is for, with what each one costs you in tokens on every single turn, which agent can see it, and the
 command that invokes it — on your clipboard, in the spelling that particular agent expects.
 
 ## What it shows you
@@ -23,7 +23,7 @@ them unrelated; on name alone, identical. Both are wrong, so the list deduplicat
 then compares content hashes, and marks the pair as drifted.
 
 **One skill, three agents, five mount points.** `diagnose-crash` is a single `SKILL.md` reachable from
-`~/.claude/skills`, `~/.codex/skills` and `~/.agents/skills`. It is one row carrying three tool badges, not
+`~/.claude/skills`, `~/.codex/skills` and `~/.agents/skills`. It is one row carrying three agent marks, not
 five rows repeating themselves.
 
 **Frontmatter that is not valid YAML.** One skill here writes `Triggers on:` inside an unquoted scalar. A
@@ -31,10 +31,54 @@ strict parser drops the entire frontmatter rather than the one field and reports
 costing 4. The reader is deliberately lenient, and the row is flagged so you know the file is one strict
 parser away from vanishing.
 
+## Copying the command, with its arguments
+
+A skill that takes arguments says so in its frontmatter, in `argument-hint`. `impeccable` documents
+twenty-three of them. Copying that row and getting `/impeccable` on its own is not what anybody wanted, so
+the row says **23 actions** and `^C` opens them as a grid instead of copying. The assembled command is
+drawn above the options at reading size and updates as you move, so what lands on your clipboard is on
+screen before you press Enter rather than something you assemble in your head.
+
+Rows without documented arguments copy straight through, unchanged.
+
+Nothing is claimed until it happens. The panel attempts the clipboard write, reads the clipboard back, and
+says **Copied** only when the read back agrees. When the write went to a helper whose exit code has not
+arrived yet it says *sent to the clipboard*, and when neither path was reachable it says so in red and
+prints the command so you can select it by hand.
+
+## Shelves
+
+Which shelf you keep a skill on is the one thing about it that is yours, and there is nowhere in Claude
+Code, OpenCode or Codex to say so. Fourteen categories are guessed from the description; `^M` moves a row
+to a different one, typing a name nothing answers to creates a new one, and the coloured dot on any group
+header renames that shelf or recolours it.
+
+This is the only thing the widget writes, and it writes it to one file of its own:
+
+```
+~/.config/agent-ext/categories.json
+```
+
+It names directories and categories, nothing else. Deleting it restores every guess the classifier made
+and loses nothing but your shelving. No file belonging to Claude Code, OpenCode or Codex is written to
+make a category, and none is written to move a skill between them.
+
+## Filtering
+
+Every box along the top is a filter. **33 skills**, **7 servers** and **1 plugin** narrow the list to that
+kind; the three agent boxes narrow it to what that agent actually loads; **needs attention** shows only
+what is flagged. The shelf chips below them filter by category, folded to one row with a **+3 more** that
+opens the rest. Clicking the box that is already on turns it off, `all` clears every one of them, and one
+Escape does the same from the keyboard.
+
+The counts stay honest while you use them. Each dimension is counted with every filter except its own, so
+picking `servers` leaves the skills box reading 33 rather than 0, and a box that would filter to nothing
+is not drawn at all.
+
 ## The token figure
 
-Every skill a tool can see puts its name and description into the system prompt on every turn, whether or
-not you ever use it. That is the number in each row, and the per-tool total in each group header.
+Every skill an agent can see puts its name and description into the system prompt on every turn, whether
+or not you ever use it. That is the number in each row, and the per-agent total in the boxes at the top.
 
 It is computed the way Claude Code's own extensions browser computes it — the length of the name,
 description and when-to-use joined together, divided by four, rounded half up. On this machine that
@@ -42,45 +86,71 @@ reproduces fourteen of the fifteen figures the browser shows, to the token. The 
 three instead, which is closer to how newer models actually tokenise dense technical prose and therefore
 closer to what you are really paying; the default matches the browser so the two agree.
 
+## Keys
+
+Every printable key goes to the search, including the first one, so a skill whose name starts with `c` or
+`g` is reachable by typing it. Commands take Ctrl.
+
+| Key | What it does |
+|---|---|
+| type | search everything: names, descriptions, categories, tags |
+| `Enter` | open the row, or fold and unfold a group header |
+| `^C` | copy the invocation, or pick an action first if the skill documents any |
+| `^M` | move the row to another shelf, or restyle the shelf under a group header |
+| `^O` | open where the skill is installed, in your file manager |
+| `^G` | regroup by category, agent, kind or nothing |
+| `^R` | read everything again |
+| `!` | show only what needs attention |
+| `Esc` | back out one step: the open row, then the filters, then the search, then close |
+
 ## Requirements
 
 Omarchy 4 with its Quickshell bar, and `python3`, which a stock Omarchy install already has — ten packages
-in the base set depend on it. Nothing else. The widget reads your agent configuration and never writes to
-it.
+in the base set depend on it. Nothing else.
 
-Whichever of the three agents you actually use is the one you get rows for. A tool that is not installed is
-one quiet line saying so, not an error.
+Whichever of the three agents you actually use is the one you get rows for. An agent that is not installed
+is one quiet line saying so, not an error.
+
+The widget reads your agent configuration and never writes to it. The one file it does write is its own,
+`~/.config/agent-ext/categories.json`, and only when you shelve something.
 
 ## Install
 
 ```
-omarchy plugin add https://github.com/oliwier-xiao/ai-skills-manager.git --enable
+omarchy plugin add https://github.com/oliwier-xiao/agent-extensions-manager.git --enable
 ```
 
 `--enable` puts it straight on the bar and asks which side you want it on. Leave the flag off and it
 installs disabled, so you can read the code first and turn it on later with `omarchy plugin enable
-oliwier.ai-skills-manager`. Either way nothing runs until you open the panel for the first time.
+oliwier.agent-extensions-manager`. Either way nothing runs until you open the panel for the first time.
 
 ## Removal
 
 ```
-omarchy plugin remove oliwier.ai-skills-manager
+omarchy plugin remove oliwier.agent-extensions-manager
 ```
 
-That takes the widget off the bar and deletes the plugin. It is the whole footprint. The widget writes no configuration of its own, leaves nothing behind in
-`~/.config`, `~/.cache` or `~/.local`, and has not modified any file belonging to Claude Code, OpenCode or
-Codex.
+That takes the widget off the bar and deletes the plugin. If you shelved anything, one file of yours
+outlives it and is safe to delete by hand:
+
+```
+~/.config/agent-ext/categories.json
+```
+
+Beyond those two paths the footprint is nothing: no cache, no state under `~/.local`, and no file
+belonging to Claude Code, OpenCode or Codex modified at any point.
 
 ## The command line behind it
 
-The panel draws; `bin/agent-ext` does every byte of the reading. It is worth running on its own.
+The panel draws; `bin/agent-ext` does every byte of the reading and every byte of the one write. It is
+worth running on its own.
 
 ```
 bin/agent-ext doctor
 ```
 
 ```
-agent-ext 0.1.0   scan 19.9 ms
+agent-ext 0.1.0   scan 20.1 ms
 skills            39
   claude          15   ~1179 tok always on
   codex            9   ~1035 tok always on
@@ -91,6 +161,16 @@ categories        automation 16, agents 5, code 4, system 3, content 2, design 2
 ```
 
 `bin/agent-ext scan` prints the same inventory as one line of JSON, which is what the panel reads.
+`bin/agent-ext category` is the write side, and every one of its verbs is a single named change to the one
+file above:
+
+```
+bin/agent-ext category list
+bin/agent-ext category create ui --label UI --color '#7AA2F7'
+bin/agent-ext category assign nextjs ui
+bin/agent-ext category unassign nextjs
+bin/agent-ext category style ui --reset
+```
 
 ## Development
 
