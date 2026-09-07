@@ -736,7 +736,15 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
     fm = parse_frontmatter(text)
     dir_name = os.path.basename(dir_path)
     display = str(fm.get("name") or dir_name)
-    declared = clip(str(fm.get("version") or ""), 32)
+    # Top level or under `metadata`, because one product writes it both ways.
+    # Impeccable 4.1.1 puts `version:` at the top of every build; by 4.2.2 the
+    # build for ~/.agents had moved it to `metadata.version` while the others
+    # kept it where it was. Reading only the top level would see one copy
+    # declaring a version and the other declaring none, which is the shape that
+    # means "one of these is behind" -- and the two would be flagged as drift
+    # again for no reason but where a key sits.
+    _meta_fm = fm.get("metadata") if isinstance(fm.get("metadata"), dict) else {}
+    declared = clip(str(fm.get("version") or _meta_fm.get("version") or ""), 32)
     description = str(fm.get("description") or "").replace("\n", " ").strip()
     when_to_use = str(fm.get("when_to_use") or "").replace("\n", " ").strip()
 

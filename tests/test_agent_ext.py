@@ -546,6 +546,16 @@ class DriftVersusVariant(unittest.TestCase):
             self.assertNotIn("variantPeers", it)
             self.assertNotIn("driftPeers", it)
 
+    def test_a_version_under_metadata_counts_as_declared(self):
+        # Impeccable 4.1.1 puts `version:` at the top of every build; by 4.2.2 the
+        # build for ~/.agents had moved it under `metadata` while the others kept
+        # it at the top. Reading only the top level would see one copy with a
+        # version and one without, which is exactly the shape that means drift.
+        fm = ax.parse_frontmatter(
+            "---\nname: impeccable\nmetadata:\n  version: 4.2.2\n---\nbody\n")
+        meta = fm.get("metadata") if isinstance(fm.get("metadata"), dict) else {}
+        self.assertEqual(str(fm.get("version") or meta.get("version") or ""), "4.2.2")
+
     def test_a_lone_copy_is_left_alone(self):
         items = [self.rec("x", "a", "1.0")]
         ax._mark_drift(items)
