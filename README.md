@@ -50,8 +50,12 @@ prints the command so you can select it by hand.
 
 Which shelf you keep a skill on is the one thing about it that is yours, and there is nowhere in Claude
 Code, OpenCode or Codex to say so. Fourteen categories are guessed from the description; `^M` moves a row
-to a different one, typing a name nothing answers to creates a new one, and the coloured dot on any group
-header renames that shelf or recolours it.
+to a different one, and the coloured dot on any group header opens that shelf for renaming or recolouring.
+
+**Edit**, opposite the title, opens all of them at once — every shelf with its colour and its size, a
+standing **+ new shelf** at the end, and the same editor on any one you pick. Trying colours on is not
+choosing one: the swatches preview, **Save** commits, and backing out with something unsaved asks before
+it drops it.
 
 This is the only thing the widget writes, and it writes it to one file of its own:
 
@@ -97,6 +101,7 @@ Every printable key goes to the search, including the first one, so a skill whos
 | `Enter` | open the row, or fold and unfold a group header |
 | `^C` | copy the invocation, or pick an action first if the skill documents any |
 | `^M` | move the row to another shelf, or restyle the shelf under a group header |
+| `^E` | open the shelves: rename one, recolour it, or add one |
 | `^O` | open where the skill is installed, in your file manager |
 | `^G` | regroup by category, agent, kind or nothing |
 | `^R` | read everything again |

@@ -197,8 +197,33 @@ Panel {
   // so that a rescan landing mid-pick cannot move the question out from under
   // the answer.
   property string pickerMode: ""
+  // Which mode to return to when this one is dismissed. The shelf index opens
+  // the style editor on top of itself, and backing out of a rename should land
+  // where you were rather than closing the whole overlay.
+  property string pickerReturn: ""
   property var pickerRow: null
   property string pickerCategory: ""
+  // Naming a shelf that does not exist yet. Its own sub-mode rather than a
+  // guess about what the typed text means: with the list on screen Enter has to
+  // choose between opening the highlighted shelf and creating a new one, and a
+  // key that does one of two things depending on what you typed is a key nobody
+  // presses confidently.
+  property bool pickerNaming: false
+
+  // The style editor keeps a draft. Picking a colour used to write it and back
+  // out in the same gesture, which made browsing the twelve swatches impossible:
+  // every look was a commit. Now `styleColourIndex` is what is being tried on,
+  // `pickerText` is the name being typed, and neither reaches the file until you
+  // say so. `styleBase*` is what was there when the editor opened, so the panel
+  // knows whether there is anything to save and can ask before dropping it.
+  property int styleColourIndex: -1
+  property int styleBaseIndex: -1
+  property string styleBaseLabel: ""
+  property bool styleAsking: false
+  readonly property bool styleDirty: root.pickerMode === "style"
+    && (root.styleColourIndex !== root.styleBaseIndex
+        || root.pickerText.trim() !== root.styleBaseLabel)
+
   property string pickerText: ""
   property int pickerIndex: 0
   readonly property bool pickerOpen: root.pickerMode !== ""
@@ -879,6 +904,24 @@ Panel {
   // Every category that has something in it right now, with how much, in the
   // order the store keeps them. A shelf with nothing on it is not offered:
   // filtering to an empty list is a dead end you can only back out of.
+  // Every shelf and how much is on it, the empty ones included. The filter strip
+  // hides a shelf with nothing on it, because filtering to an empty list is a
+  // dead end; the index has the opposite job and must show a shelf you have just
+  // made and not filled yet.
+  readonly property var shelfSizes: {
+    var counts = ({})
+    if (!root.loaded) return counts
+    var src = root.catalogue
+    for (var i = 0; i < src.length; i++)
+      if (src[i].kind === "skill")
+        counts[src[i].category] = (counts[src[i].category] || 0) + 1
+    return counts
+  }
+
+  function shelfCount(key) {
+    return Number(root.shelfSizes[key]) || 0
+  }
+
   readonly property var categoryChips: {
     var out = []
     if (!root.loaded) return out
@@ -1144,6 +1187,7 @@ Panel {
   // because concat on a QVariantList appends it as one item instead of
   // spreading it, and the picker would then show a single unreadable chip.
   function pickerChips() {
+    if (root.pickerNaming) return []
     if (root.pickerMode === "argument") {
       var opts = root.pickerOptions(root.pickerRow.view)
       var out = [""]
@@ -1163,7 +1207,29 @@ Panel {
       if (root.newCategoryName() !== "") hits.unshift("\u0000new")
       return hits
     }
-    if (root.pickerMode === "style") return root.swatches.concat(["\u0000clear"])
+    if (root.pickerMode === "shelves") {
+      var all = root.knownCategories()
+      var q2 = root.pickerText.toLowerCase()
+      var out2 = []
+      for (var k = 0; k < all.length; k++)
+        if (q2 === "" || all[k].indexOf(q2) >= 0
+            || root.categoryLabelFor(all[k]).toLowerCase().indexOf(q2) >= 0)
+          out2.push(all[k])
+      // Biggest first, the same order the filter strip uses, so the two views of
+      // the same shelves do not disagree about which one is the important one.
+      out2.sort(function (a, b) { return root.shelfCount(b) - root.shelfCount(a) })
+      // Typing a name nothing answers to offers it at the top, which is the fast
+      // path once you know it exists. The standing chip at the end is how you
+      // find out: an affordance you can see beats one you have to discover by
+      // typing something that happens not to match.
+      if (root.newCategoryName() !== "") out2.unshift("\u0000new")
+      out2.push("\u0000addnew")
+      return out2
+    }
+    if (root.pickerMode === "style") {
+      if (root.styleAsking) return ["\u0000save", "\u0000discard"]
+      return root.swatches.concat(["\u0000clear"])
+    }
     return []
   }
 
@@ -1214,20 +1280,114 @@ Panel {
     root.pickerIndex = 0
   }
 
-  function openStylePicker(category) {
+  // The index of shelves: everything you can rename, recolour or add to, in one
+  // place. The dot on a group header edits the one shelf it belongs to; this is
+  // the way in when the shelf you want is not on screen, or does not exist yet.
+  function openShelvesPicker() {
+    root.pickerMode = "shelves"
+    root.pickerReturn = ""
+    root.pickerRow = null
+    root.pickerCategory = ""
+    root.pickerNaming = false
+    root.pickerText = ""
+    root.pickerIndex = 0
+  }
+
+  // Back out one layer if this mode was opened on top of another, and close
+  // otherwise. Escape and the back chip both come through here so they cannot
+  // disagree about where "back" is.
+  // The grid cursor and the draft colour are the same thing while the swatches
+  // are on screen, so arrowing and clicking both preview and neither commits.
+  onPickerIndexChanged: {
+    if (root.pickerMode === "style" && !root.styleAsking)
+      root.styleColourIndex = root.pickerIndex
+  }
+
+  function styleSave() {
+    var label = root.pickerText.trim()
+    var cat = root.pickerCategory
+    var argv = ["style", cat]
+    // The label always travels, so one save both renames and recolours and
+    // there is no way to write half of what is on screen. An unchanged label is
+    // sent empty, which is how the helper is told to drop its override and go
+    // back to the built-in name.
+    argv.push("--label")
+    argv.push(label === root.categoryLabel[cat] ? "" : label)
+    argv.push("--color")
+    argv.push(root.styleColourIndex >= 0 && root.styleColourIndex < root.swatches.length
+      ? String(root.swatches[root.styleColourIndex]) : "")
+    root.runCategory(argv, root.categoryLabelFor(cat) + " saved")
+    root.styleAsking = false
+    root.styleBaseIndex = root.styleColourIndex
+    root.styleBaseLabel = label
+    root.pickerBack()
+  }
+
+  function pickerBack() {
+    // A draft is not dropped silently. Leaving the style editor with something
+    // unsaved asks first, on the same surface, rather than discarding work the
+    // user has no way of knowing was still only a draft.
+    if (root.pickerMode === "style" && root.styleDirty && !root.styleAsking) {
+      root.styleAsking = true
+      root.pickerIndex = 0
+      return
+    }
+    if (root.styleAsking) {
+      root.styleAsking = false
+      root.styleColourIndex = root.styleBaseIndex
+      root.pickerText = root.styleBaseLabel
+    }
+
+    // Naming is a step inside the shelf index, so backing out of it lands on the
+    // index rather than closing everything.
+    if (root.pickerNaming) {
+      root.pickerNaming = false
+      root.pickerText = ""
+      root.pickerIndex = 0
+      return
+    }
+    if (root.pickerReturn !== "") {
+      var to = root.pickerReturn
+      if (to === "shelves") root.openShelvesPicker()
+      else root.closePicker()
+      return
+    }
+    root.closePicker()
+  }
+
+  // Where the stored colour sits among the swatches, or the "theme default"
+  // entry at the end when the shelf has never been given one.
+  function swatchIndexFor(category) {
+    var meta = root.report && root.report.categories ? root.report.categories : null
+    var stored = meta && meta.colors ? String(meta.colors[category] || "") : ""
+    for (var i = 0; i < root.swatches.length; i++)
+      if (root.swatches[i].toUpperCase() === stored.toUpperCase()) return i
+    return root.swatches.length
+  }
+
+  function openStylePicker(category, returnTo) {
     root.pickerMode = "style"
+    root.pickerReturn = String(returnTo || "")
     root.pickerRow = null
     root.pickerCategory = String(category || "")
     // Seeded with the name it has, so the first keystroke edits rather than
     // wipes. Backspace is how you clear it, the same as everywhere else here.
     root.pickerText = root.categoryLabelFor(root.pickerCategory)
-    root.pickerIndex = 0
+    root.styleBaseLabel = root.pickerText
+    root.styleColourIndex = root.swatchIndexFor(root.pickerCategory)
+    root.styleBaseIndex = root.styleColourIndex
+    root.styleAsking = false
+    // The cursor starts on the colour the shelf already has, so the first arrow
+    // press is a step from where you are rather than a jump to the first swatch.
+    root.pickerIndex = root.styleColourIndex
   }
 
   function closePicker() {
     root.pickerMode = ""
+    root.pickerReturn = ""
     root.pickerRow = null
     root.pickerCategory = ""
+    root.pickerNaming = false
     root.pickerText = ""
     root.pickerIndex = 0
   }
@@ -1236,11 +1396,9 @@ Panel {
   // its dot agree with the highlighted swatch before anything is saved.
   function pickerSwatch() {
     if (root.pickerMode !== "style") return root.hue
-    var chips = root.pickerChips()
-    var at = chips[root.pickerIndex]
-    if (at === undefined || String(at) === "\u0000clear")
+    if (root.styleColourIndex < 0 || root.styleColourIndex >= root.swatches.length)
       return root.categoryTint(root.pickerCategory)
-    return String(at)
+    return String(root.swatches[root.styleColourIndex])
   }
 
   // The line at the top of the overlay: exactly what the chosen chip will do,
@@ -1258,6 +1416,14 @@ Panel {
       if (pick === undefined) return ""
       if (pick === "\u0000new") return "new category  " + root.newCategoryName()
       return root.categoryLabelFor(pick)
+    }
+    if (root.pickerNaming) return root.pickerText
+    if (root.pickerMode === "shelves") {
+      var at = root.pickerChips()[root.pickerIndex]
+      if (at === undefined) return ""
+      if (at === "\u0000addnew") return "new shelf"
+      if (at === "\u0000new") return "new shelf  " + root.newCategoryName()
+      return "edit  " + root.categoryLabelFor(at)
     }
     if (root.pickerMode === "style")
       return root.pickerText.trim() === "" ? root.pickerCategory : root.pickerText.trim()
@@ -1296,20 +1462,50 @@ Panel {
       return
     }
 
+    if (root.pickerNaming) {
+      var named = root.newCategoryName()
+      if (named === "") return          // nothing typed yet, or the name is taken
+      root.runCategory(["create", named], named + " created")
+      root.pickerNaming = false
+      root.pickerText = ""
+      root.pickerIndex = 0
+      return
+    }
+
+    if (root.pickerMode === "shelves") {
+      var pick2 = root.pickerChips()[root.pickerIndex]
+      if (pick2 === undefined) { root.closePicker(); return }
+      if (pick2 === "\u0000addnew") {
+        root.pickerNaming = true
+        root.pickerText = ""
+        return
+      }
+      if (pick2 === "\u0000new") {
+        var made = root.newCategoryName()
+        if (made === "") return
+        // Created empty and left empty. It shows up in the index and in the move
+        // picker straight away; the filter strip only lists shelves with
+        // something on them, so it appears there once you put a skill on it.
+        root.runCategory(["create", made], made + " created")
+        root.pickerText = ""
+        root.pickerIndex = 0
+        return
+      }
+      root.openStylePicker(String(pick2), "shelves")
+      return
+    }
+
     if (root.pickerMode === "style") {
-      var chips2 = root.pickerChips()
-      var swatch = chips2[root.pickerIndex]
-      var label = root.pickerText.trim()
-      var cat = root.pickerCategory
-      var argv = ["style", cat]
-      // The label always travels, so one Enter both renames and recolours and
-      // there is no way to change half of what is on screen.
-      argv.push("--label")
-      argv.push(label === root.categoryLabel[cat] ? "" : label)
-      if (swatch === "\u0000clear") { argv.push("--color"); argv.push("") }
-      else if (swatch !== undefined) { argv.push("--color"); argv.push(String(swatch)) }
-      root.runCategory(argv, root.categoryLabelFor(cat) + " restyled")
-      root.closePicker()
+      if (root.styleAsking) {
+        // Two answers to one question, and the cursor starts on the safe one.
+        if (root.pickerIndex === 0) { root.styleSave(); return }
+        root.styleAsking = false
+        root.styleColourIndex = root.styleBaseIndex
+        root.pickerText = root.styleBaseLabel
+        root.pickerBack()
+        return
+      }
+      root.styleSave()
       return
     }
   }
@@ -1343,7 +1539,7 @@ Panel {
     var r = root.currentRow()
     if (!r) return
     if (r.rowType === "header") {
-      if (String(r.key).indexOf("cat:") === 0) root.openStylePicker(String(r.key).substring(4))
+      if (String(r.key).indexOf("cat:") === 0) root.openStylePicker(String(r.key).substring(4), "")
       else root.flash("Group by category to rename or recolour one")
       return
     }
@@ -1374,6 +1570,10 @@ Panel {
       root.stopScan()
       root.expandedKey = ""
       root.toast = ""
+      // The overlay does not survive the panel. Reopening onto a half-finished
+      // rename, or onto an argument grid for a row you have long since stopped
+      // thinking about, is the panel remembering something the user does not.
+      root.closePicker()
       return
     }
     root.cursorActive = false
@@ -2150,7 +2350,7 @@ Panel {
         if (root.pickerOpen) {
           event.accepted = true
           var count = root.pickerChips().length
-          if (event.key === Qt.Key_Escape) { root.closePicker(); return }
+          if (event.key === Qt.Key_Escape) { root.pickerBack(); return }
           if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             root.pickerConfirm(); return
           }
@@ -2282,6 +2482,10 @@ Panel {
           if (letter === "r") { root.startScan(); event.accepted = true; return }
           if (letter === "g") { root.cycleGrouping(); event.accepted = true; return }
           if (letter === "m") { root.moveCurrent(); event.accepted = true; return }
+          // The Edit button is the discoverable way in; this is the one for
+          // people who never take their hands off the keyboard, which on a panel
+          // driven entirely by keys is most of them.
+          if (letter === "e") { root.openShelvesPicker(); event.accepted = true; return }
           if (letter === "o") { root.revealCurrent(); event.accepted = true; return }
           return
         }
@@ -2321,30 +2525,89 @@ Panel {
         // Two copies of a private-use codepoint in two files is two things that
         // can drift, and the one thing this row must never do is disagree with
         // the mark it is standing under.
-        Row {
+        Item {
           width: parent.width
-          spacing: Style.spacing.md
+          height: titleRow.implicitHeight
 
-          Text {
+          Row {
+            id: titleRow
+            anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            visible: text !== ""
-            textFormat: Text.PlainText
-            text: root.hostWidget && root.hostWidget.glyph ? root.hostWidget.glyph : ""
-            color: root.readable
-            font.family: root.face
-            font.pixelSize: Style.font.title
+            spacing: Style.spacing.md
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              visible: text !== ""
+              textFormat: Text.PlainText
+              text: root.hostWidget && root.hostWidget.glyph ? root.hostWidget.glyph : ""
+              color: root.readable
+              font.family: root.face
+              font.pixelSize: Style.font.title
+            }
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: "Agent Extensions"
+              color: root.fg
+              font.family: root.face
+              font.pixelSize: Style.font.title
+              font.bold: true
+              font.letterSpacing: 0.3
+              elide: Text.ElideRight
+            }
           }
 
-          Text {
+          // The way into the shelves. The dot on a group header already edits
+          // the one shelf it belongs to, but only while that shelf is on screen
+          // and only if it exists; naming a new one, or fixing a shelf you have
+          // filtered away, had nowhere to happen. It sits opposite the title
+          // because that is the corner nothing else uses and because it is about
+          // the panel rather than about any row in it.
+          Rectangle {
+            id: editButton
+            anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            textFormat: Text.PlainText
-            text: "Agent Extensions"
-            color: root.fg
-            font.family: root.face
-            font.pixelSize: Style.font.title
-            font.bold: true
-            font.letterSpacing: 0.3
-            elide: Text.ElideRight
+            width: editRow.implicitWidth + Style.space(20)
+            height: Style.space(26)
+            radius: Style.cornerRadius
+            color: root.pickerMode === "shelves" ? Util.alpha(root.hue, 0.26)
+              : (editHover.hovered ? Util.alpha(root.fg, 0.16) : Util.alpha(root.fg, 0.07))
+
+            Row {
+              id: editRow
+              anchors.centerIn: parent
+              spacing: Style.spacing.sm
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                // nf-md-pencil (U+F03EB), as its surrogate pair for the same
+                // reason the bar mark is: a private-use codepoint pasted in is a
+                // box in every editor without the font.
+                text: "\uDB80\uDFEB"
+                color: editHover.hovered || root.pickerMode === "shelves"
+                  ? root.fg : root.readable
+                font.family: root.face
+                font.pixelSize: Style.font.subtitle
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: "Edit"
+                color: editHover.hovered || root.pickerMode === "shelves"
+                  ? root.fg : root.readable
+                font.family: root.face
+                font.pixelSize: Style.font.title
+              }
+            }
+
+            HoverHandler { id: editHover; cursorShape: Qt.PointingHandCursor }
+            TapHandler {
+              onTapped: root.pickerMode === "shelves" ? root.closePicker()
+                                                      : root.openShelvesPicker()
+            }
           }
         }
 
@@ -2979,7 +3242,7 @@ Panel {
                 root.cursorActive = true
                 root.selectedIndex = rowHost.index
                 if (rowHost.modelData.category !== "")
-                  root.openStylePicker(rowHost.modelData.category)
+                  root.openStylePicker(rowHost.modelData.category, "")
               }
             }
           }
@@ -3074,6 +3337,11 @@ Panel {
 
         readonly property bool styling: root.pickerMode === "style"
         readonly property bool shelving: root.pickerMode === "category"
+        readonly property bool managing: root.pickerMode === "shelves"
+        // Both of these draw a shelf: a colour, a name and how much is on it.
+        // One of them files a skill and the other opens the shelf for editing,
+        // which is a difference in what Enter does, not in what a shelf is.
+        readonly property bool shelfList: picker.shelving || picker.managing
 
         // Near-opaque, not a scrim. At 0.92 the list underneath read straight
         // through the option chips and both layers became hard to read; the
@@ -3085,7 +3353,22 @@ Panel {
           MouseArea { anchors.fill: parent; onClicked: root.closePicker() }
         }
 
+        // The card, and a floor under it that accepts clicks and does nothing.
+        // Without it a click anywhere on the card that is not a chip -- the name
+        // you are trying to edit, the hint, the gap between two rows -- falls
+        // through to the scrim underneath and dismisses the whole overlay,
+        // because a bare Rectangle or Text does not accept mouse events and Qt
+        // delivers them to the topmost item that does.
+        Item {
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          height: cardColumn.implicitHeight
+
+          MouseArea { anchors.fill: parent }
+
         Column {
+          id: cardColumn
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
@@ -3094,8 +3377,13 @@ Panel {
           // A way back that is a target, not a keystroke you have to know. The
           // overlay has the room for it and the alternative was a footer line
           // telling you to press Escape.
-          Row {
+          Item {
             width: parent.width
+            height: backChip.height
+
+            Row {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
             spacing: Style.spacing.md
 
             Rectangle {
@@ -3117,14 +3405,18 @@ Panel {
               }
 
               HoverHandler { id: backHover; cursorShape: Qt.PointingHandCursor }
-              TapHandler { onTapped: root.closePicker() }
+              TapHandler { onTapped: root.pickerBack() }
             }
 
             Text {
               anchors.verticalCenter: parent.verticalCenter
-              width: parent.width - backChip.width - Style.spacing.md
+              width: Math.max(0, picker.width - backChip.width
+                                 - saveButton.width - Style.spacing.md * 3)
               textFormat: Text.PlainText
               text: {
+                if (root.styleAsking) return "unsaved changes"
+                if (root.pickerNaming) return "new shelf"
+                if (picker.managing) return "shelves"
                 if (picker.styling) return "the " + root.pickerCategory + " shelf"
                 if (!root.pickerOpen || !root.pickerRow) return ""
                 var n = root.clean(root.pickerRow.view.name, 60)
@@ -3134,6 +3426,41 @@ Panel {
               font.family: root.face
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
+            }
+            }
+
+            // Save is a button because saving is a decision. It shows only where
+            // there is a draft to save, and it says whether there is anything in
+            // it: dimmed when the shelf is exactly as you found it, lit the
+            // moment you change a letter or try a colour on.
+            Rectangle {
+              id: saveButton
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              visible: picker.styling && !root.styleAsking
+              width: visible ? saveText.implicitWidth + Style.space(20) : 0
+              height: Style.space(22)
+              radius: height / 2
+              color: root.styleDirty
+                ? (saveHover.hovered ? Util.alpha(root.hue, 0.42) : Util.alpha(root.hue, 0.28))
+                : Util.alpha(root.fg, 0.07)
+
+              Text {
+                id: saveText
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: root.styleDirty ? "Save" : "Saved"
+                color: root.styleDirty ? root.fg : root.soft
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+              }
+
+              HoverHandler {
+                id: saveHover
+                enabled: root.styleDirty
+                cursorShape: Qt.PointingHandCursor
+              }
+              TapHandler { onTapped: if (root.styleDirty) root.styleSave() }
             }
           }
 
@@ -3145,6 +3472,16 @@ Panel {
             radius: Style.cornerRadius
             color: Util.alpha(picker.styling ? root.pickerSwatch() : root.hue, 0.14)
             borderSpec: Border.controlSpec("hover-cursor", root.fg, root.hue)
+
+            // In the style overlay this box is not a preview of the name, it is
+            // the name, and typing goes into it. So it says so: an I-beam over
+            // it and a caret in it, the same two signals the search field uses.
+            // Everywhere else the box is a preview of what Enter will do and the
+            // pointer stays an arrow, because there is nothing here to type into.
+            HoverHandler {
+              enabled: picker.styling || root.pickerNaming
+              cursorShape: Qt.IBeamCursor
+            }
 
             Row {
               anchors.left: parent.left
@@ -3167,13 +3504,47 @@ Panel {
               Text {
                 id: commandText
                 anchors.verticalCenter: parent.verticalCenter
-                width: parent.width - (picker.styling ? Style.space(14) + Style.spacing.md : 0)
                 textFormat: Text.PlainText
-                text: root.pickerCommand()
+                text: root.pickerNaming && root.pickerText === ""
+                  ? "Name it" : root.pickerCommand()
                 color: root.fg
+                opacity: root.pickerNaming && root.pickerText === "" ? 0.5 : 1
                 font.family: root.face
                 font.pixelSize: Style.font.subtitle
                 elide: Text.ElideRight
+                // Only as wide as the words, so the caret sits against the last
+                // letter rather than at the far end of the box. Capped so a long
+                // name still elides instead of pushing the caret off the card.
+                width: Math.max(0, Math.min(implicitWidth,
+                  parent.width - (picker.styling ? Style.space(14) + Style.spacing.md : 0)
+                    - Style.space(4)))
+              }
+
+              // The caret for the name being typed. Same 530ms as the search
+              // field, drawn rather than inherited for the same reason: there is
+              // no focused editor anywhere in this panel.
+              Rectangle {
+                id: nameCaret
+                anchors.verticalCenter: parent.verticalCenter
+                visible: picker.styling || root.pickerNaming
+                width: visible ? Math.max(1, Style.space(1)) : 0
+                height: Style.font.subtitle + Style.space(2)
+                color: root.fg
+                // In front of the placeholder while the name is empty, after the
+                // text once there is any, which is where the insertion point is.
+                anchors.left: root.pickerNaming && root.pickerText === ""
+                  ? commandText.left : undefined
+                anchors.leftMargin: root.pickerNaming && root.pickerText === ""
+                  ? -Style.space(5) : 0
+
+                SequentialAnimation on opacity {
+                  running: nameCaret.visible
+                  loops: Animation.Infinite
+                  PropertyAnimation { to: 1; duration: 0 }
+                  PauseAnimation { duration: 530 }
+                  PropertyAnimation { to: 0; duration: 0 }
+                  PauseAnimation { duration: 530 }
+                }
               }
             }
           }
@@ -3183,6 +3554,9 @@ Panel {
             textFormat: Text.PlainText
             visible: text !== ""
             text: {
+              if (root.styleAsking) return "Keep the new name and colour, or go back to what was there?"
+              if (root.pickerNaming) return "Lower case letters, digits and dashes. It starts empty; put something on it with ^M from any row."
+              if (picker.managing) return "Pick a shelf to rename it or change its colour. Type a name nothing answers to and it becomes a new one."
               if (picker.styling) return "Type to rename it. Pick a colour, or clear it to go back to the theme."
               if (picker.shelving) return "Type a name nothing answers to and it becomes a new shelf."
               if (!root.pickerOpen || !root.pickerRow) return ""
@@ -3239,13 +3613,24 @@ Panel {
                   required property var modelData
                   required property int index
 
-                  readonly property bool current: root.pickerIndex === chip.index
-                  readonly property bool isSwatch: picker.styling
+                  // In the swatch grid the mark follows the draft, so the
+                  // colour you are trying on stays lit while you look past it.
+                  readonly property bool current: chip.isSwatch || chip.isClear
+                    ? root.styleColourIndex === chip.index
+                    : root.pickerIndex === chip.index
+                  readonly property bool isSwatch: picker.styling && !chip.isAnswer
                   readonly property bool isClear: String(chip.modelData) === "\u0000clear"
                   readonly property bool isNew: String(chip.modelData) === "\u0000new"
+                  readonly property bool isAddNew: String(chip.modelData) === "\u0000addnew"
+                  readonly property bool isAnswer: String(chip.modelData) === "\u0000save"
+                    || String(chip.modelData) === "\u0000discard"
+
+                  // A shelf chip carries its own colour and its size, so the
+                  // index reads as an inventory rather than as a word list.
+                  readonly property bool isShelf: picker.shelfList && !chip.isNew && !chip.isAddNew
 
                   implicitWidth: chip.isSwatch && !chip.isClear
-                    ? Style.space(30) : chipText.implicitWidth + Style.space(22)
+                    ? Style.space(30) : chipRowInner.implicitWidth + Style.space(22)
                   implicitHeight: Style.space(28)
                   radius: Style.cornerRadius
                   color: {
@@ -3257,21 +3642,56 @@ Panel {
                   borderSpec: Border.controlSpec(chip.current ? "hover-cursor" : "normal",
                                                  root.fg, root.hue)
 
-                  Text {
-                    id: chipText
+                  Row {
+                    id: chipRowInner
                     anchors.centerIn: parent
                     visible: !(chip.isSwatch && !chip.isClear)
-                    textFormat: Text.PlainText
-                    text: {
-                      if (chip.isClear) return "theme default"
-                      if (chip.isNew) return "+ new  \u201c" + root.newCategoryName() + "\u201d"
-                      if (picker.shelving) return root.categoryLabelFor(String(chip.modelData))
-                      return String(chip.modelData) === "" ? "no argument" : String(chip.modelData)
+                    spacing: Style.spacing.sm
+
+                    Rectangle {
+                      anchors.verticalCenter: parent.verticalCenter
+                      visible: chip.isShelf
+                      width: visible ? Style.space(7) : 0
+                      height: Style.space(7)
+                      radius: width / 2
+                      color: chip.isShelf ? root.categoryColourFor(String(chip.modelData))
+                                          : "transparent"
                     }
-                    color: chip.current ? root.fg : root.readable
-                    font.family: root.face
-                    font.pixelSize: Style.font.bodySmall
-                    font.italic: String(chip.modelData) === "" || chip.isNew
+
+                    Text {
+                      id: chipText
+                      anchors.verticalCenter: parent.verticalCenter
+                      textFormat: Text.PlainText
+                      text: {
+                        if (String(chip.modelData) === "\u0000save") return "Save"
+                        if (String(chip.modelData) === "\u0000discard") return "Discard"
+                        if (chip.isClear) return "theme default"
+                        if (chip.isAddNew) return "+ new shelf"
+                        if (chip.isNew) return "+ new  \u201c" + root.newCategoryName() + "\u201d"
+                        if (picker.shelfList) return root.categoryLabelFor(String(chip.modelData))
+                        return String(chip.modelData) === "" ? "no argument" : String(chip.modelData)
+                      }
+                      color: chip.current ? root.fg : root.readable
+                      font.family: root.face
+                      font.pixelSize: Style.font.bodySmall
+                      font.italic: String(chip.modelData) === "" || chip.isNew || chip.isAddNew
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      visible: chip.isShelf
+                      textFormat: Text.PlainText
+                      // An empty shelf says so rather than showing a bare 0,
+                      // because a shelf you just made and a shelf nothing
+                      // classified into are the same thing and both are fine.
+                      text: chip.isShelf
+                        ? (root.shelfCount(String(chip.modelData)) > 0
+                           ? String(root.shelfCount(String(chip.modelData))) : "empty")
+                        : ""
+                      color: chip.current ? root.readable : root.soft
+                      font.family: root.face
+                      font.pixelSize: Style.font.caption
+                    }
                   }
 
                   MouseArea {
@@ -3279,7 +3699,13 @@ Panel {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onEntered: root.pickerIndex = chip.index
-                    onClicked: { root.pickerIndex = chip.index; root.pickerConfirm() }
+                    onClicked: {
+                      root.pickerIndex = chip.index
+                      // Trying a colour on is not choosing it. Everywhere else a
+                      // chip is the answer, so clicking it answers.
+                      if (picker.styling && !root.styleAsking) return
+                      root.pickerConfirm()
+                    }
                   }
                 }
               }
@@ -3291,7 +3717,10 @@ Panel {
             horizontalAlignment: Text.AlignHCenter
             textFormat: Text.PlainText
             text: {
-              if (picker.styling) return "Type to rename  \u00b7  arrows for a colour  \u00b7  Enter to save  \u00b7  Esc to go back"
+              if (root.styleAsking) return "Enter to save  \u00b7  Esc to drop the changes"
+              if (root.pickerNaming) return "Type the name  \u00b7  Enter to create it  \u00b7  Esc to go back"
+              if (picker.managing) return "Type to filter or name a new one  \u00b7  Enter to open it  \u00b7  Esc to go back"
+              if (picker.styling) return "Type to rename  \u00b7  arrows to try a colour  \u00b7  Enter to save  \u00b7  Esc to go back"
               if (picker.shelving) return "Type to filter  \u00b7  arrows to choose  \u00b7  Enter to move it  \u00b7  Esc to go back"
               return "Arrows or a letter to choose  \u00b7  Enter to copy  \u00b7  Esc to go back"
             }
@@ -3300,6 +3729,7 @@ Panel {
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
           }
+        }
         }
       }
     }
