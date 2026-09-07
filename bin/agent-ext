@@ -298,16 +298,22 @@ def _unquote(v: str) -> str:
 
 # ------------------------------------------------------------------ taxonomy
 
+# `unsorted` is last on purpose: it is where a skill waits, not what a skill is.
+# Everything the keyword rules cannot place lands there instead of being pushed
+# into `agents`, which was the old residual and was a lie -- a skill about LaTeX
+# that matched nothing is not an agents skill, it is an unfiled one, and calling
+# it agents both hid it and made that shelf untrustworthy.
 CATEGORIES = [
     "agents", "code", "workflow", "web", "design", "media", "data",
     "infra", "ops", "security", "automation", "content", "business", "system",
+    "unsorted",
 ]
 
 GLYPH = {
     "agents": "◇", "code": "⌘", "workflow": "⎇", "web": "▫",
     "design": "✧", "media": "▶", "data": "▤", "infra": "☁",
     "ops": "◉", "security": "⛨", "automation": "⟳", "content": "✎",
-    "business": "₿", "system": "⚙",
+    "business": "₿", "system": "⚙", "unsorted": "·",
 }
 
 # Official marketplace category -> ours. Tier 2 of the cascade.
@@ -475,7 +481,7 @@ def classify(name: str, description: str, path: str, official: str | None) -> di
         if hits:
             scores[cat] = scores.get(cat, 0) + hits * weight
     if not scores:
-        return {"category": "agents", "confidence": "unclassified", "classifier": "none"}
+        return {"category": "unsorted", "confidence": "unclassified", "classifier": "none"}
     # Tie-break by position in RULES, not in CATEGORIES. `agents` is the residual
     # bucket and sits last in the rule table precisely so that it loses ties; on
     # CATEGORIES order it sits first and would win them, which is how a skill
@@ -714,10 +720,13 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
     shelved = store["assign"].get(dir_name) or store["assign"].get(display)
     if shelved:
         tax = {"category": shelved, "confidence": "authored", "classifier": "you"}
-    if tax["confidence"] == "unclassified":
-        attention.append("unclassified")
-    elif tax["confidence"] == "low":
-        attention.append("low-confidence")
+    # A guess is not a fault. These two used to be reported as things needing
+    # attention, which put a warning on any skill whose description happened not
+    # to contain the words a rule looks for -- sixteen of them on a machine like
+    # this one -- and buried `drift`, which means two agents are running
+    # different code. The confidence is still in `taxonomy` for anyone who wants
+    # it; what an unplaced skill gets now is the `unsorted` shelf and a control
+    # to move it off, not a red dot.
 
     u = usage.get(dir_name) or usage.get(display) or {}
     last = u.get("lastUsedAt")

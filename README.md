@@ -52,6 +52,19 @@ Which shelf you keep a skill on is the one thing about it that is yours, and the
 Code, OpenCode or Codex to say so. Fourteen categories are guessed from the description; `^M` moves a row
 to a different one, and the coloured dot on any group header opens that shelf for renaming or recolouring.
 
+A skill the rules cannot place lands on **Unsorted** rather than being pushed
+into whichever shelf was the residual, and expanding any row shows the shelf it
+is on as a control: click it to move it. A classifier that reads descriptions
+will get some of them wrong, because it has no idea what you use a skill for, so
+the correction is one click from the thing being corrected.
+
+A thin guess is still a guess kept. Low confidence means the evidence was thin,
+not that the answer was wrong -- on the machine this was written for, four of the
+five low-confidence placements were correct -- so they keep their shelf instead
+of being swept into Unsorted, and the control above is how the fifth gets fixed.
+Neither case is reported as a problem any more: the list flags drift, a name
+mismatch and unreadable frontmatter, and nothing else.
+
 **Edit**, opposite the title, opens all of them at once — every shelf with its colour and its size, a
 standing **+ new shelf** at the end, and the same editor on any one you pick. Trying colours on is not
 choosing one: the swatches preview, **Save** commits, and backing out with something unsaved asks before

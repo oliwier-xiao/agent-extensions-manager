@@ -84,10 +84,31 @@ class Classifier(unittest.TestCase):
         got = ax.classify("n8n-agents", "", "/s/n8n-agents", None)
         self.assertEqual(got["category"], "automation")
 
-    def test_unmatched_falls_to_agents_and_is_marked(self):
+    def test_unmatched_waits_on_the_unsorted_shelf(self):
+        # It used to fall to `agents`, which was the residual bucket and a lie:
+        # a skill that matched nothing is not an agents skill, it is an unfiled
+        # one, and putting it there both hid it and made that shelf untrustworthy.
         got = ax.classify("zzz", "qqq", "/s/zzz", None)
-        self.assertEqual(got["category"], "agents")
+        self.assertEqual(got["category"], "unsorted")
         self.assertEqual(got["confidence"], "unclassified")
+
+    def test_agents_is_a_real_shelf_and_still_loses_ties(self):
+        # `agents` keeps its own rule and still sits last in RULES so it loses a
+        # tie, which is what stopped an n8n skill classifying as agents.
+        self.assertIn("agents", ax.CATEGORIES)
+        order = [cat for cat, _, _ in ax.RULES]
+        self.assertEqual(order[-1], "agents")
+        self.assertNotIn("unsorted", order)
+
+    def test_a_thin_guess_is_kept_rather_than_dumped(self):
+        # Low confidence means the evidence was thin, not that it was wrong: on
+        # the machine this was written for, four of the five low-confidence
+        # placements were correct. Routing them all to `unsorted` would break
+        # four to fix one, so they keep their shelf and the panel offers a
+        # one-click correction instead.
+        got = ax.classify("test-driven-development",
+                          "Use when implementing any feature or bugfix", "/s/tdd", None)
+        self.assertNotEqual(got["category"], "unsorted")
 
     def test_every_category_has_a_glyph(self):
         for cat in ax.CATEGORIES:

@@ -261,39 +261,41 @@ Panel {
 
   readonly property var categoryOrder: [
     "agents", "code", "workflow", "web", "design", "media", "data",
-    "infra", "ops", "security", "automation", "content", "business", "system"
+    "infra", "ops", "security", "automation", "content", "business", "system",
+    "unsorted"
   ]
   readonly property var categoryLabel: ({
     agents: "Agents", code: "Code", workflow: "Workflow", web: "Web",
     design: "Design", media: "Media", data: "Data", infra: "Infrastructure",
     ops: "Operations", security: "Security", automation: "Automation",
-    content: "Content", business: "Business", system: "System"
+    content: "Content", business: "Business", system: "System",
+    unsorted: "Unsorted"
   })
   readonly property var toolLabel: ({
     claude: "Claude Code", opencode: "OpenCode", codex: "Codex"
   })
 
-  // The seven codes bin/agent-ext can attach, ranked. Only 2 and above light the
-  // urgent colour: `unclassified` and `low-confidence` are the classifier
-  // hedging, not a fault, and sixteen n8n skills on a machine like this one carry
-  // one of them -- ranking those as failures would paint the whole list red and
-  // bury `drift`, which means two agents are running different code.
+  // The codes bin/agent-ext can attach, ranked. Only 2 and above light the urgent
+  // colour. `unclassified` and `low-confidence` used to be here at 1: they were
+  // the classifier hedging rather than anything wrong, sixteen skills on a
+  // machine like this one carried one of them, and a list where most rows are
+  // flagged is a list where `drift` -- two agents running different code -- is
+  // just another grey dot. The helper no longer emits them, and an unplaced
+  // skill gets the `unsorted` shelf and a control to move it off instead.
   // `name-mismatch` is a 2 and not a 1 because it is not cosmetic: the helper
   // builds Claude's invocation from the directory name and OpenCode's from the
   // frontmatter name, so a mismatch means the same skill is called two things.
   readonly property var severityRank: ({
     "drift": 3, "invalid-yaml": 3,
     "name-mismatch": 2, "no-description": 2,
-    "long-description": 1, "unclassified": 1, "low-confidence": 1
+    "long-description": 1
   })
   readonly property var attentionPhrase: ({
     "drift": "Another skill of this name has different content -- two agents are running different code",
     "invalid-yaml": "The frontmatter has an unquoted colon",
     "name-mismatch": "The frontmatter name and the directory name disagree, so the tools call it two things",
     "no-description": "No description, so the agent has nothing to match on",
-    "long-description": "The description is over 1024 characters",
-    "unclassified": "Nothing in the description matched a category",
-    "low-confidence": "The category is a guess"
+    "long-description": "The description is over 1024 characters"
   })
 
   // Every string this panel draws was written by somebody else -- a directory
@@ -615,6 +617,18 @@ Panel {
       }
     }
 
+    // Worked out here rather than inside the object literal: a brace-and-call
+    // in a property position is a block followed by a call, not a function
+    // expression, and QML says so at load time and stops compiling the file.
+    var placedBy = "its description, " + root.clean((item.taxonomy || ({})).confidence, 20)
+      + " confidence"
+    var by = String((item.taxonomy || ({})).classifier || "")
+    if (by === "you") placedBy = "you"
+    else if (by === "frontmatter") placedBy = "the skill's own frontmatter"
+    else if (by === "marketplace") placedBy = "the marketplace listing"
+    else if (by === "path") placedBy = "where it is installed"
+    else if (by === "none") placedBy = "nothing matched, so it is waiting to be filed"
+
     var name = root.clean(item.displayName, 120)
     var desc = root.clean(item.description, 600)
     var tax = item.taxonomy || ({})
@@ -653,8 +667,9 @@ Panel {
         // The hint as its author wrote it, so the picker's list can be checked
         // against the source rather than trusted.
         { label: "arguments", value: root.clean(item.argumentHint, 200) },
-        { label: "category", value: root.clean(tax.category, 40) + " ("
-            + root.clean(tax.confidence, 20) + ", " + root.clean(tax.classifier, 20) + ")" },
+        // Where the shelf came from, which is the thing worth knowing when the
+        // shelf is wrong. Which shelf it is has its own control above.
+        { label: "placed by", value: placedBy },
         { label: "tags", value: root.clean(tags, 120) },
         { label: "content", value: root.clean(item.contentHash, 40) },
         { label: "tokens", value: String(Number(item.tokens && item.tokens.alwaysOn) || 0)
@@ -1744,6 +1759,7 @@ Panel {
     signal entered()
     signal copyRequested(string text)
     signal revealRequested(string path)
+    signal shelveRequested()
 
     // Through root rather than inline, and not only to avoid saying it twice: a
     // `property var` whose binding opens with a brace is read as an object
@@ -2230,6 +2246,80 @@ Panel {
               font.pixelSize: Style.font.caption
               elide: Text.ElideMiddle
             }
+          }
+        }
+
+        // Which shelf this is on, and the way to change it. A classifier that
+        // reads descriptions will put some things in the wrong place -- it has
+        // no idea what you use a skill for -- so the correction has to be one
+        // click from the thing being corrected, not somewhere else in the panel.
+        // Skills only: an MCP server has no shelf to be on.
+        Row {
+          width: parent.width
+          spacing: Style.spacing.md
+          visible: er.view.kind === "skill"
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            // The same column the facts below use, so the card has one grid.
+            width: Style.space(86)
+            textFormat: Text.PlainText
+            text: "shelf"
+            color: root.soft
+            font.family: root.face
+            font.pixelSize: Style.font.caption
+          }
+
+          Rectangle {
+            id: shelfChip
+            anchors.verticalCenter: parent.verticalCenter
+            readonly property bool unfiled: er.view.category === "unsorted"
+
+            width: shelfChipRow.implicitWidth + Style.space(18)
+            height: Style.space(22)
+            radius: height / 2
+            color: shelfHover.hovered ? Util.alpha(root.fg, 0.18)
+                                      : Util.alpha(root.fg, 0.08)
+
+            Row {
+              id: shelfChipRow
+              anchors.centerIn: parent
+              spacing: Style.spacing.sm
+
+              Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(7)
+                height: width
+                radius: width / 2
+                color: root.categoryColourFor(er.view.category)
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: root.categoryLabelFor(er.view.category)
+                color: shelfHover.hovered ? root.fg : root.readable
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+              }
+
+              // Says what to do, but only when there is something to do. On a
+              // shelved skill the chip is already an answer and does not need to
+              // shout that it is also a button.
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: shelfChip.unfiled || shelfHover.hovered
+                textFormat: Text.PlainText
+                text: shelfChip.unfiled ? "pick one" : "change"
+                color: root.soft
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+                font.italic: true
+              }
+            }
+
+            HoverHandler { id: shelfHover; cursorShape: Qt.PointingHandCursor }
+            TapHandler { onTapped: er.shelveRequested() }
           }
         }
 
@@ -3265,6 +3355,11 @@ Panel {
               }
               copied: root.copiedKey === rowHost.modelData.key
               onRevealRequested: function (path) { root.openInFiles(path) }
+              onShelveRequested: {
+                root.cursorActive = true
+                root.selectedIndex = rowHost.index
+                root.openCategoryPicker(rowHost.modelData)
+              }
               onCopyRequested: function (text) {
                 root.cursorActive = true
                 root.selectedIndex = rowHost.index
