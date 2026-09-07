@@ -144,17 +144,17 @@ Panel {
   property int selectedIndex: 0
   property bool cursorActive: false
 
-  readonly property var CATEGORIES: [
+  readonly property var categoryOrder: [
     "agents", "code", "workflow", "web", "design", "media", "data",
     "infra", "ops", "security", "automation", "content", "business", "system"
   ]
-  readonly property var CATEGORY_LABEL: ({
+  readonly property var categoryLabel: ({
     agents: "Agents", code: "Code", workflow: "Workflow", web: "Web",
     design: "Design", media: "Media", data: "Data", infra: "Infrastructure",
     ops: "Operations", security: "Security", automation: "Automation",
     content: "Content", business: "Business", system: "System"
   })
-  readonly property var TOOL_LABEL: ({
+  readonly property var toolLabel: ({
     claude: "Claude Code", opencode: "OpenCode", codex: "Codex"
   })
 
@@ -166,12 +166,12 @@ Panel {
   // `name-mismatch` is a 2 and not a 1 because it is not cosmetic: the helper
   // builds Claude's invocation from the directory name and OpenCode's from the
   // frontmatter name, so a mismatch means the same skill is called two things.
-  readonly property var SEVERITY: ({
+  readonly property var severityRank: ({
     "drift": 3, "invalid-yaml": 3,
     "name-mismatch": 2, "no-description": 2,
     "long-description": 1, "unclassified": 1, "low-confidence": 1
   })
-  readonly property var ATTENTION_TEXT: ({
+  readonly property var attentionPhrase: ({
     "drift": "Another skill of this name has different content -- two agents are running different code",
     "invalid-yaml": "The frontmatter has an unquoted colon",
     "name-mismatch": "The frontmatter name and the directory name disagree, so the tools call it two things",
@@ -330,7 +330,7 @@ Panel {
   function severityOf(codes) {
     if (!Array.isArray(codes)) return 0
     var top = 0
-    for (var i = 0; i < codes.length; i++) top = Math.max(top, root.SEVERITY[codes[i]] || 0)
+    for (var i = 0; i < codes.length; i++) top = Math.max(top, root.severityRank[codes[i]] || 0)
     return top
   }
 
@@ -394,7 +394,7 @@ Panel {
     var codes = Array.isArray(item.attention) ? item.attention : []
     var words = []
     for (var c = 0; c < codes.length; c++)
-      words.push(root.ATTENTION_TEXT[codes[c]] || root.clean(codes[c], 64))
+      words.push(root.attentionPhrase[codes[c]] || root.clean(codes[c], 64))
 
     var state = item.state || ({})
     var switches = []
@@ -402,7 +402,7 @@ Panel {
     for (var s = 0; s < order.length; s++) {
       var st = state[order[s]]
       if (!st) continue
-      switches.push({ tool: root.TOOL_LABEL[order[s]],
+      switches.push({ tool: root.toolLabel[order[s]],
                       value: root.clean(st.value, 40),
                       file: root.clean(st.file, 120) })
     }
@@ -412,7 +412,7 @@ Panel {
     for (var t = 0; t < tools.length; t++) {
       var token = item.invocation ? item.invocation[tools[t]] : null
       if (!token) continue
-      invocations.push({ tool: root.TOOL_LABEL[tools[t]] || tools[t],
+      invocations.push({ tool: root.toolLabel[tools[t]] || tools[t],
                          text: root.clean(token, 128),
                          ok: root.copyable(token) })
     }
@@ -420,7 +420,7 @@ Panel {
     var mounts = []
     var src = Array.isArray(item.mounts) ? item.mounts : []
     for (var m = 0; m < src.length && m < 8; m++)
-      mounts.push({ tool: root.TOOL_LABEL[src[m].tool] || root.clean(src[m].tool, 24),
+      mounts.push({ tool: root.toolLabel[src[m].tool] || root.clean(src[m].tool, 24),
                     path: root.clean(src[m].path, 160),
                     link: root.clean(src[m].link, 16) })
 
@@ -504,7 +504,7 @@ Panel {
       // D3: MCP servers are read-only in v0.1. There is no CLI for the toggle, it
       // is per project, and it would mean writing ~/.claude.json underneath
       // whatever Claude Code sessions happen to be running.
-      switches: [{ tool: root.TOOL_LABEL[entry.tool] || root.clean(entry.tool, 24),
+      switches: [{ tool: root.toolLabel[entry.tool] || root.clean(entry.tool, 24),
                    value: live, file: "read-only in this version" }],
       mounts: target !== "" ? [{ tool: "endpoint", path: target, link: "" }] : [],
       peers: [],
@@ -600,7 +600,7 @@ Panel {
           var copy = {}
           for (var f in v) copy[f] = v[f]
           copy.key = v.key + "@" + tool
-          bucket("tool:" + tool, root.TOOL_LABEL[tool] || tool).rows.push(copy)
+          bucket("tool:" + tool, root.toolLabel[tool] || tool).rows.push(copy)
         }
       } else if (mode === "Kind") {
         bucket("kind:" + v.kind, v.kind === "skill" ? "Skills"
@@ -609,7 +609,7 @@ Panel {
         bucket("all", "").rows.push(v)
       } else if (v.kind === "skill") {
         bucket("cat:" + v.category,
-          root.CATEGORY_LABEL[v.category] || v.category).rows.push(v)
+          root.categoryLabel[v.category] || v.category).rows.push(v)
       } else {
         bucket("cat:_servers", "MCP servers and plugins").rows.push(v)
       }
@@ -617,8 +617,8 @@ Panel {
 
     var keys = []
     if (mode === "Category") {
-      for (var c = 0; c < root.CATEGORIES.length; c++)
-        if (buckets["cat:" + root.CATEGORIES[c]]) keys.push("cat:" + root.CATEGORIES[c])
+      for (var c = 0; c < root.categoryOrder.length; c++)
+        if (buckets["cat:" + root.categoryOrder[c]]) keys.push("cat:" + root.categoryOrder[c])
       if (buckets["cat:_servers"]) keys.push("cat:_servers")
     } else if (mode === "Tool") {
       var to = ["tool:claude", "tool:opencode", "tool:codex"]
@@ -693,7 +693,7 @@ Panel {
       for (var o = 0; o < order.length; o++) {
         var n = perTool[order[o]]
         if (!n) continue
-        cost.push(root.TOOL_LABEL[order[o]] + " ~"
+        cost.push(root.toolLabel[order[o]] + " ~"
           + (n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n)))
       }
       if (cost.length > 0) parts.push(cost.join(" · ") + " on every turn")
@@ -807,11 +807,11 @@ Panel {
   // to grey, so that case falls back to graded foreground alpha rather than
   // pretending to have hues.
   function categoryTint(category) {
-    var idx = root.CATEGORIES.indexOf(String(category || ""))
+    var idx = root.categoryOrder.indexOf(String(category || ""))
     if (idx < 0) return root.veryMuted
     var a = root.hue
     if (a.hslSaturation < 0.12) return Util.alpha(root.fg, 0.28 + (idx % 5) * 0.09)
-    var h = (a.hslHue < 0 ? 0 : a.hslHue) + idx / root.CATEGORIES.length
+    var h = (a.hslHue < 0 ? 0 : a.hslHue) + idx / root.categoryOrder.length
     return Qt.hsla(h - Math.floor(h), a.hslSaturation, a.hslLightness, 1)
   }
 
