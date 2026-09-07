@@ -244,10 +244,6 @@ class Roots(unittest.TestCase):
         self.assertNotIn("claude", shared["tools"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class InvalidYaml(unittest.TestCase):
     def test_bare_colon_in_a_plain_scalar_is_flagged(self):
         self.assertTrue(ax.has_unquoted_colon("description: Triggers on: n8n, workflows"))
@@ -618,3 +614,7 @@ class DriftVersusVariant(unittest.TestCase):
         items = [self.rec("x", "a", "1.0")]
         ax._mark_drift(items)
         self.assertEqual(items[0]["attention"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()
