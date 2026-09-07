@@ -250,8 +250,12 @@ them, so filtering to OpenCode and grouping by agent used to put a **Claude Code
 the list you had asked to be OpenCode's, with OpenCode's own group somewhere below the fold.
 
 Each box steps aside for as long as its filter is on, and the list falls back to shelves — or to a flat
-list, if the shelf is the thing you filtered by. None of it changes what you chose: clear the filter and
+list, when the shelf is the thing you filtered by. None of it changes what you chose: clear the filter and
 the grouping you had comes back on its own.
+
+The shelf box has one exception, because MCP servers and plugins are filed on the **Agents** shelf and are
+grouped in a bucket of their own whatever shelf they claim. Filtering to Agents therefore still leaves two
+headings, so grouping by shelf is still doing work and the box stays.
 
 By shelf answers the question you open the panel with — where is the thing that does X. By agent is right
 when you are about to switch agents and want to know what that one alone can see. By kind separates skills

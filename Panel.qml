@@ -107,10 +107,12 @@ Panel {
     var want = root.groupingWanted
     for (var i = 0; i < root.groupModes.length; i++)
       if (root.groupModes[i].key === want) return want
-    // Shelf is what the panel opens on and what it falls back to -- unless the
-    // shelf is the thing you filtered by, in which case a flat list is the
-    // honest answer, because there is nothing left to group.
-    return root.categoryFilter === "" ? "Category" : "Nothing"
+    // Shelf is what the panel opens on and what it falls back to, whenever it is
+    // still one of the answers. When it is the thing you filtered by, a flat
+    // list is the honest one, because there is nothing left to group.
+    for (var j = 0; j < root.groupModes.length; j++)
+      if (root.groupModes[j].key === "Category") return "Category"
+    return "Nothing"
   }
 
   // ---- Helper -------------------------------------------------------------
@@ -1645,13 +1647,28 @@ Panel {
   // drawn at all, for the same reason a kind box that would filter to nothing is
   // not: a control that is on screen and does nothing is worse than one that is
   // absent, because absence is information and a dead button is not.
+  // Whether filtering to a shelf has actually left one group. It has only if
+  // everything that passed is a skill: mcpView and pluginView file every server
+  // and every plugin on the agents shelf, but the grouping puts them in a bucket
+  // of their own whatever shelf they claim -- so "Agents" with its filter on is
+  // two headings, not one, and grouping by shelf is still doing work there. The
+  // other two dimensions have no such case: a kind filter leaves exactly one
+  // kind, and a tool filter does not leave one tool at all, which is why its box
+  // goes for the opposite reason.
+  readonly property bool oneShelfShowing: {
+    if (root.categoryFilter === "") return false
+    var v = root.visibleItems
+    for (var i = 0; i < v.length; i++) if (v[i].kind !== "skill") return false
+    return true
+  }
+
   readonly property var groupModes: {
     var out = []
     for (var i = 0; i < root.groupModesAll.length; i++) {
       var k = root.groupModesAll[i].key
       if (k === "Tool" && root.toolFilter !== "") continue
       if (k === "Kind" && root.kindFilter !== "") continue
-      if (k === "Category" && root.categoryFilter !== "") continue
+      if (k === "Category" && root.oneShelfShowing) continue
       out.push(root.groupModesAll[i])
     }
     return out
