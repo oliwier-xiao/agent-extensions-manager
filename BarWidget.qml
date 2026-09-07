@@ -15,11 +15,25 @@ BarWidget {
   id: root
   moduleName: "oliwier.ai-skills-manager"
 
-  // nf-md-robot (U+F06A9) as its surrogate pair, so this file stays ASCII. Not
-  // the puzzle-piece family: the plugin manager already wears that on the same
-  // bar, and two neighbours that both mean "things you installed" have to be
-  // told apart at a glance rather than read.
-  readonly property string glyph: "󰚩"
+  // nf-md-brain (U+F09D1), written as its surrogate pair rather than pasted in.
+  // A private-use codepoint is invisible in a diff, in a review, and in any
+  // editor without a Nerd Font loaded; an escape and a name are legible
+  // everywhere and say which glyph this is meant to be.
+  //
+  // It was nf-md-robot, which was wrong for one reason no amount of taste would
+  // have found: Omarchy's own `omarchy.agents` widget is a robot too
+  // (nf-md-robot_outline, U+F16A3), so on a default bar this plugin sat next to
+  // a near-identical mark and neither could be picked out. Not the puzzle-piece
+  // family either -- the plugin manager already wears that, and two neighbours
+  // that both mean "things you installed" have to be told apart at a glance
+  // rather than read.
+  //
+  // A brain survives the size it is actually drawn at, which is the whole test:
+  // at the bar's 13px the folds still read, and it is asymmetric, so it cannot
+  // be mistaken for one more round blob in a row of them. nf-md-head_cog is the
+  // other honest answer and reads as "machine learning" more literally, but its
+  // cog collapses to a dot at this size.
+  readonly property string glyph: "\uDB82\uDDD1"
 
   // The shell stores `barWidget.defaults` as registry metadata for the settings
   // UI and never merges it into `settings` (BarModel.entrySettings hands over the
