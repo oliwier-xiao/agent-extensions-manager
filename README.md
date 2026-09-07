@@ -54,14 +54,14 @@ To remove it:
 omarchy plugin remove oliwier.agent-extensions-manager
 ```
 
-That takes the widget off the bar and deletes the plugin. If you shelved anything, one file of yours
+That takes the widget off the bar and deletes the plugin. If you have filed anything yourself, one file of yours
 outlives it — [Removal](#removal) says where it is and what else is safe to delete.
 
 ---
 
 ## The list
 
-![The panel, grouped by shelf](docs/panel.png)
+![The panel, grouped by category](docs/panel.png)
 
 Everything the three agents can load, on one surface. The boxes across the top count it three ways and
 each of them is also a filter: by kind, by what is flagged, and by which agent actually loads it. The
@@ -74,13 +74,13 @@ reads Claude Code's skill directory as well as its own, so most of what you inst
 being paid for twice.
 
 Each row says what the thing is, which agents can see it, what it costs, and how often you have reached
-for it. The coloured bar down the left is the shelf it is on.
+for it. The coloured bar down the left is the category it is in.
 
 Every column is named. Seven of them carried numbers and glyphs and not one said what it held: the tilde
 made the token figure guessable, and the count beside it — how many times Claude Code records you having
 used that skill — was guessable by nobody. The headings sit above the whole list rather than being
-repeated inside each shelf, because a shelf's heading sums two of the same columns and is drawn in them.
-`~524` under **tokens** is what the three skills on the Design shelf cost together, and the `1` under
+repeated inside each category, because a category's heading sums two of the same columns and is drawn in them.
+`~524` under **tokens** is what the three skills in the Design category cost together, and the `1` under
 **!** is how many of them are flagged.
 
 ## What a row knows
@@ -91,8 +91,8 @@ Open a row and it stops summarising. The description is the one the agents actua
 is costing you the tokens in the corner. Under it, the state each agent has this skill in and **the file
 that state is written in**, so a claim on this panel is one you can go and check.
 
-Then every path the skill is reachable from, marked `real` or `symlink`; the shelf, as a control you can
-click; the invocation for each agent that can see it; how the shelf was chosen and how confident that
+Then every path the skill is reachable from, marked `real` or `symlink`; the category, as a control you can
+click; the invocation for each agent that can see it; how the category was chosen and how confident that
 guess was; the content hash the drift check compares; and the token figure with the divisor that produced
 it.
 
@@ -128,8 +128,8 @@ against the agent each belongs to.
 **A server whose token has expired.** `n8n-mcp` is a remote MCP server and its stored credentials have
 run out. OpenCode will not say so until the moment you need it.
 
-The list stays quiet about everything else. A shelf the classifier was unsure of is not a problem, and is
-not reported as one.
+The list stays quiet about everything else. A category the classifier was unsure of is not a problem, and
+is not reported as one.
 
 ## Copying the command
 
@@ -161,47 +161,47 @@ argument** is the first option, because sometimes the bare command is what you w
 
 Rows without documented arguments copy straight through, unchanged.
 
-## Shelves
+## Categories
 
-Which shelf you keep a skill on is the one thing about it that is yours, and there is nowhere in Claude
-Code, OpenCode or Codex to say so. Fourteen shelves are guessed from the description, and a skill the
-rules cannot place lands on **Unsorted** rather than being pushed into whichever shelf was the residual.
+Which category you keep a skill in is the one thing about it that is yours, and there is nowhere in
+Claude Code, OpenCode or Codex to say so. Fourteen of them are guessed from the description, and a skill
+the rules cannot place lands in **Unsorted** rather than being pushed into whichever one was the residual.
 
-![Moving a skill to another shelf](docs/move.png)
+![Moving a skill to another category](docs/move.png)
 
-`^M` moves the row. Expanding a row shows its shelf as a control, so the correction is one click from the
+`^M` moves the row. Expanding a row shows its category as a control, so the correction is one click from the
 thing being corrected — which matters, because a classifier reading descriptions has no idea what you
 actually use a skill for and will get some of them wrong. Type a name nothing answers to and it becomes a
-new shelf.
+new one.
 
 A thin guess is still a guess kept. Low confidence means the evidence was thin, not that the answer was
 wrong — on the machine this was written for, four of the five low-confidence placements were correct — so
-they keep their shelf instead of being swept into Unsorted, and the control above is how the fifth gets
+they keep their category instead of being swept into Unsorted, and the control above is how the fifth gets
 fixed.
 
-A shelf's heading is the same chip the filter strip draws it as: one shape, one dot, one count, in the two
-places that mean the same thing. It used to be a bare label with a small dot beside it, and that was not
-enough to tell two shelves apart. Fourteen shelves are handed fourteen points around one hue wheel, so
-some pair of them is always about twenty-four degrees apart — and twenty-four degrees on a nine-pixel dot
+A category's heading is the same chip the filter strip draws it as: one shape, one dot, one count, in the
+two places that mean the same thing. It used to be a bare label with a small dot beside it, and that was
+not enough to tell two of them apart. Fourteen categories are handed fourteen points around one hue
+wheel, so some pair is always about twenty-four degrees apart — and twenty-four degrees on a nine-pixel dot
 is a difference nobody can use. Web and Design read as the same pink. The walk around the wheel now takes
-a stride that puts consecutive shelves most of it apart, lightness and saturation step on cycles of their
-own so no two shelves differ on one axis only, and an outlined box carries the colour on a hundred times
+a stride that puts consecutive categories most of it apart, lightness and saturation step on cycles of
+their own so no two of them differ on one axis only, and an outlined box carries the colour on a hundred times
 the area a dot did.
 
-![The shelf index](docs/shelves.png)
+![The category index](docs/categories.png)
 
-**Edit**, opposite the title, opens all of them at once: every shelf with its colour and its size, and a
-standing **+ new shelf** at the end. It is the way in when the shelf you want is not on screen, or does
-not exist yet. `^E` does the same from the keyboard.
+**Edit**, opposite the title, opens all of them at once: every category with its colour and its size, and
+a standing **+ new category** at the end. It is the way in when the one you want is not on screen, or
+does not exist yet. `^E` does the same from the keyboard.
 
-![Renaming and recolouring a shelf](docs/shelf-editor.png)
+![Renaming and recolouring a category](docs/category-editor.png)
 
 Pick one and you can rename it, recolour it, or clear the colour and go back to the theme's. Trying a
-colour on is not choosing one: the swatches preview against the shelf's own name as you arrow through
-them, and **Save** commits. It sits in the panel's title row next to **Back**, lit only when there is
+colour on is not choosing one: the swatches preview against the category's own name as you arrow
+through them, and **Save** commits. It sits in the panel's title row next to **Back**, lit only when there is
 something to save.
 
-![Backing out of an unsaved shelf](docs/unsaved.png)
+![Backing out of an unsaved category](docs/unsaved.png)
 
 Backing out with something unsaved asks first, on the same surface, rather than dropping work you had no
 way of knowing was still a draft.
@@ -212,18 +212,18 @@ This is the only thing the widget writes, and it writes it to one file of its ow
 ~/.config/agent-ext/categories.json
 ```
 
-It names directories and shelves, nothing else. Deleting it restores every guess the classifier made and
-loses nothing but your shelving. No file belonging to Claude Code, OpenCode or Codex is written to make a
-shelf, and none is written to move a skill between them.
+It names directories and categories, nothing else. Deleting it restores every guess the classifier made
+and loses nothing but your own filing. No file belonging to Claude Code, OpenCode or Codex is written to
+make a category, and none is written to move a skill between them.
 
 ## Filtering and searching
 
 ![Typing narrows the list](docs/search.png)
 
 Every printable key goes to the search, including the first one, so a skill whose name starts with `c` or
-`g` is reachable by typing it; commands take Ctrl. The search reads names, descriptions, shelves and tags.
+`g` is reachable by typing it; commands take Ctrl. The search reads names, descriptions, categories and tags.
 
-Every box along the top is also a filter, and so is every shelf chip below them. Clicking the box that is
+Every box along the top is also a filter, and so is every category chip below them. Clicking the box that is
 already on turns it off, `all` clears every one of them, and one Escape does the same from the keyboard.
 
 The counts stay honest while you use them. Each dimension is counted with every filter except its own, so
@@ -243,21 +243,17 @@ grouped by agent at all was to read that hint and try it.
 Fewer than four once you have filtered, because a grouping you have already filtered by is not a grouping.
 Pick one agent and grouping by agent is a heading over a list that is entirely that agent; pick **33
 skills** and grouping by kind is a heading that says *Skills* over nothing but skills; pick the Design
-shelf and grouping by shelf is one header over the three rows you asked for.
+Design category and grouping by category is one header over the three rows you asked for.
 
 The agent case was worse than merely redundant. A skill three agents carry opens a group under each of
 them, so filtering to OpenCode and grouping by agent used to put a **Claude Code** heading at the top of
 the list you had asked to be OpenCode's, with OpenCode's own group somewhere below the fold.
 
-Each box steps aside for as long as its filter is on, and the list falls back to shelves — or to a flat
-list, when the shelf is the thing you filtered by. None of it changes what you chose: clear the filter and
-the grouping you had comes back on its own.
+Each box steps aside for as long as its filter is on, and the list falls back to categories — or to a
+flat list, when the category is the thing you filtered by. None of it changes what you chose: clear the
+filter and the grouping you had comes back on its own.
 
-The shelf box has one exception, because MCP servers and plugins are filed on the **Agents** shelf and are
-grouped in a bucket of their own whatever shelf they claim. Filtering to Agents therefore still leaves two
-headings, so grouping by shelf is still doing work and the box stays.
-
-By shelf answers the question you open the panel with — where is the thing that does X. By agent is right
+By category answers the question you open the panel with — where is the thing that does X. By agent is right
 when you are about to switch agents and want to know what that one alone can see. By kind separates skills
 from plugins from MCP servers. None gives one flat alphabetical list, which is the fastest thing to
 type-search through.
@@ -291,13 +287,13 @@ Every printable key goes to the search. Commands take Ctrl.
 
 | Key | What it does |
 |---|---|
-| type | search everything: names, descriptions, shelves, tags |
+| type | search everything: names, descriptions, categories, tags |
 | `Enter` | open the row, or fold and unfold a group header |
 | `^C` | copy the invocation, or pick an action first if the skill documents any |
-| `^M` | move the row to another shelf, or restyle the shelf under a group header |
-| `^E` | open the shelves: rename one, recolour it, or add one |
+| `^M` | move the row to another category, or restyle the category under a group header |
+| `^E` | open the categories: rename one, recolour it, or add one |
 | `^O` | open where the skill is installed, in your file manager |
-| `^G` | regroup by shelf, agent, kind or nothing |
+| `^G` | regroup by category, agent, kind or nothing |
 | `^R` | read everything again |
 | `!` | show only what needs attention |
 | `Esc` | back out one step: the open row, then the filters, then the search, then close |
@@ -326,7 +322,7 @@ Whichever of the three agents you actually use is the one you get rows for. An a
 is one quiet line saying so, not an error.
 
 The widget reads your agent configuration and never writes to it. The one file it does write is its own,
-`~/.config/agent-ext/categories.json`, and only when you shelve something.
+`~/.config/agent-ext/categories.json`, and only when you file something yourself.
 
 ## Removal
 
@@ -334,8 +330,8 @@ The widget reads your agent configuration and never writes to it. The one file i
 omarchy plugin remove oliwier.agent-extensions-manager
 ```
 
-If you shelved anything, that file of yours survives the removal, so reinstalling later finds your shelves
-again. To clear them:
+If you have filed anything yourself, that file survives the removal, so reinstalling later finds your
+categories again. To clear them:
 
 ```
 rm -f ~/.config/agent-ext/categories.json

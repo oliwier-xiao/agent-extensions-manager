@@ -946,8 +946,15 @@ Panel {
   // things you could narrow to next.
   function passes(v, except, query) {
     if (except !== "attention" && root.attentionOnly && v.severity < 2) return false
+    // A category is a place to file a skill. mcpView and pluginView write
+    // "agents" into this field for every server and every plugin, which was
+    // never a claim about where they belong -- the grouping puts them in a
+    // bucket of their own whatever they claim, and the chip strip counts only
+    // skills. So the filter counted one thing and admitted another: the Agents
+    // chip read 5 and gave you thirteen rows. It admits skills only, which is
+    // what its own count has always meant.
     if (except !== "category" && root.categoryFilter !== ""
-        && v.category !== root.categoryFilter) return false
+        && (v.kind !== "skill" || v.category !== root.categoryFilter)) return false
     if (except !== "kind" && root.kindFilter !== "" && v.kind !== root.kindFilter) return false
     if (except !== "tool" && root.toolFilter !== ""
         && v.toolList.indexOf(root.toolFilter) < 0) return false
@@ -1502,8 +1509,8 @@ Panel {
     if (root.pickerMode === "shelves") {
       var at = root.pickerChips()[root.pickerIndex]
       if (at === undefined) return ""
-      if (at === "\u0000addnew") return "new shelf"
-      if (at === "\u0000new") return "new shelf  " + root.newCategoryName()
+      if (at === "\u0000addnew") return "new category"
+      if (at === "\u0000new") return "new category  " + root.newCategoryName()
       return "edit  " + root.categoryLabelFor(at)
     }
     if (root.pickerMode === "style")
@@ -1647,28 +1654,13 @@ Panel {
   // drawn at all, for the same reason a kind box that would filter to nothing is
   // not: a control that is on screen and does nothing is worse than one that is
   // absent, because absence is information and a dead button is not.
-  // Whether filtering to a shelf has actually left one group. It has only if
-  // everything that passed is a skill: mcpView and pluginView file every server
-  // and every plugin on the agents shelf, but the grouping puts them in a bucket
-  // of their own whatever shelf they claim -- so "Agents" with its filter on is
-  // two headings, not one, and grouping by shelf is still doing work there. The
-  // other two dimensions have no such case: a kind filter leaves exactly one
-  // kind, and a tool filter does not leave one tool at all, which is why its box
-  // goes for the opposite reason.
-  readonly property bool oneShelfShowing: {
-    if (root.categoryFilter === "") return false
-    var v = root.visibleItems
-    for (var i = 0; i < v.length; i++) if (v[i].kind !== "skill") return false
-    return true
-  }
-
   readonly property var groupModes: {
     var out = []
     for (var i = 0; i < root.groupModesAll.length; i++) {
       var k = root.groupModesAll[i].key
       if (k === "Tool" && root.toolFilter !== "") continue
       if (k === "Kind" && root.kindFilter !== "") continue
-      if (k === "Category" && root.oneShelfShowing) continue
+      if (k === "Category" && root.categoryFilter !== "") continue
       out.push(root.groupModesAll[i])
     }
     return out
@@ -2487,7 +2479,7 @@ Panel {
             // The same column the facts below use, so the card has one grid.
             width: Style.space(86)
             textFormat: Text.PlainText
-            text: "shelf"
+            text: "category"
             color: root.soft
             font.family: root.face
             font.pixelSize: Style.font.caption
@@ -3987,9 +3979,9 @@ Panel {
               textFormat: Text.PlainText
               text: {
                 if (root.styleAsking) return "unsaved changes"
-                if (root.pickerNaming) return "new shelf"
-                if (picker.managing) return "shelves"
-                if (picker.styling) return "the " + root.pickerCategory + " shelf"
+                if (root.pickerNaming) return "new category"
+                if (picker.managing) return "categories"
+                if (picker.styling) return "the " + root.pickerCategory + " category"
                 if (!root.pickerOpen || !root.pickerRow) return ""
                 var n = root.clean(root.pickerRow.view.name, 60)
                 return picker.shelving ? n + "  \u00b7  move to" : n + "  \u00b7  pick an action"
@@ -4094,9 +4086,9 @@ Panel {
             text: {
               if (root.styleAsking) return "Keep the new name and colour, or go back to what was there?"
               if (root.pickerNaming) return "Lower case letters, digits and dashes. It starts empty; put something on it with ^M from any row."
-              if (picker.managing) return "Pick a shelf to rename it or change its colour. Type a name nothing answers to and it becomes a new one."
+              if (picker.managing) return "Pick a category to rename it or change its colour. Type a name nothing answers to and it becomes a new one."
               if (picker.styling) return "Type to rename it. Pick a colour, or clear it to go back to the theme."
-              if (picker.shelving) return "Type a name nothing answers to and it becomes a new shelf."
+              if (picker.shelving) return "Type a name nothing answers to and it becomes a new category."
               if (!root.pickerOpen || !root.pickerRow) return ""
               var args = root.pickerRow.view.argumentChoices || []
               for (var i = 0; i < args.length; i++)
@@ -4204,7 +4196,7 @@ Panel {
                         if (String(chip.modelData) === "\u0000save") return "Save"
                         if (String(chip.modelData) === "\u0000discard") return "Discard"
                         if (chip.isClear) return "theme default"
-                        if (chip.isAddNew) return "+ new shelf"
+                        if (chip.isAddNew) return "+ new category"
                         if (chip.isNew) return "+ new  \u201c" + root.newCategoryName() + "\u201d"
                         if (picker.shelfList) return root.categoryLabelFor(String(chip.modelData))
                         return String(chip.modelData) === "" ? "no argument" : String(chip.modelData)
