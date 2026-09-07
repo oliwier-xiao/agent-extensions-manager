@@ -31,6 +31,38 @@ jobs:
           HOME=$(mktemp -d) python3 bin/agent-ext scan | python3 -c \
             'import json,sys; d=json.load(sys.stdin); assert d["items"]==[], d; print("empty HOME ok")'
 
+  qml:
+    name: qml checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No property name begins with a capital
+        # QML reserves a leading capital for type names and refuses to declare
+        # such a property at all. The declaration is an error, the error aborts
+        # the whole document, and the component never compiles -- so a lazily
+        # loaded Panel.qml becomes a null Loader item and the bar widget opens
+        # nothing at all. The only symptom is a WARN line in the shell journal,
+        # which is why it survived a review and a release.
+        run: |
+          if grep -rnE '^[[:space:]]*(readonly[[:space:]]+)?property[[:space:]]+[A-Za-z_][A-Za-z0-9_<>]*[[:space:]]+[A-Z]' -- *.qml; then
+            echo "::error::a QML property name begins with a capital; QML will refuse the whole file"
+            exit 1
+          fi
+          echo "every property name starts lower case"
+      - name: Every Text has a textFormat
+        # Everything this plugin draws was written by somebody else. A Text
+        # without an explicit textFormat is the marketplace reviewer's most
+        # cited manual finding, and it is a real injection surface.
+        run: |
+          rc=0
+          for q in *.qml; do
+            t=$(grep -cE '^[[:space:]]*(Text|Label)[[:space:]]*\{' "$q" || true)
+            f=$(grep -c 'textFormat:' "$q" || true)
+            echo "$q: $t Text/Label, $f textFormat"
+            [ "$t" -le "$f" ] || { echo "::error file=$q::$t Text/Label but only $f textFormat"; rc=1; }
+          done
+          exit $rc
+
   manifest:
     name: manifest shape
     runs-on: ubuntu-latest

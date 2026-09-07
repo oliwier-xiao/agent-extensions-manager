@@ -588,6 +588,18 @@ while IFS= read -r q; do
   else
     pass "qml/literal-launcher $q" "no curl/wget/git/cargo in any string literal"
   fi
+  # QML reserves a leading capital for type names and refuses to declare such a
+  # property at all. That is not a style warning: the declaration is an error,
+  # the error aborts the whole document, and the component never compiles -- so
+  # a lazily-loaded Panel.qml silently becomes a null Loader item and the widget
+  # opens nothing. It cost a full debugging session to find, because the only
+  # symptom is a WARN line in the shell journal and a mark that takes its click
+  # and does nothing. Cheap to check, impossible to see by reading.
+  if grep -qE '^[[:space:]]*(readonly[[:space:]]+)?property[[:space:]]+[A-Za-z_][A-Za-z0-9_<>]*[[:space:]]+[A-Z]' "$q"; then
+    fail "qml/property-case $q" "a property name begins with a capital -- QML refuses it and the file will not compile"
+  else
+    pass "qml/property-case $q" "no property name begins with a capital"
+  fi
 done <<EOF
 $QML_LIST
 EOF
