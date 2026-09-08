@@ -175,6 +175,12 @@ will get some of them wrong. Type a name nothing answers to and it becomes a new
 Low confidence means the evidence was thin, not that the answer was wrong, so a thin guess keeps its
 category instead of being swept into Unsorted.
 
+An expanded row says how it was filed on its **placed by** line — the marketplace listing, the skill's own
+frontmatter, where it is installed, its description and how sure that was, or you. It is worth reading
+while you are still deciding whether to trust the shelving, and it is thirty-nine lines of settled news
+afterwards, so the `×` at the end of the line turns it off on every card at once. The category index has a
+**show placed by** chip while it is off, and that is the way back.
+
 ![The category index](docs/categories.png)
 
 **Edit**, opposite the title, opens all of them at once with a standing **+ new category** at the end —
@@ -198,8 +204,8 @@ Filing is written to one file of the widget's own:
 ~/.config/agent-skills/categories.json
 ```
 
-It names directories and categories, nothing else. Delete it and every classifier guess comes back; you
-lose only your own filing. No file belonging to Claude Code, OpenCode or Codex is written to make a
+It names directories and categories, plus whether the **placed by** line is on. Delete it and every
+classifier guess comes back; you lose only your own filing. No file belonging to Claude Code, OpenCode or Codex is written to make a
 category or to move a skill between them.
 
 ---
@@ -406,6 +412,7 @@ bin/agent-skills category create ui --label UI --color '#7AA2F7'
 bin/agent-skills category assign nextjs ui
 bin/agent-skills category unassign nextjs
 bin/agent-skills category style ui --reset
+bin/agent-skills category placed-by hide
 ```
 
 `bin/agent-skills remove` is the other, and it is the only thing here that touches a file this plugin did

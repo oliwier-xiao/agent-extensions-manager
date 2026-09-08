@@ -530,7 +530,8 @@ TAG_RULES = {
 # Codex to say so. So it is kept here, beside this plugin, in a file that names
 # only directories and categories:
 #
-#   {"version": 1, "custom": ["ui", "video"], "assign": {"nextjs": "ui"}}
+#   {"version": 1, "custom": ["ui", "video"], "assign": {"nextjs": "ui"},
+#    "hidePlacedBy": false}
 #
 # Deleting it restores every classifier guess and loses nothing else. No agent
 # configuration is touched to make a category, and none is touched to move a
@@ -571,7 +572,8 @@ def read_store(findings: list | None = None) -> dict:
         # filed anything on. Say so where there is anywhere to say it.
         if err and findings is not None:
             findings.append({"what": "categories.json", "detail": err})
-        return {"custom": [], "assign": {}, "labels": {}, "colors": {}}
+        return {"custom": [], "assign": {}, "labels": {}, "colors": {},
+                "hidePlacedBy": False}
     custom = [c for c in as_list(value.get("custom"))
               if isinstance(c, str) and CATEGORY_NAME.match(c)][:MAX_CUSTOM_CATEGORIES]
     assign = {}
@@ -588,7 +590,12 @@ def read_store(findings: list | None = None) -> dict:
         if (isinstance(k, str) and CATEGORY_NAME.match(k)
                 and isinstance(v, str) and HEX_COLOR.match(v)):
             colors[k] = v.upper()
-    return {"custom": custom, "assign": assign, "labels": labels, "colors": colors}
+    return {"custom": custom, "assign": assign, "labels": labels, "colors": colors,
+            # Whether the card still says how a skill came to be on its shelf.
+            # Absent means shown, so a store written before this key existed
+            # reads as a machine that has never turned the line off -- which is
+            # what it is.
+            "hidePlacedBy": value.get("hidePlacedBy") is True}
 
 
 def write_store(store: dict) -> None:
@@ -598,7 +605,8 @@ def write_store(store: dict) -> None:
                                    "custom": store.get("custom", []),
                                    "assign": store.get("assign", {}),
                                    "labels": store.get("labels", {}),
-                                   "colors": store.get("colors", {})})
+                                   "colors": store.get("colors", {}),
+                                   "hidePlacedBy": store.get("hidePlacedBy", False) is True})
 
 
 def _write_json_store(path: str, payload: dict) -> None:
@@ -1073,6 +1081,13 @@ def scan(divisor: int = 4) -> dict:
             "custom": store["custom"],
             "labels": store["labels"],
             "colors": store["colors"],
+            # Not a category, but the one preference this plugin keeps, and it is
+            # about the categories: whether a card still explains how the skill
+            # came to be on its shelf. It travels here because this is already
+            # the block the panel reads to draw anything shelf-shaped, and a
+            # second block holding one boolean would be a second thing to keep
+            # in step with the store.
+            "hidePlacedBy": store["hidePlacedBy"],
         },
     }
 
@@ -1865,8 +1880,20 @@ def category_command(args) -> int:
     if args.action == "list":
         sys.stdout.write(json.dumps({"custom": store["custom"], "assign": store["assign"],
                                      "labels": store["labels"], "colors": store["colors"],
+                                     "hidePlacedBy": store["hidePlacedBy"],
                                      "path": STORE_PATH, "known": known_categories(store)},
                                     ensure_ascii=False) + "\n")
+        return 0
+
+    if args.action == "placed-by":
+        want = args.state == "hide"
+        if store["hidePlacedBy"] is want:
+            print("placed by is already " + ("hidden" if want else "shown"))
+            return 0
+        store["hidePlacedBy"] = want
+        write_store(store)
+        print("placed by " + ("hidden on every card; `placed-by show` puts it back"
+                              if want else "back on every card"))
         return 0
 
     if args.action == "unassign":
@@ -2751,6 +2778,15 @@ def main(argv: list[str]) -> int:
     p_style.add_argument("--color", default=None)
     p_style.add_argument("--reset", action="store_true",
                          help="drop the label and colour and go back to the defaults")
+
+    # The one line on a card that answers a question you only ask once. Once you
+    # know a shelf is right, why it is right stops being news, so this turns it
+    # off -- on every card at once, because "how did this get here" is a question
+    # about the classifier rather than about any one skill, and answering it
+    # thirty-nine times is not an answer thirty-nine times over.
+    p_placed = cat_sub.add_parser("placed-by",
+                                  help="show or hide the line saying how each skill was filed")
+    p_placed.add_argument("state", choices=("show", "hide"))
 
     cat_sub.add_parser("list", help="print the store as JSON")
 

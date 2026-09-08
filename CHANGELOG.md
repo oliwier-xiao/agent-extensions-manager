@@ -30,7 +30,9 @@ value of one `SKILL.md`, with the author's own text kept so it can be put back.
 - **Categories you own.** Fourteen are guessed from the description and a skill the rules cannot
   place lands in Unsorted rather than in whichever category was the residual. Every guess is one
   keystroke from being corrected, and the correction goes to the widget's own file, never to a
-  skill's.
+  skill's. An expanded row says how it was filed, and that line has a `×`: it is worth reading
+  while you are still deciding whether to trust the shelving and settled news afterwards, so it
+  switches off on every card at once and comes back from the category index.
 - **Flags that mean something** — a skill answering to two names across agents, an expired MCP
   token, a copy that has drifted from its original. A category the classifier was unsure of is not a
   problem and is not reported as one.

@@ -633,7 +633,30 @@ class CategoryStore(unittest.TestCase):
             store = ax.read_store()
         finally:
             ax.STORE_PATH = saved
-        self.assertEqual(store, {"custom": [], "assign": {}, "labels": {}, "colors": {}})
+        self.assertEqual(store, {"custom": [], "assign": {}, "labels": {}, "colors": {},
+                                 "hidePlacedBy": False})
+
+    def test_placed_by_is_shown_until_a_store_says_otherwise(self):
+        # The key was added after the first stores were written, so its absence
+        # has to mean the same thing as false. Anything but a real `true` does:
+        # a store carrying the string "true" is a store this program did not
+        # write, and a line that switched itself off on the strength of one
+        # would be unexplainable from the panel.
+        for raw, want in (("{}", False),
+                          ('{"hidePlacedBy": true}', True),
+                          ('{"hidePlacedBy": false}', False),
+                          ('{"hidePlacedBy": "true"}', False),
+                          ('{"hidePlacedBy": 1}', False)):
+            with tempfile.TemporaryDirectory() as d:
+                path = os.path.join(d, "categories.json")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(raw)
+                saved = ax.STORE_PATH
+                try:
+                    ax.STORE_PATH = path
+                    self.assertIs(ax.read_store()["hidePlacedBy"], want, raw)
+                finally:
+                    ax.STORE_PATH = saved
 
     def test_custom_categories_are_appended_after_the_built_in_ones(self):
         known = ax.known_categories({"custom": ["ui"]})
@@ -1026,6 +1049,35 @@ class CategoryAssign(unittest.TestCase):
         # exists to get past, and it exits 0 having written nothing.
         with self.assertRaises(SystemExit):
             self.run_cli(["category", "assign", "-h", "design"])
+
+    def test_placed_by_is_switched_off_and_back_on_again(self):
+        code, store = self.run_cli(["category", "placed-by", "hide"])
+        self.assertEqual(code, 0)
+        self.assertIs(store["hidePlacedBy"], True)
+        code, store = self.run_cli(["category", "placed-by", "hide"],
+                                   ["category", "placed-by", "show"])
+        self.assertEqual(code, 0)
+        self.assertIs(store["hidePlacedBy"], False)
+
+    def test_switching_placed_by_off_leaves_the_shelves_alone(self):
+        # The preference shares the store with every assignment on the machine,
+        # so a write of one has to be a write of the other two as well: the file
+        # is replaced whole, and a round trip that dropped the shelving would
+        # unfile everything the moment somebody dismissed a line.
+        code, store = self.run_cli(["category", "create", "--", "ui"],
+                                   ["category", "assign", "--", "nextjs", "ui"],
+                                   ["category", "placed-by", "hide"])
+        self.assertEqual(code, 0)
+        self.assertIs(store["hidePlacedBy"], True)
+        self.assertEqual(store["custom"], ["ui"])
+        self.assertEqual(store["assign"], {"nextjs": "ui"})
+
+    def test_the_state_is_the_only_thing_placed_by_takes(self):
+        # `show` and `hide` and nothing else. A third word would reach the store
+        # as neither, and argparse refusing it here is why nothing downstream
+        # has to guess what it meant.
+        with self.assertRaises(SystemExit):
+            self.run_cli(["category", "placed-by", "toggle"])
 
     def test_the_same_name_can_be_taken_back_off_the_shelf(self):
         code, store = self.run_cli(["category", "assign", "--", "-h", "design"],

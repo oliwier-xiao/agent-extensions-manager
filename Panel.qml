@@ -238,6 +238,20 @@ Panel {
     root.startHelper(catProc, ["category"].concat(argv))
   }
 
+  // The one preference this panel keeps, switched from the line it is about and
+  // switched back from the screen that owns the shelves. Both ends say where the
+  // other one is, because a control that removes itself has to leave its own
+  // way back behind, and a line in a toast is read once while a chip on the
+  // categories screen is there whenever somebody goes looking.
+  function dismissPlacedBy() {
+    root.runCategory(["placed-by", "hide"],
+                     "placed by is off. The categories screen turns it back on")
+  }
+
+  function restorePlacedBy() {
+    root.runCategory(["placed-by", "show"], "placed by is back on every card")
+  }
+
   // ---- State --------------------------------------------------------------
   // Not `data`: that is Item's default property and holds children.
 
@@ -248,6 +262,16 @@ Panel {
   property string scanError: ""
   property string toast: ""
   property var summary: null
+
+  // Whether the card still says how a skill came to be on its shelf. It is a
+  // question with a shelf life: on a machine nobody has filed anything on yet,
+  // "the marketplace listing" and "its description, low confidence" are the
+  // difference between a shelf you can trust and one worth checking, and once
+  // the shelving is right they are thirty-nine lines saying something already
+  // settled. So it is turned off from the line itself, and the store the
+  // classifier already reads is what remembers.
+  readonly property bool hidePlacedBy: root.report && root.report.categories
+    ? root.report.categories.hidePlacedBy === true : false
 
   property string filterText: ""
   // One category at a time, chosen by clicking its chip. Not a second grouping
@@ -1205,7 +1229,14 @@ Panel {
         { label: "arguments", value: root.clean(item.argumentHint, 200) },
         // Where the shelf came from, which is the thing worth knowing when the
         // shelf is wrong. Which shelf it is has its own control above.
-        { label: "placed by", value: placedBy },
+        //
+        // The only fact here that can be dismissed, and the empty value is how:
+        // the row already draws nothing for one, so hiding this line needs no
+        // second rule and cannot get out of step with the one that is there.
+        // Kept in the list rather than spliced out of it so the last fact stays
+        // the last fact -- that index is what the controls come to rest on.
+        { label: "placed by", value: root.hidePlacedBy ? "" : placedBy,
+          dismissable: true },
         { label: "tags", value: root.clean(tags, 120) },
         { label: "content", value: root.clean(item.contentHash, 40) },
         { label: "tokens", value: String(Number(item.tokens && item.tokens.alwaysOn) || 0)
@@ -1797,6 +1828,13 @@ Panel {
       // typing something that happens not to match.
       if (root.newCategoryName() !== "") out2.unshift("\u0000new")
       out2.push("\u0000addnew")
+      // The way back to a line somebody switched off from a card. It belongs
+      // here rather than in a settings screen this panel does not have: "placed
+      // by" answers how the classifier filed a skill, and this is already the
+      // one place that is about the shelves themselves rather than about any
+      // row on them. It appears only while the line is off, so a reader who
+      // never turned it off never meets it.
+      if (root.hidePlacedBy) out2.push("\u0000placedby")
       return out2
     }
     if (root.pickerMode === "style") {
@@ -2419,6 +2457,7 @@ Panel {
       var at = root.pickerChips()[root.pickerIndex]
       if (at === undefined) return ""
       if (at === "\u0000addnew") return "new category"
+      if (at === "\u0000placedby") return "show placed by on every card again"
       if (at === "\u0000new") return "new category  " + root.newCategoryName()
       return root.categoryLabelFor(at)
     }
@@ -2491,6 +2530,14 @@ Panel {
       if (pick2 === "\u0000addnew") {
         root.pickerNaming = true
         root.pickerText = ""
+        return
+      }
+      if (pick2 === "\u0000placedby") {
+        // Stay on this screen. The chip goes as soon as the rescan lands, which
+        // is answer enough, and closing the index would take away the shelves
+        // somebody opened it to look at.
+        root.restorePlacedBy()
+        root.pickerIndex = 0
         return
       }
       if (pick2 === "\u0000new") {
@@ -4060,6 +4107,12 @@ Panel {
                 // the scroll.
                 readonly property bool carriesControls:
                   index === er.view.facts.length - 1 && cardActions.anythingToDo
+                // A fact that can be turned off, and is currently on. Both
+                // halves matter: the row that has been dismissed draws nothing
+                // at all, so it must not keep drawing the control that dismissed
+                // it, and no other fact here is anybody's to switch off.
+                readonly property bool dismissable:
+                  modelData.dismissable === true && modelData.value !== ""
                 width: parent.width
                 height: modelData.value === "" && !factRow.carriesControls ? 0
                   : (factRow.carriesControls ? Style.space(26) : Style.space(14))
@@ -4086,23 +4139,74 @@ Panel {
                   font.pixelSize: Style.font.caption
                 }
 
-                Text {
+                Row {
+                  id: valueRow
                   anchors.left: parent.left
                   anchors.leftMargin: Style.space(90)
                   anchors.right: parent.right
-                  // The room is kept only while the controls are standing in it.
-                  // Once they float they are over the card carrying their own
-                  // ground, and a `tags` line that went on eliding around
-                  // something that had left the row would be eliding for nothing.
-                  anchors.rightMargin: factRow.carriesControls && controls.parked
+                  // The room is kept while the controls are standing in it, and
+                  // on a row carrying a control of its own it is kept whether
+                  // they are standing there or not. The first is so a long
+                  // `tags` elides rather than running under them; the second is
+                  // because the chips float over whichever row they happen to
+                  // cover, and a control they can cover is a control that
+                  // cannot be pressed. Text they hide is only text -- this is
+                  // not, so it stays out of the lane they travel in.
+                  anchors.rightMargin: (factRow.carriesControls && controls.parked)
+                      || (factRow.dismissable && cardActions.anythingToDo)
                     ? controls.width + Style.spacing.md : 0
                   anchors.verticalCenter: parent.verticalCenter
-                  textFormat: Text.PlainText
-                  text: modelData.value
-                  color: root.soft
-                  font.family: root.face
-                  font.pixelSize: Style.font.caption
-                  elide: Text.ElideRight
+                  spacing: Style.spacing.sm
+
+                  Text {
+                    id: factValue
+                    anchors.verticalCenter: parent.verticalCenter
+                    // Sized to the sentence rather than to the row, so the
+                    // control below sits against the end of the words instead of
+                    // out in a column of its own. Capped at what is left after
+                    // that control, which is what keeps the elide honest.
+                    width: Math.min(implicitWidth,
+                                    valueRow.width - (dismiss.visible
+                                      ? dismiss.width + valueRow.spacing : 0))
+                    textFormat: Text.PlainText
+                    text: modelData.value
+                    color: root.soft
+                    font.family: root.face
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                  }
+
+                  // The way off, at the end of the sentence it takes away. Drawn
+                  // always rather than on hover, at the weight of the line it
+                  // belongs to: a control that exists only while the pointer is
+                  // over it is one nobody finds, and this one has to be found
+                  // once and then never again.
+                  //
+                  // No confirmation. It changes one boolean in this plugin's own
+                  // file, takes nothing away, and says where the way back is at
+                  // the moment it happens. The question this panel does ask is
+                  // reserved for the one answer that cannot be taken back.
+                  Rectangle {
+                    id: dismiss
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: factRow.dismissable
+                    width: Style.space(18)
+                    height: Style.space(18)
+                    radius: width / 2
+                    color: dismissHover.hovered ? Util.alpha(root.fg, 0.18) : "transparent"
+
+                    Text {
+                      anchors.centerIn: parent
+                      textFormat: Text.PlainText
+                      text: "\u00d7"
+                      color: dismissHover.hovered ? root.fg : root.soft
+                      font.family: root.face
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    HoverHandler { id: dismissHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: root.dismissPlacedBy() }
+                  }
                 }
               }
             }
@@ -6363,6 +6467,7 @@ Panel {
                   readonly property bool isClear: String(chip.modelData) === "\u0000clear"
                   readonly property bool isNew: String(chip.modelData) === "\u0000new"
                   readonly property bool isAddNew: String(chip.modelData) === "\u0000addnew"
+                  readonly property bool isPlacedBy: String(chip.modelData) === "\u0000placedby"
                   readonly property bool isAnswer: String(chip.modelData) === "\u0000save"
                     || String(chip.modelData) === "\u0000discard"
                   // The one chip in this panel whose answer cannot be taken back
@@ -6376,7 +6481,8 @@ Panel {
 
                   // A shelf chip carries its own colour and its size, so the
                   // index reads as an inventory rather than as a word list.
-                  readonly property bool isShelf: picker.shelfList && !chip.isNew && !chip.isAddNew
+                  readonly property bool isShelf: picker.shelfList && !chip.isNew
+                    && !chip.isAddNew && !chip.isPlacedBy
 
                   implicitWidth: chip.isSwatch && !chip.isClear
                     ? Style.space(30) : chipRowInner.implicitWidth + Style.space(22)
@@ -6427,6 +6533,7 @@ Panel {
                         if (chip.isDanger) return root.removeVerb()
                         if (chip.isClear) return "theme default"
                         if (chip.isAddNew) return "+ new category"
+                        if (chip.isPlacedBy) return "show placed by"
                         if (chip.isNew) return "+ new  \u201c" + root.newCategoryName() + "\u201d"
                         if (picker.shelfList) return root.categoryLabelFor(String(chip.modelData))
                         return String(chip.modelData) === "" ? "no argument" : String(chip.modelData)
@@ -6435,7 +6542,11 @@ Panel {
                         : (chip.current ? root.fg : root.readable)
                       font.family: root.face
                       font.pixelSize: Style.font.bodySmall
-                      font.italic: String(chip.modelData) === "" || chip.isNew || chip.isAddNew
+                      // Italic for the chips that do something rather than name
+                      // a shelf, which is the distinction this grid already
+                      // draws between "+ new category" and every shelf beside it.
+                      font.italic: String(chip.modelData) === "" || chip.isNew
+                        || chip.isAddNew || chip.isPlacedBy
                     }
 
                     Text {
