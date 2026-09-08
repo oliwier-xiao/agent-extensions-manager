@@ -4204,18 +4204,24 @@ Panel {
                 id: factRow
                 required property var modelData
                 required property int index
-                // The controls ride on the last fact rather than opening a row of
+                // The controls rest on the last fact rather than opening a row of
                 // their own beneath it. That row cost a card's height of empty
                 // above the only two things here anybody presses, and pinned them
                 // to a margin neither chip is wide enough to have earned.
                 //
-                // They are no longer drawn in here -- a delegate a Column places
+                // They are not drawn in here either -- a delegate a Column places
                 // and gives one line to cannot follow a scroll -- so what is left
-                // of that arrangement is this row holding the line open at the
-                // height they need and saying where it is. The height is theirs
-                // whether or not they are standing on it: a card that changed
-                // height as it was scrolled would be moving the list underneath
-                // the scroll.
+                // of that arrangement is this row saying where they come to rest.
+                //
+                // What this row does NOT do any more is grow to hold them. A chip
+                // is taller than a line of caption text, so the last fact used to
+                // stand at nearly twice the height of the five above it, and the
+                // card ended a chip's worth of empty below the last thing written
+                // on it. The chips are half a line taller than a fact row and
+                // there are two rows to stand across, so they are bottom-aligned
+                // to this one and reach up into the one above instead. The card
+                // now ends where `tokens` ends, which is where the reader's eye
+                // was already stopping.
                 readonly property bool carriesControls:
                   index === er.view.facts.length - 1 && cardActions.anythingToDo
                 // A fact that can be turned off, and is currently on. Both
@@ -4225,24 +4231,42 @@ Panel {
                 readonly property bool dismissable:
                   modelData.dismissable === true && modelData.value !== ""
                 width: parent.width
-                height: modelData.value === "" && !factRow.carriesControls ? 0
-                  : (factRow.carriesControls ? Style.space(26) : Style.space(14))
+                height: modelData.value === "" && !factRow.carriesControls
+                  ? 0 : Style.space(14)
                 visible: modelData.value !== "" || factRow.carriesControls
+
+                // This row's band in the card's own coordinates, and whether the
+                // chips are standing over it. Every fact asks, rather than the
+                // last one assuming: the chips travel with the scroll, so the row
+                // they cover is whichever row they have reached -- and text they
+                // cover is text nobody can read. Nothing here feeds a height, so
+                // there is no loop: a value is one line and elides.
+                readonly property real bandTop: factsColumn.y + factRow.y
+                readonly property bool underControls: controls.visible
+                  && controls.y < factRow.bandTop + factRow.height
+                  && controls.y + controls.height > factRow.bandTop
 
                 // Where the controls come to rest, in the card's coordinates.
                 // This row is the only thing that knows: it is a Repeater
                 // delegate, and nothing outside the Repeater can name one to ask.
+                // Bottom-aligned rather than centred, so the last thing written
+                // on the card and the bottom of the chips are the same line.
                 Binding {
                   when: factRow.carriesControls
                   target: card
                   property: "restY"
-                  value: factsColumn.y + factRow.y
-                    + Math.round((factRow.height - controls.height) / 2)
+                  value: factsColumn.y + factRow.y + factRow.height - controls.height
                 }
 
                 Text {
                   anchors.left: parent.left
                   width: Style.space(86)
+                  // Centred, like the value beside it. Every other fact row is
+                  // one line high and the difference did not show; the row the
+                  // controls stand on is nearly twice that, and a label pinned
+                  // to the top of it sat visibly above its own value -- the one
+                  // row on the card where the two columns stopped lining up.
+                  anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
                   text: modelData.label
                   color: root.soft
@@ -4255,15 +4279,16 @@ Panel {
                   anchors.left: parent.left
                   anchors.leftMargin: Style.space(90)
                   anchors.right: parent.right
-                  // The room is kept while the controls are standing in it, and
-                  // on a row carrying a control of its own it is kept whether
-                  // they are standing there or not. The first is so a long
-                  // `tags` elides rather than running under them; the second is
-                  // because the chips float over whichever row they happen to
-                  // cover, and a control they can cover is a control that
-                  // cannot be pressed. Text they hide is only text -- this is
-                  // not, so it stays out of the lane they travel in.
-                  anchors.rightMargin: (factRow.carriesControls && controls.parked)
+                  // The room is kept while the controls are standing over this
+                  // row, and on a row carrying a control of its own it is kept
+                  // whether they are standing there or not. The first is so a
+                  // long `tags` elides rather than running under them; the
+                  // second is because the chips travel, and a control they can
+                  // cover is a control that cannot be pressed -- text they hide
+                  // is only text, so it may give way and move back, but the `×`
+                  // may not, and a lane that appeared and vanished under it
+                  // would move it as the card scrolled.
+                  anchors.rightMargin: factRow.underControls
                       || (factRow.dismissable && cardActions.anythingToDo)
                     ? controls.width + Style.spacing.md : 0
                   anchors.verticalCenter: parent.verticalCenter
@@ -4372,22 +4397,19 @@ Panel {
             visible: descBlock.known || cardActions.mode !== ""
               || er.view.invocations.length > 0
 
-            // The copy tick, still in this corner and still only once the
-            // clipboard write has been attempted and reported back, never on the
-            // keystroke. It was on the row line for a while, where it covered the
-            // token count and the usage count, and then in the footer, a panel's
-            // height away from the thing it was about; this corner is where it
-            // stopped being in anything's way. It keeps the corner to itself:
-            // the two controls come to rest on the fact row above it, because a
-            // confirmation that something is already in the clipboard must not
-            // take the place a reader is going to look for the button that
-            // removes a directory.
+            // The copy tick for a row that has no controls to sit after: a
+            // skill whose SKILL.md could not be read and which nothing here may
+            // remove still has an invocation to copy. Everywhere else it rides
+            // at the end of the control row, in the same line as the chips,
+            // because a corner of its own cost the card a line of height it
+            // needed only in the second after a copy.
             //
             // Faded rather than hidden, so its slot is held open whether or not
             // it is standing in it and nothing on this card moves because
             // something was copied.
             Row {
               anchors.right: parent.right
+              visible: !cardActions.anythingToDo
               spacing: Style.spacing.xs
               opacity: er.copied ? 1 : 0
 
@@ -4515,6 +4537,40 @@ Panel {
               visible: cardActions.removable
               label: "delete"
               onPicked: er.removeRequested()
+            }
+
+            // After the last chip, whichever chip that turns out to be, and in
+            // the same line rather than under it. It used to open a row of its
+            // own in the corner below, which cost the card a line of height it
+            // only ever needed after a copy -- so an expanded skill was taller
+            // than it had any reason to be, permanently, for a confirmation that
+            // lasts a second and a half.
+            //
+            // Faded rather than hidden, and the Row keeps its width either way,
+            // so nothing on this card moves because something was copied.
+            Row {
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.spacing.xs
+              opacity: er.copied ? 1 : 0
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: "\u2713"
+                color: root.hue
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: "copied"
+                color: root.hue
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+              }
             }
           }
         }
