@@ -98,15 +98,15 @@ a name and have stopped sharing their contents are flagged as drift.
 
 ![The rows that are flagged](docs/attention.png)
 
-`!` shows only what needs looking at, and every count in the header narrows with it. One thing is flagged
-here, and no agent reports it: **a skill answering to two names.** The directory is `taste-skill`; the
+`!` shows only what needs looking at, and every count in the header narrows with it. Two things are flagged
+here, and no agent reports either. **A skill answering to two names:** the directory is `taste-skill`; the
 `SKILL.md` inside declares `name: design-taste-frontend`. Claude Code invokes a skill by its directory,
 OpenCode and Codex by the name it declares — so the same file is `/taste-skill` in one and
 `/design-taste-frontend` in the other two. Copy the wrong one and nothing happens, with no error to say
 why. The row carries both, against the agent each belongs to.
 
-An expired MCP token is flagged the same way, on the server's own row, because OpenCode will not say so
-until the moment you need it.
+**A server whose token has expired:** `n8n-mcp` is remote and its stored credentials have run out, and
+OpenCode will not say so until the moment you need it.
 
 The list stays quiet about everything else. A category the classifier was unsure of is not a problem, and
 is not reported as one.
