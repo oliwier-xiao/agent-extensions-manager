@@ -8,6 +8,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -154,6 +155,23 @@ class Frontmatter(unittest.TestCase):
     def test_literal_block_keeps_newlines(self):
         fm = ax.parse_frontmatter_block("description: |\n  one\n  two")
         self.assertEqual(fm["description"], "one\ntwo")
+
+    def test_every_block_header_yaml_allows_is_a_header(self):
+        """The chomping indicator and the indentation indicator, in either order.
+        Knowing only the first read `description: >2` as the literal text
+        ">2 First line. Second line." -- the indicator inside the description
+        every agent loads."""
+        for header in (">", "|", ">-", "|-", ">+", "|+",
+                       ">2", "|2", ">-2", "|-2", ">+2", "|+2", ">2-", "|2+"):
+            block = f"description: {header}\n  First line.\n  Second line."
+            self.assertEqual(ax.parse_frontmatter_block(block)["description"].replace("\n", " "),
+                             "First line. Second line.", header)
+
+    def test_an_indentation_indicator_says_which_columns_are_layout(self):
+        # With one, exactly that many columns come off and what is left is the
+        # author's text, so a line they indented further keeps the difference.
+        fm = ax.parse_frontmatter_block("description: |2\n  one\n    two")
+        self.assertEqual(fm["description"], "one\n  two")
 
     def test_continuation_lines_are_joined(self):
         fm = ax.parse_frontmatter_block("description: starts here\n  and continues\nname: x")
@@ -1629,6 +1647,1039 @@ class PackageLookupIsCached(unittest.TestCase):
         ax.owning_packages([self.OMARCHY])
         self.assertEqual(len(self.asked), 2, self.asked)
         self.assertFalse(os.path.exists(ax._package_cache_path()))
+
+
+class DescribeCase(unittest.TestCase):
+    """A throwaway HOME with skills in it, and the helper pointed at both.
+
+    Everything below writes a SKILL.md, which is the one thing this suite may
+    never do to a real one: HOME, both stores and every root that follows from
+    them are moved into a temporary directory before a single verb runs.
+    """
+
+    AUTHOR = ("The author's own description, at the length descriptions are "
+              "actually written at, which is what the agent reads on every turn.")
+    BODY = "\n# A title\n\nA body no verb here is allowed to touch.\n"
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        for name in ("HOME", "STORE_DIR", "STORE_PATH", "DESCRIBE_PATH"):
+            self.addCleanup(setattr, ax, name, getattr(ax, name))
+        ax.HOME = self.home
+        ax.STORE_DIR = os.path.join(self.home, ".config", "agent-skills")
+        ax.STORE_PATH = os.path.join(ax.STORE_DIR, "categories.json")
+        ax.DESCRIBE_PATH = os.path.join(ax.STORE_DIR, "descriptions.json")
+        self.root = os.path.join(self.home, ".claude", "skills")
+        os.makedirs(self.root)
+        self.addCleanup(self.hand_the_tree_back)
+
+    def hand_the_tree_back(self):
+        for base, dirs, files in os.walk(self.home):
+            for name in dirs + files:
+                with contextlib.suppress(OSError):
+                    os.chmod(os.path.join(base, name), 0o700)
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def write(self, name, frontmatter, root=None, body=BODY):
+        directory = os.path.join(root or self.root, name)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "SKILL.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("---\n" + frontmatter + "---" + body)
+        return path
+
+    def skill_md(self, name, root=None):
+        """The file `apply` and `reset` are named by, the way the panel names it:
+        the row's own SKILL.md, absolute, never a display string re-expanded."""
+        return os.path.join(root or self.root, name, "SKILL.md")
+
+    def plain(self, name="plain", description=AUTHOR):
+        return self.write(name, f"name: {name}\ndescription: {description}\n")
+
+    def cli(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = ax.main(list(argv))
+        return code, json.loads(out.getvalue().strip() or "{}")
+
+    def row(self, name):
+        return next(i for i in ax.scan()["items"] if i["dirName"] == name)
+
+    def raw(self, path):
+        with open(path, "rb") as fh:
+            return fh.read()
+
+    def described(self, path):
+        """The description as the panel and the three agents will read it."""
+        with open(path, encoding="utf-8") as fh:
+            fm = ax.parse_frontmatter(fh.read())
+        return str(fm.get("description") or "").replace("\n", " ").strip()
+
+
+class DescriptionNotes(DescribeCase):
+    """The honesty rule, which outranks everything else in this feature: what the
+    panel prints as the always-on cost is what the AGENT pays, so it comes from
+    the text in SKILL.md and never from a note the agent cannot see. A panel that
+    showed a lower figure because somebody typed a shorter description into a file
+    only this plugin reads would be lying about the one number it exists to print.
+    """
+
+    NOTE = "Linux desktop config: Hyprland, keybindings, themes."
+
+    def test_a_note_leaves_the_bill_exactly_where_it_was(self):
+        path = self.plain()
+        before, cost = self.raw(path), self.row("plain")["tokens"]["alwaysOn"]
+        code, said = self.cli("describe", "set", "--", "plain", self.NOTE)
+        self.assertEqual((code, said["ok"], said["state"]), (0, True, "note"))
+        row = self.row("plain")
+        self.assertEqual(row["describe"]["state"], "note")
+        self.assertEqual(row["describe"]["noteText"], self.NOTE)
+        self.assertEqual(row["describe"]["fileText"], self.AUTHOR)
+        self.assertEqual(row["tokens"]["alwaysOn"], cost)
+        self.assertEqual(self.raw(path), before)
+
+    def test_what_applying_would_save_is_a_figure_of_its_own(self):
+        self.plain()
+        cost = self.row("plain")["tokens"]["alwaysOn"]
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        row = self.row("plain")
+        self.assertIsNotNone(row["describe"]["tokensIfApplied"])
+        self.assertLess(row["describe"]["tokensIfApplied"], cost)
+        # Counted the way the real figure is counted, or the two are not
+        # comparable and the saving the panel offers is somebody's arithmetic.
+        self.assertEqual(row["describe"]["tokensIfApplied"],
+                         ax.token_estimate("plain", self.NOTE, "", 4))
+
+    def test_the_note_lives_in_our_file_and_nowhere_near_the_skill(self):
+        path = self.plain()
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        with open(ax.DESCRIBE_PATH, encoding="utf-8") as fh:
+            self.assertIn(self.NOTE, fh.read())
+        with open(path, encoding="utf-8") as fh:
+            self.assertNotIn(self.NOTE, fh.read())
+
+    def test_an_applied_note_has_nothing_left_to_save(self):
+        self.plain()
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        self.cli("describe", "apply", "--", "plain", self.skill_md("plain"))
+        self.assertIsNone(self.row("plain")["describe"]["tokensIfApplied"])
+
+    def test_a_note_of_nothing_is_refused_rather_than_stored(self):
+        self.plain()
+        code, said = self.cli("describe", "set", "--", "plain", "   ")
+        self.assertEqual((code, said["ok"]), (1, False))
+        self.assertEqual(ax.read_describe_store()["notes"], {})
+
+    def test_a_note_is_one_line_however_it_was_typed(self):
+        # A description has nowhere to put a line break that every reader agrees
+        # on, so the break is taken out here rather than at write time -- a note
+        # that changed shape on its way into the file would not be the text the
+        # panel had been showing.
+        self.plain()
+        self.cli("describe", "set", "--", "plain", "  First line.\n\n\tSecond line.  ")
+        self.assertEqual(ax.read_describe_store()["notes"]["plain"],
+                         "First line. Second line.")
+
+    def test_a_name_no_directory_could_have_is_refused(self):
+        for bad in ("a/b", "..", ".", "a" * 129):
+            code, said = self.cli("describe", "set", "--", bad, "Something.")
+            self.assertEqual((code, said["ok"]), (1, False), bad)
+            self.assertEqual(ax.read_describe_store()["notes"], {}, bad)
+
+    def test_every_skill_carries_a_describe_the_panel_can_read(self):
+        self.plain()
+        self.plain("second")
+        for row in ax.scan()["items"]:
+            described = row["describe"]
+            self.assertEqual(described["state"], "author")
+            self.assertEqual(described["fileText"], row["description"])
+            self.assertEqual(described["authorText"], row["description"])
+            self.assertIsNone(described["noteText"])
+            self.assertIsNone(described["tokensIfApplied"])
+            self.assertFalse(described["handEdited"])
+            self.assertIn("canApply", described)
+
+
+class DescriptionApply(DescribeCase):
+    """The separate act, and the only one in this program that writes a file
+    somebody else wrote. It is separate because it is the one that moves the
+    figure: after this the agent reads the new text and the bill follows."""
+
+    NOTE = "Short enough to be worth the trouble."
+
+    def applied(self, name="plain", note=NOTE, path=None):
+        self.cli("describe", "set", "--", name, note)
+        return self.cli("describe", "apply", "--", name, path or self.skill_md(name))
+
+    def test_applying_moves_the_bill_and_keeps_the_author(self):
+        self.plain()
+        before = self.row("plain")["tokens"]["alwaysOn"]
+        code, said = self.applied()
+        self.assertEqual((code, said["ok"], said["state"]), (0, True, "applied"))
+        row = self.row("plain")
+        self.assertEqual(row["describe"]["state"], "applied")
+        self.assertEqual(row["describe"]["fileText"], self.NOTE)
+        self.assertEqual(row["describe"]["authorText"], self.AUTHOR)
+        self.assertIsNone(row["describe"]["tokensIfApplied"])
+        self.assertLess(row["tokens"]["alwaysOn"], before)
+        self.assertEqual(row["tokens"]["alwaysOn"], ax.token_estimate("plain", self.NOTE, "", 4))
+
+    def test_the_body_and_every_other_key_come_through_byte_for_byte(self):
+        path = self.write("keys", "name: keys\ndescription: Something long enough.\n"
+                                  "argument-hint: \"[shape|audit] [target]\"\n"
+                                  "allowed-tools: Read, Grep\n"
+                                  "metadata:\n  version: 2.1.0\n")
+        before = self.raw(path)
+        self.applied("keys")
+        after = self.raw(path)
+        self.assertNotEqual(after, before)
+        head, _, body = after.partition(b"\n---")
+        self.assertEqual(body, before.partition(b"\n---")[2])
+        for line in (b"argument-hint: \"[shape|audit] [target]\"", b"allowed-tools: Read, Grep",
+                     b"metadata:", b"  version: 2.1.0", b"name: keys"):
+            self.assertIn(line, head)
+        row = self.row("keys")
+        self.assertEqual(row["declaredVersion"], "2.1.0")
+        self.assertEqual(row["argumentHint"], "[shape|audit] [target]")
+
+    def test_the_mode_the_author_gave_the_file_is_the_mode_it_keeps(self):
+        path = self.plain()
+        os.chmod(path, 0o640)
+        self.applied()
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o640)
+
+    def test_a_skill_md_you_cannot_write_is_refused_and_says_which(self):
+        path = self.plain()
+        os.chmod(path, 0o444)
+        before = self.raw(path)
+        self.assertFalse(self.row("plain")["describe"]["canApply"])
+        self.assertIn("not writable", self.row("plain")["describe"]["applyWhy"])
+        self.assertIn("plain/SKILL.md", self.row("plain")["describe"]["applyWhy"])
+        code, said = self.applied()
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertIn("not writable", said["detail"])
+        self.assertEqual(self.raw(path), before)
+        self.assertEqual(ax.read_describe_store()["applied"], {})
+
+    def test_a_write_that_does_not_read_back_puts_the_original_back(self):
+        """The safety net under all of this: the file is read again through the
+        parser the agents use, and unless the description now says exactly what
+        was asked for, the bytes that were there before go back before anything
+        is recorded. Forced here by making the renderer write something else,
+        which is the shape every bug in it would take."""
+        path = self.plain()
+        before = self.raw(path)
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        self.addCleanup(setattr, ax, "_render_description", ax._render_description)
+        ax._render_description = lambda value: ["description: not what was asked for"]
+        code, said = self.cli("describe", "apply", "--", "plain", self.skill_md("plain"))
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertIn("did not read back", said["detail"])
+        self.assertEqual(self.raw(path), before)
+        self.assertEqual(ax.read_describe_store()["applied"], {})
+
+    def test_a_link_into_somebody_else_s_directory_names_the_real_file(self):
+        # The shape a stock Omarchy install is in: the skill lives under
+        # /usr/share and every agent root holds a link to it. Saying that the
+        # link in your own directory is not writable explains nothing about why.
+        elsewhere = os.path.join(self.home, "packaged")
+        os.makedirs(elsewhere)
+        self.write("linked", "name: linked\ndescription: Owned by somebody else.\n",
+                   root=elsewhere)
+        os.chmod(os.path.join(elsewhere, "linked", "SKILL.md"), 0o444)
+        os.symlink(os.path.join(elsewhere, "linked"), os.path.join(self.root, "linked"))
+        why = self.row("linked")["describe"]["applyWhy"]
+        self.assertIn("packaged/linked/SKILL.md", why)
+        self.assertNotIn(".claude", why)
+
+    def test_a_packaged_skill_under_system_is_refused(self):
+        # Codex rewrites ~/.codex/skills/.system from an embedded copy on every
+        # launch, so a description written there is gone before it is read.
+        path = self.write("packaged", "name: packaged\ndescription: Packaged one.\n",
+                          root=os.path.join(self.home, ".codex", "skills", ".system"))
+        before = self.raw(path)
+        row = self.row("packaged")
+        self.assertFalse(row["describe"]["canApply"])
+        self.assertIn(".system", row["describe"]["applyWhy"])
+        code, said = self.applied("packaged", path=path)
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertIn(".system", said["detail"])
+        self.assertEqual(self.raw(path), before)
+
+    def test_a_description_that_changed_since_the_scan_is_refused(self):
+        path = self.plain()
+        drawn = self.row("plain")["describe"]["fileText"]
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        self.write("plain", "name: plain\ndescription: Somebody else got here first.\n")
+        code, said = self.cli("describe", "apply", "--expect", drawn, "--", "plain",
+                              self.skill_md("plain"))
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertIn("since the scan", said["detail"])
+        self.assertEqual(self.described(path), "Somebody else got here first.")
+
+    def test_the_row_it_was_drawn_from_still_applies(self):
+        self.plain()
+        drawn = self.row("plain")["describe"]["fileText"]
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        code, said = self.cli("describe", "apply", "--expect", drawn, "--", "plain",
+                              self.skill_md("plain"))
+        self.assertEqual((code, said["ok"]), (0, True))
+
+    def test_a_hand_edit_since_we_wrote_is_not_overwritten(self):
+        path = self.plain()
+        self.applied()
+        self.write("plain", "name: plain\ndescription: Typed here by hand.\n")
+        self.cli("describe", "set", "--", "plain", "Another go at it.")
+        code, said = self.cli("describe", "apply", "--", "plain", self.skill_md("plain"))
+        self.assertEqual((code, said["ok"]), (2, False))
+        # Said without blaming anyone: the store is keyed by name and a name
+        # reaches more than one file, so a file that does not carry what we
+        # wrote may be the copy nobody wrote to rather than one somebody edited.
+        self.assertIn("changed by hand", said["detail"])
+        self.assertEqual(self.described(path), "Typed here by hand.")
+
+    def test_a_skill_that_is_not_there_any_more_is_refused(self):
+        self.plain()
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        shutil.rmtree(os.path.join(self.root, "plain"))
+        code, said = self.cli("describe", "apply", "--", "plain", self.skill_md("plain"))
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertIn("no directory named plain", said["detail"])
+
+    def test_a_note_nobody_set_is_not_applied(self):
+        self.plain()
+        code, said = self.cli("describe", "apply", "--", "plain", self.skill_md("plain"))
+        self.assertEqual((code, said["ok"], said["state"]), (2, False, "author"))
+
+    def test_a_plugin_skill_says_the_edit_goes_when_the_plugin_does(self):
+        install = os.path.join(self.home, "cache", "impeccable", "4.2.2")
+        self.write("impeccable", "name: impeccable\ndescription: A plugin's own skill.\n",
+                   root=os.path.join(install, "skills"))
+        os.makedirs(os.path.join(self.home, ".claude", "plugins"))
+        with open(os.path.join(self.home, ".claude", "plugins",
+                               "installed_plugins.json"), "w", encoding="utf-8") as fh:
+            json.dump({"plugins": {"impeccable@impeccable":
+                                   [{"scope": "user", "installPath": install}]}}, fh)
+        row = self.row("impeccable")
+        self.assertTrue(row["describe"]["canApply"])
+        self.assertIn("plugin update", row["describe"]["applyNote"])
+        code, said = self.applied("impeccable",
+                                  path=self.skill_md("impeccable",
+                                                     os.path.join(install, "skills")))
+        self.assertEqual((code, said["ok"]), (0, True))
+        self.assertIn("plugin update", said["detail"])
+
+    def test_one_name_reaching_two_files_writes_one_and_says_so(self):
+        """A name can reach two different skills -- impeccable ships one build
+        for OpenCode and another inside a Claude Code plugin -- and the store is
+        keyed by the name, because that is what a person means by a skill. So one
+        file is written, in the order the roots are walked, and the other is left
+        alone and counted in the answer. The pair genuinely differs afterwards,
+        and the drift flag that says so is right to.
+        """
+        self.write("twin", "name: twin\ndescription: The copy Claude Code reads.\n")
+        self.write("twin", "name: twin\ndescription: The copy OpenCode reads instead.\n",
+                   root=os.path.join(self.home, ".config", "opencode", "skills"))
+        code, said = self.applied("twin")
+        self.assertEqual((code, said["ok"]), (0, True))
+        self.assertIn("1 other copy of this name was left alone", said["detail"])
+        rows = [i for i in ax.scan()["items"] if i["dirName"] == "twin"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(sorted(r["describe"]["fileText"] for r in rows),
+                         [self.NOTE, "The copy OpenCode reads instead."])
+        for row in rows:
+            self.assertIn("drift", row["attention"])
+
+    def test_a_fetched_skill_says_the_edit_lasts_until_the_next_fetch(self):
+        self.write("security-review", "name: security-review\ndescription: Fetched over HTTP.\n",
+                   root=os.path.join(self.home, ".cache", "opencode", "skills"))
+        row = self.row("security-review")
+        self.assertTrue(row["describe"]["canApply"])
+        self.assertIn("skills.urls", row["describe"]["applyNote"])
+
+
+class DescriptionWritesTheFileItWasGiven(DescribeCase):
+    """The file that gets written is the file the row promised.
+
+    One name reaches more than one SKILL.md -- impeccable ships one build for
+    OpenCode and another inside a Claude Code plugin -- and the panel draws a row
+    per file, whose card names that file, its caveat and its token figure.
+    Choosing the first writable copy on this side instead wrote whichever root
+    the walk reached first, so applying from the plugin row, whose card carries
+    the plugin-update caveat, rewrote the OpenCode copy and made all three of
+    those promises false at once.
+    """
+
+    NOTE = "One line about it, for the agent to read."
+
+    def two_copies(self):
+        claude = self.write("impeccable", "name: impeccable\n"
+                                          "description: The copy Claude Code reads.\n")
+        opencode = self.write("impeccable", "name: impeccable\n"
+                                            "description: The copy OpenCode reads instead.\n",
+                              root=os.path.join(self.home, ".config", "opencode", "skills"))
+        return claude, opencode
+
+    def test_the_file_named_on_the_command_line_is_the_one_that_changes(self):
+        claude, opencode = self.two_copies()
+        untouched = self.raw(claude)
+        self.cli("describe", "set", "--", "impeccable", self.NOTE)
+        code, said = self.cli("describe", "apply", "--", "impeccable", opencode)
+        self.assertEqual((code, said["ok"]), (0, True))
+        self.assertEqual(self.described(opencode), self.NOTE)
+        self.assertEqual(self.raw(claude), untouched)
+        # And the sentence names the file it wrote, not the one it chose.
+        self.assertIn("opencode/skills/impeccable/SKILL.md", said["detail"])
+        self.assertIn("1 other copy of this name was left alone", said["detail"])
+
+    def test_the_other_copy_changes_when_that_is_the_one_named(self):
+        # The same command with the other path. Nothing about the outcome depends
+        # on which root the walk reached first, which is the whole of the fix.
+        claude, opencode = self.two_copies()
+        untouched = self.raw(opencode)
+        self.cli("describe", "set", "--", "impeccable", self.NOTE)
+        code, said = self.cli("describe", "apply", "--", "impeccable", claude)
+        self.assertEqual((code, said["ok"]), (0, True))
+        self.assertEqual(self.described(claude), self.NOTE)
+        self.assertEqual(self.raw(opencode), untouched)
+
+    def test_reset_puts_back_the_copy_it_was_given(self):
+        claude, opencode = self.two_copies()
+        before = self.raw(opencode)
+        self.cli("describe", "set", "--", "impeccable", self.NOTE)
+        self.cli("describe", "apply", "--", "impeccable", opencode)
+        self.assertNotEqual(self.raw(opencode), before)
+        code, said = self.cli("describe", "reset", "--", "impeccable", opencode)
+        self.assertEqual((code, said["ok"], said["state"]), (0, True, "author"))
+        self.assertEqual(self.raw(opencode), before)
+
+    def test_a_file_this_name_does_not_reach_is_refused_by_name(self):
+        # An absolute path is still only a path. The files this verb may open are
+        # the ones the name already resolves to, and every other one is named in
+        # the refusal rather than quietly written.
+        self.two_copies()
+        stranger = self.plain("elsewhere")
+        untouched = self.raw(stranger)
+        self.cli("describe", "set", "--", "impeccable", self.NOTE)
+        code, said = self.cli("describe", "apply", "--", "impeccable", stranger)
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertIn("is not one of the 2 files this name reaches", said["detail"])
+        self.assertEqual(self.raw(stranger), untouched)
+        self.assertEqual(ax.read_describe_store()["applied"], {})
+
+    def test_a_path_that_is_not_absolute_is_refused_before_anything_is_read(self):
+        # The panel sends the helper's own realPath. A relative one could only
+        # have been rebuilt from a display string, and there is no working
+        # directory this program ever chose for it to be relative to.
+        self.plain()
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        code, said = self.cli("describe", "apply", "--", "plain", "plain/SKILL.md")
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertIn("absolute", said["detail"])
+        self.assertEqual(ax.read_describe_store()["applied"], {})
+
+    def test_a_link_and_the_file_it_points_at_are_the_same_target(self):
+        # The shape a dotfiles manager leaves: the skill lives in a checkout and
+        # the root holds a link to it. The panel has the real path and the walk
+        # has the name it was found under, so the two are matched through
+        # realpath rather than compared as strings.
+        elsewhere = os.path.join(self.home, "checkout")
+        os.makedirs(elsewhere)
+        real = self.write("dotfiles", "name: dotfiles\ndescription: Kept in a checkout.\n",
+                          root=elsewhere)
+        os.symlink(os.path.join(elsewhere, "dotfiles"), os.path.join(self.root, "dotfiles"))
+        self.cli("describe", "set", "--", "dotfiles", self.NOTE)
+        code, said = self.cli("describe", "apply", "--", "dotfiles", real)
+        self.assertEqual((code, said["ok"]), (0, True))
+        self.assertEqual(self.described(real), self.NOTE)
+
+
+class DescriptionAppliedIsPerFile(DescribeCase):
+    """An apply is a fact about one SKILL.md, never about the name over it.
+
+    Two copies of a name are the ordinary case here -- impeccable ships one
+    build for OpenCode and another inside a Claude Code plugin, and this machine
+    carries both -- and the store records the file each entry was written to. Keyed by
+    the name alone, the copy nobody had touched read as applied, said it had
+    been hand edited, and offered the OTHER file's description as the author's
+    text reset would put back: three claims about one file, every one of them
+    drawn from what had happened to a different one.
+    """
+
+    NOTE = "One line about it, for the agent to read."
+    CLAUDE = "The copy Claude Code reads."
+    OPENCODE = "The copy OpenCode reads instead."
+
+    def two_copies(self):
+        claude = self.write("impeccable",
+                            f"name: impeccable\ndescription: {self.CLAUDE}\n")
+        opencode = self.write("impeccable",
+                              f"name: impeccable\ndescription: {self.OPENCODE}\n",
+                              root=os.path.join(self.home, ".config", "opencode", "skills"))
+        return claude, opencode
+
+    def row_for(self, skill_md):
+        """The row this file was drawn from. Both rows carry the same dirName,
+        so the file is what tells them apart -- which is the whole point."""
+        directory = os.path.dirname(os.path.realpath(skill_md))
+        return next(i for i in ax.scan()["items"] if i["realPath"] == directory)
+
+    def test_the_copy_that_does_not_hold_it_says_where_it_is(self):
+        # Only one copy at a time can be put back, so the other one cannot be
+        # applied to either. Saying so on the card is the difference between a
+        # control that explains itself and one the helper refuses after the
+        # window has already closed.
+        claude, opencode = self.two_copies()
+        self.cli("describe", "set", "--", "impeccable", self.NOTE)
+        self.cli("describe", "apply", "--", "impeccable", claude)
+
+        held = self.row_for(claude)["describe"]
+        self.assertEqual(held["state"], "applied")
+        self.assertIsNone(held["otherCopy"])
+        self.assertTrue(held["canApply"])
+
+        other = self.row_for(opencode)["describe"]
+        self.assertEqual(other["state"], "note")
+        self.assertFalse(other["handEdited"])
+        self.assertEqual(other["authorText"], self.OPENCODE)
+        self.assertFalse(other["canApply"])
+        self.assertIn("impeccable", other["otherCopy"])
+        self.assertIn("another copy of this name", other["applyWhy"])
+
+    def test_nothing_names_another_copy_when_no_apply_has_happened(self):
+        claude, opencode = self.two_copies()
+        self.cli("describe", "set", "--", "impeccable", self.NOTE)
+        for path in (claude, opencode):
+            d = self.row_for(path)["describe"]
+            self.assertIsNone(d["otherCopy"], path)
+            self.assertTrue(d["canApply"], path)
+
+    def applied_to(self, skill_md):
+        self.cli("describe", "set", "--", "impeccable", self.NOTE)
+        return self.cli("describe", "apply", "--", "impeccable", skill_md)
+
+    def test_only_the_copy_that_was_written_reads_applied(self):
+        claude, opencode = self.two_copies()
+        code, said = self.applied_to(opencode)
+        self.assertEqual((code, said["ok"]), (0, True))
+        written = self.row_for(opencode)["describe"]
+        self.assertEqual(written["state"], "applied")
+        self.assertEqual(written["fileText"], self.NOTE)
+        self.assertEqual(written["authorText"], self.OPENCODE)
+        self.assertFalse(written["handEdited"])
+        # The note is per name, so the other copy shows one and offers to apply
+        # it. The apply is not: this file was never written, so it is not hand
+        # edited either, and the text reset would put back here is its own.
+        untouched = self.row_for(claude)["describe"]
+        self.assertEqual(untouched["state"], "note")
+        self.assertEqual(untouched["noteText"], self.NOTE)
+        self.assertEqual(untouched["fileText"], self.CLAUDE)
+        self.assertEqual(untouched["authorText"], self.CLAUDE)
+        self.assertFalse(untouched["handEdited"])
+
+    def test_without_a_note_the_untouched_copy_is_the_author_s_own(self):
+        # The other half of the same rule. `note` is what the copy above reads
+        # only because a note is per name; take the note out and the copy nobody
+        # wrote to is the author's own, which is exactly what it is.
+        claude, opencode = self.two_copies()
+        self.applied_to(opencode)
+        store = ax.read_describe_store()
+        store["notes"].pop("impeccable")
+        ax.write_describe_store(store)
+        untouched = self.row_for(claude)["describe"]
+        self.assertEqual(untouched["state"], "author")
+        self.assertEqual(untouched["authorText"], self.CLAUDE)
+        self.assertIsNone(untouched["noteText"])
+        self.assertEqual(self.row_for(opencode)["describe"]["state"], "applied")
+
+    def test_reset_on_the_copy_nobody_wrote_to_touches_neither_file(self):
+        claude, opencode = self.two_copies()
+        self.applied_to(opencode)
+        written, other = self.raw(opencode), self.raw(claude)
+        code, said = self.cli("describe", "reset", "--", "impeccable", claude)
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertIn("opencode/skills/impeccable/SKILL.md", said["detail"])
+        self.assertEqual(self.raw(opencode), written)
+        self.assertEqual(self.raw(claude), other)
+        # The entry is the only way back to the author's words in the file that
+        # does carry ours, so a refusal keeps it rather than forgetting it.
+        self.assertEqual(ax.read_describe_store()["applied"]["impeccable"]["original"],
+                         self.OPENCODE)
+        self.assertEqual(self.row_for(opencode)["describe"]["state"], "applied")
+
+    def test_the_second_copy_is_not_written_while_the_first_carries_it(self):
+        # One entry per name holds one author's text. Writing the second copy
+        # would drop the first file's, leaving that file carrying our words with
+        # nothing left to put back, so it is refused and the copy that has them
+        # is named.
+        claude, opencode = self.two_copies()
+        self.applied_to(opencode)
+        before = self.raw(claude)
+        code, said = self.cli("describe", "apply", "--", "impeccable", claude)
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertIn("opencode/skills/impeccable/SKILL.md", said["detail"])
+        self.assertEqual(self.raw(claude), before)
+        self.assertEqual(ax.read_describe_store()["applied"]["impeccable"]["original"],
+                         self.OPENCODE)
+
+    def test_an_entry_that_names_no_file_claims_nothing(self):
+        """An entry from a store written before the file was recorded. It could
+        have been any copy of the name, so it is treated as none of them: the
+        row reads as its author's rather than claiming an apply that may have
+        happened somewhere else, and nothing offers to put back a description
+        this file's author never wrote."""
+        self.plain()
+        os.makedirs(ax.STORE_DIR, mode=0o700, exist_ok=True)
+        with open(ax.DESCRIBE_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"version": 1, "notes": {},
+                       "applied": {"plain": {"original": "An older wording of it.",
+                                             "wrote": "Not what this file says.",
+                                             "at": 0}}}, fh)
+        self.assertEqual(ax.read_describe_store()["applied"]["plain"]["file"], "")
+        described = self.row("plain")["describe"]
+        self.assertEqual(described["state"], "author")
+        self.assertEqual(described["authorText"], self.AUTHOR)
+        self.assertFalse(described["handEdited"])
+
+
+class DescriptionApplyIsCrashSafe(DescribeCase):
+    """The author's words are recorded before the file is touched, and every path
+    out of the verb prints its one line of JSON.
+
+    Recorded after, a store that could not be written left the SKILL.md already
+    rewritten with the only copy of the original held nowhere -- and a traceback
+    where the JSON should have been, so the panel reported failure for a write
+    that had happened. A full disk, a quota and a read-only $HOME all arrive
+    here; an unwritable store directory is the same shape and the one a test can
+    make.
+    """
+
+    NOTE = "Short enough to be worth the trouble."
+
+    def run_main(self, *argv):
+        """Driven through main rather than through `cli`, which parses whatever
+        it is given: what is being asserted is that exactly one line was printed,
+        and an empty stdout has to fail rather than read as an empty answer."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = ax.main(list(argv))
+        printed = [line for line in out.getvalue().split("\n") if line.strip()]
+        self.assertEqual(len(printed), 1, out.getvalue())
+        return code, json.loads(printed[0])
+
+    def unwritable_store(self):
+        os.chmod(ax.STORE_DIR, 0o500)
+        self.addCleanup(os.chmod, ax.STORE_DIR, 0o700)
+
+    def test_a_store_that_cannot_be_written_leaves_the_skill_md_alone(self):
+        path = self.plain()
+        before = self.raw(path)
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        self.unwritable_store()
+        code, said = self.run_main("describe", "apply", "--", "plain", path)
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertEqual(self.raw(path), before)
+        self.assertEqual(ax.read_describe_store()["applied"], {})
+
+    def test_a_note_that_cannot_be_stored_answers_in_one_line_too(self):
+        self.plain()
+        os.makedirs(ax.STORE_DIR, mode=0o700, exist_ok=True)
+        self.unwritable_store()
+        code, said = self.run_main("describe", "set", "--", "plain", self.NOTE)
+        self.assertEqual((code, said["ok"]), (2, False))
+
+    def test_an_entry_recorded_for_a_write_that_failed_goes_back(self):
+        """The other half of the ordering: the entry is recorded first, so a
+        write that then fails has to take it away again, or the row would say a
+        file carries our text when the author's is still in it."""
+        path = self.plain()
+        before = self.raw(path)
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        self.addCleanup(setattr, ax, "_write_description", ax._write_description)
+        ax._write_description = lambda *a, **k: "the disk would not take it"
+        code, said = self.cli("describe", "apply", "--", "plain", path)
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertIn("the disk would not take it", said["detail"])
+        self.assertEqual(self.raw(path), before)
+        self.assertEqual(ax.read_describe_store()["applied"], {})
+        self.assertEqual(self.row("plain")["describe"]["state"], "note")
+
+    def test_a_reset_the_store_could_not_record_can_be_finished_later(self):
+        """Reset writes the file and forgets the entry, in that order, because
+        the other order loses the author's words when the write fails. So the
+        store that could not be written leaves a file already back to its
+        author's text and an entry still saying otherwise -- and without a way
+        through that, every later reset would refuse the file for not saying what
+        we wrote, and the row would read as hand-edited for good."""
+        path = self.plain()
+        before = self.raw(path)
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        self.cli("describe", "apply", "--", "plain", path)
+        self.unwritable_store()
+        code, said = self.run_main("describe", "reset", "--", "plain", path)
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertEqual(self.raw(path), before)
+        self.assertIn("plain", ax.read_describe_store()["applied"])
+
+        os.chmod(ax.STORE_DIR, 0o700)
+        code, said = self.cli("describe", "reset", "--", "plain", path)
+        self.assertEqual((code, said["ok"], said["state"]), (0, True, "author"))
+        self.assertEqual(ax.read_describe_store(), {"notes": {}, "applied": {}})
+        self.assertEqual(self.row("plain")["describe"]["state"], "author")
+
+    def test_a_second_apply_that_fails_keeps_the_first_author_text(self):
+        # The rollback puts the entry back rather than dropping it: the first
+        # apply is still true, and `original` is still the author's own words.
+        path = self.plain()
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        self.cli("describe", "apply", "--", "plain", path)
+        self.cli("describe", "set", "--", "plain", "A third wording of it.")
+        self.addCleanup(setattr, ax, "_write_description", ax._write_description)
+        ax._write_description = lambda *a, **k: "the disk would not take it"
+        code, said = self.cli("describe", "apply", "--", "plain", path)
+        self.assertEqual((code, said["ok"]), (2, False))
+        entry = ax.read_describe_store()["applied"]["plain"]
+        self.assertEqual(entry["original"], self.AUTHOR)
+        self.assertEqual(entry["wrote"], self.NOTE)
+        self.assertEqual(self.described(path), self.NOTE)
+
+
+class DescriptionReset(DescribeCase):
+    """Back to what the author wrote, and only where that can be done exactly.
+    A file somebody has edited since is left alone and said so about, because
+    there is no version of overwriting it that the person who typed it would
+    thank us for."""
+
+    NOTE = "A shorter way of saying it."
+
+    def test_reset_after_an_apply_puts_the_file_back_byte_for_byte(self):
+        path = self.plain()
+        before = self.raw(path)
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        self.cli("describe", "apply", "--", "plain", self.skill_md("plain"))
+        self.assertNotEqual(self.raw(path), before)
+        code, said = self.cli("describe", "reset", "--", "plain", self.skill_md("plain"))
+        self.assertEqual((code, said["ok"], said["state"]), (0, True, "author"))
+        self.assertEqual(self.raw(path), before)
+        self.assertEqual(ax.read_describe_store(), {"notes": {}, "applied": {}})
+        self.assertEqual(self.row("plain")["describe"]["state"], "author")
+
+    def test_a_note_that_was_never_applied_never_opens_the_file(self):
+        path = self.plain()
+        before = self.raw(path)
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        self.addCleanup(setattr, ax, "_write_description", ax._write_description)
+        ax._write_description = lambda *a, **k: self.fail("reset wrote a file it never applied")
+        code, said = self.cli("describe", "reset", "--", "plain", self.skill_md("plain"))
+        self.assertEqual((code, said["ok"]), (0, True))
+        self.assertIn("no file was touched", said["detail"])
+        self.assertEqual(self.raw(path), before)
+        self.assertEqual(ax.read_describe_store()["notes"], {})
+
+    def test_a_hand_edit_is_refused_and_said_so_about(self):
+        path = self.plain()
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        self.cli("describe", "apply", "--", "plain", self.skill_md("plain"))
+        self.write("plain", "name: plain\ndescription: Typed here by hand.\n")
+        edited = self.raw(path)
+        code, said = self.cli("describe", "reset", "--", "plain", self.skill_md("plain"))
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertIn("changed by hand", said["detail"])
+        self.assertEqual(self.raw(path), edited)
+        # The store keeps both halves: nothing was undone, so there is nothing to
+        # forget, and the row goes on saying what happened to the file.
+        self.assertIn("plain", ax.read_describe_store()["applied"])
+
+    def test_that_hand_edit_shows_on_the_row(self):
+        self.plain()
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        self.cli("describe", "apply", "--", "plain", self.skill_md("plain"))
+        self.assertFalse(self.row("plain")["describe"]["handEdited"])
+        self.write("plain", "name: plain\ndescription: Typed here by hand.\n")
+        row = self.row("plain")
+        self.assertTrue(row["describe"]["handEdited"])
+        self.assertEqual(row["describe"]["state"], "applied")
+        self.assertEqual(row["describe"]["fileText"], "Typed here by hand.")
+        self.assertEqual(row["describe"]["authorText"], self.AUTHOR)
+
+    def test_resetting_what_was_never_touched_is_not_an_error(self):
+        self.plain()
+        code, said = self.cli("describe", "reset", "--", "plain", self.skill_md("plain"))
+        self.assertEqual((code, said["ok"], said["state"]), (0, True, "author"))
+
+    def test_a_second_apply_keeps_the_author_rather_than_our_own_text(self):
+        # `original` is recorded once. Overwriting it on the second apply would
+        # leave reset restoring our first note as though the author had written
+        # it, and the author's words would be gone for good.
+        path = self.plain()
+        before = self.raw(path)
+        self.cli("describe", "set", "--", "plain", self.NOTE)
+        self.cli("describe", "apply", "--", "plain", self.skill_md("plain"))
+        self.cli("describe", "set", "--", "plain", "A third wording of it.")
+        self.cli("describe", "apply", "--", "plain", self.skill_md("plain"))
+        self.assertEqual(ax.read_describe_store()["applied"]["plain"]["original"], self.AUTHOR)
+        self.cli("describe", "reset", "--", "plain", self.skill_md("plain"))
+        self.assertEqual(self.raw(path), before)
+
+
+class DescriptionShapes(DescribeCase):
+    """The hard half: a description is written in four different ways in the
+    files on a real machine, and a replacement that handles a plain one-line
+    value and mangles a block scalar is worse than no feature at all. Three of
+    this machine's own skills write theirs as a folded block, and one carries a
+    bare colon inside a quoted one."""
+
+    FOLDED = ("name: folded\n"
+              "description: >\n"
+              "  REQUIRED for end-user customization of Linux desktop, window manager,\n"
+              "  or system config. Triggers: Hyprland, window rules, keybindings.\n"
+              "metadata:\n"
+              "  version: 1.4.0\n")
+    FOLDED_TEXT = ("REQUIRED for end-user customization of Linux desktop, window manager, "
+                   "or system config. Triggers: Hyprland, window rules, keybindings.")
+    NOTE = "Hyprland and desktop config: window rules, keybindings, themes."
+
+    def test_a_folded_block_survives_set_apply_and_reset(self):
+        path = self.write("folded", self.FOLDED)
+        row = self.row("folded")
+        self.assertEqual(row["describe"]["fileText"], self.FOLDED_TEXT)
+        # The figure a line-oriented replacement would report here is about two.
+        self.assertGreater(row["tokens"]["alwaysOn"], 30)
+
+        self.cli("describe", "set", "--", "folded", self.NOTE)
+        self.assertEqual(self.described(path), self.FOLDED_TEXT)
+        self.cli("describe", "apply", "--", "folded", self.skill_md("folded"))
+        self.assertEqual(self.described(path), self.NOTE)
+        self.assertEqual(self.row("folded")["describe"]["fileText"], self.NOTE)
+        # The key that followed the block is still a key, not four lines of prose
+        # swallowed by a span that ran on past the end of the value.
+        self.assertEqual(self.row("folded")["declaredVersion"], "1.4.0")
+
+        # What comes back is the author's text to the character and the author's
+        # cost to the token. The four lines they folded it over are this
+        # program's to write now, and it writes one -- which is why the file is
+        # not byte for byte what it was and the assertions here are about the
+        # text rather than the bytes.
+        self.cli("describe", "reset", "--", "folded", self.skill_md("folded"))
+        self.assertEqual(self.described(path), self.FOLDED_TEXT)
+        self.assertEqual(self.row("folded")["tokens"]["alwaysOn"], row["tokens"]["alwaysOn"])
+        with open(path, encoding="utf-8") as fh:
+            self.assertIn("metadata:\n  version: 1.4.0\n", fh.read())
+
+    def indicated(self, header):
+        """The same block, with an indentation indicator in its header.
+
+        YAML lets the chomping indicator and the indentation indicator be written
+        in either order, so `>2`, `>-2` and `|+2` are all one header and none of
+        them is text. A parser that knew only the chomping half read the whole
+        header as the start of the description.
+        """
+        return self.write("indicated",
+                          "name: indicated\n"
+                          f"description: {header}\n"
+                          "  REQUIRED for end-user customization of Linux desktop, "
+                          "window manager,\n"
+                          "  or system config. Triggers: Hyprland, window rules, keybindings.\n"
+                          "metadata:\n"
+                          "  version: 1.4.0\n")
+
+    def test_an_indentation_indicator_is_never_part_of_the_description(self):
+        for header in (">2", "|2", ">-2", "|+2"):
+            with self.subTest(header=header):
+                path = self.indicated(header)
+                row = self.row("indicated")
+                self.assertEqual(row["describe"]["fileText"], self.FOLDED_TEXT)
+                self.assertNotIn(header, row["describe"]["fileText"])
+                # The figure follows the text, so a header read as prose moved it.
+                self.assertEqual(row["tokens"]["alwaysOn"],
+                                 ax.token_estimate("indicated", self.FOLDED_TEXT, "", 4))
+                self.assertEqual(row["declaredVersion"], "1.4.0")
+
+                self.cli("describe", "set", "--", "indicated", self.NOTE)
+                code, said = self.cli("describe", "apply", "--", "indicated", path)
+                self.assertEqual((code, said["ok"]), (0, True), said)
+                self.assertEqual(self.described(path), self.NOTE)
+                # The crux: what was recorded for the undo is the author's text
+                # and not the header. Recorded with the indicator on the front,
+                # reset wrote `description: '>2 REQUIRED for …'` into the file
+                # and the author's words were gone for good.
+                self.assertEqual(
+                    ax.read_describe_store()["applied"]["indicated"]["original"],
+                    self.FOLDED_TEXT)
+
+                code, said = self.cli("describe", "reset", "--", "indicated", path)
+                self.assertEqual((code, said["ok"], said["state"]), (0, True, "author"), said)
+                self.assertEqual(self.described(path), self.FOLDED_TEXT)
+                self.assertEqual(self.row("indicated")["declaredVersion"], "1.4.0")
+
+    def test_a_block_header_this_parser_cannot_read_whole_is_refused(self):
+        # Better to refuse than to begin a round trip reset cannot finish: an
+        # `original` taken from a header we misread is not the author's text, and
+        # reset would write our misreading back into their file for good.
+        for header in (">-2-", "|22", "> and then some prose", "|-+"):
+            with self.subTest(header=header):
+                path = self.write("odd", f"name: odd\ndescription: {header}\n"
+                                         "  Some description text.\n")
+                before = self.raw(path)
+                self.cli("describe", "set", "--", "odd", self.NOTE)
+                code, said = self.cli("describe", "apply", "--", "odd", path)
+                self.assertEqual((code, said["ok"]), (2, False), said)
+                self.assertIn("block scalar", said["detail"])
+                self.assertEqual(self.raw(path), before)
+                self.cli("describe", "reset", "--", "odd", path)
+
+    def test_a_literal_block_is_read_and_written_the_same_way(self):
+        path = self.write("literal", "name: literal\ndescription: |\n"
+                                     "  One line of it.\n  And a second.\n")
+        self.assertEqual(self.row("literal")["describe"]["fileText"],
+                         "One line of it. And a second.")
+        self.cli("describe", "set", "--", "literal", self.NOTE)
+        self.cli("describe", "apply", "--", "literal", self.skill_md("literal"))
+        self.assertEqual(self.described(path), self.NOTE)
+
+    def test_a_colon_a_quote_and_non_ascii_all_round_trip(self):
+        # n8n-sdk-server is the file this is drawn from: a bare `Triggers on:`
+        # inside the description, which is what makes a generic YAML writer drop
+        # the whole frontmatter rather than the one field.
+        path = self.write("quoted", "name: quoted\ndescription: 'Read this one FIRST. "
+                                    "Triggers on: n8n, \"workflow\", spójne wywołania.'\n")
+        self.assertIn("Triggers on:", self.row("quoted")["describe"]["fileText"])
+        note = 'Use FIRST for n8n. Triggers on: n8n, "workflow", spójne wywołania — ćwiczenia.'
+        self.cli("describe", "set", "--", "quoted", note)
+        self.cli("describe", "apply", "--", "quoted", self.skill_md("quoted"))
+        self.assertEqual(self.described(path), note)
+        self.assertEqual(self.row("quoted")["describe"]["fileText"], note)
+
+    def test_a_text_with_both_kinds_of_quote_still_lands_exactly(self):
+        # Neither quoting carries this, and nothing is escaped on purpose: the
+        # read-back goes through the same parser the agents use, which strips a
+        # pair of quotes and does not undo escapes, so an escaped quote would come
+        # back with its backslash still on it.
+        path = self.plain("both")
+        note = """He said "it's fine" — and the description says so: plainly."""
+        self.cli("describe", "set", "--", "both", note)
+        code, said = self.cli("describe", "apply", "--", "both", self.skill_md("both"))
+        self.assertEqual((code, said["ok"]), (0, True))
+        self.assertEqual(self.described(path), note)
+        with open(path, encoding="utf-8") as fh:
+            self.assertIn("description: >-\n  " + note, fh.read())
+
+    def test_a_value_a_reader_would_take_for_something_else_is_quoted(self):
+        for value in ("true", "No", "null", "12.5", "- a dash to start with",
+                      "a colon: in the middle", "trailing hash # here", "ends with a colon:"):
+            rendered = ax._render_description(value)
+            self.assertEqual(len(rendered), 1, value)
+            self.assertNotEqual(rendered[0], f"description: {value}", value)
+            self.assertEqual(ax.parse_frontmatter_block("\n".join(rendered))["description"],
+                             value, value)
+
+    def test_an_ordinary_sentence_is_written_plainly(self):
+        self.assertEqual(ax._render_description("An ordinary description of a skill."),
+                         ["description: An ordinary description of a skill."])
+
+    def test_a_frontmatter_we_would_have_to_guess_at_is_refused(self):
+        for name, frontmatter in (
+                ("twice", "name: twice\ndescription: One.\ndescription: Two.\n"),
+                ("mapping", "name: mapping\ndescription:\n  text: One.\n"),
+                ("absent", "name: absent\nargument-hint: \"[x]\"\n")):
+            self.write(name, frontmatter)
+            self.cli("describe", "set", "--", name, self.NOTE)
+            code, said = self.cli("describe", "apply", "--", name, self.skill_md(name))
+            self.assertEqual((code, said["ok"]), (2, False), name)
+            self.assertIn("was left alone", said["detail"], name)
+
+    def test_a_description_the_author_left_blank_is_the_one_worth_filling_in(self):
+        # `no-description` is already a row the panel flags. An empty value is a
+        # value, unlike the mapping above, so this is the one case where applying
+        # a note puts a skill's description on the page for the first time.
+        path = self.write("blank", "name: blank\ndescription:\nmetadata:\n  version: 1.0.0\n")
+        self.assertIn("no-description", self.row("blank")["attention"])
+        self.cli("describe", "set", "--", "blank", self.NOTE)
+        code, said = self.cli("describe", "apply", "--", "blank", self.skill_md("blank"))
+        self.assertEqual((code, said["ok"]), (0, True))
+        self.assertEqual(self.described(path), self.NOTE)
+        self.assertEqual(self.row("blank")["declaredVersion"], "1.0.0")
+
+    def test_carriage_returns_are_left_alone_rather_than_mixed(self):
+        directory = os.path.join(self.root, "dos")
+        os.makedirs(directory)
+        with open(os.path.join(directory, "SKILL.md"), "w", encoding="utf-8", newline="") as fh:
+            fh.write("---\r\nname: dos\r\ndescription: Written on another machine.\r\n"
+                     "---\r\n\r\n# Body\r\n")
+        self.cli("describe", "set", "--", "dos", self.NOTE)
+        code, said = self.cli("describe", "apply", "--", "dos", self.skill_md("dos"))
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertIn("carriage returns", said["detail"])
+
+    def test_a_note_longer_than_any_description_here_is_clipped(self):
+        self.plain("long")
+        self.cli("describe", "set", "--", "long", "x" * (ax.MAX_DESCRIPTION + 200))
+        self.assertEqual(len(ax.read_describe_store()["notes"]["long"]), ax.MAX_DESCRIPTION)
+
+
+class DescriptionStore(DescribeCase):
+    """The second file this plugin owns. It is read on every scan, so a store
+    that cannot be parsed has to read as an empty one and say so -- an entry
+    quietly half-read is one that would have reset writing a guess into somebody
+    else's file."""
+
+    def test_a_store_of_the_wrong_shape_reads_as_an_empty_one(self):
+        os.makedirs(ax.STORE_DIR, mode=0o700)
+        for doc in ('{"notes": "not a mapping"}', '{"notes": {"a/b": "text"}}',
+                    '{"notes": {"ok": 12}}', '{"notes": {"ok": "   "}}', "[]"):
+            with open(ax.DESCRIBE_PATH, "w", encoding="utf-8") as fh:
+                fh.write(doc)
+            self.assertEqual(ax.read_describe_store()["notes"], {}, doc)
+
+    def test_an_applied_entry_missing_a_half_is_dropped_whole(self):
+        os.makedirs(ax.STORE_DIR, mode=0o700)
+        for doc in ('{"applied": {"a": {"wrote": "x"}}}',
+                    '{"applied": {"a": {"original": "x"}}}',
+                    '{"applied": {"a": "not a mapping"}}'):
+            with open(ax.DESCRIBE_PATH, "w", encoding="utf-8") as fh:
+                fh.write(doc)
+            self.assertEqual(ax.read_describe_store()["applied"], {}, doc)
+
+    def test_an_applied_entry_naming_a_relative_file_names_none(self):
+        # A path this program never wrote. There is no working directory it
+        # could be relative to, so it names no copy of the skill rather than
+        # whichever one the panel happened to be launched from.
+        os.makedirs(ax.STORE_DIR, mode=0o700)
+        with open(ax.DESCRIBE_PATH, "w", encoding="utf-8") as fh:
+            fh.write('{"applied": {"a": {"original": "x", "wrote": "y", '
+                     '"file": "a/SKILL.md"}}}')
+        self.assertEqual(ax.read_describe_store()["applied"]["a"]["file"], "")
+
+    def test_a_refused_store_is_reported_rather_than_forgotten(self):
+        os.makedirs(ax.STORE_DIR, mode=0o700)
+        with open(ax.DESCRIBE_PATH, "w", encoding="utf-8") as fh:
+            fh.write('{"notes": {"plain": "mine"}}')
+        os.chmod(ax.DESCRIBE_PATH, 0o666)
+        findings: list = []
+        self.assertEqual(ax.read_describe_store(findings)["notes"], {})
+        self.assertEqual([f["what"] for f in findings], ["descriptions.json"])
+        self.assertIn("world-writable", findings[0]["detail"])
+
+    def test_the_store_is_written_for_this_user_alone(self):
+        self.plain()
+        self.cli("describe", "set", "--", "plain", "Mine.")
+        self.assertEqual(stat.S_IMODE(os.stat(ax.DESCRIBE_PATH).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(ax.STORE_DIR).st_mode), 0o700)
+
+    def test_the_two_stores_stay_out_of_each_other_s_way(self):
+        # One file names categories and the other names descriptions, and either
+        # can be deleted on its own: a reader who throws away their notes should
+        # not find every skill back under the classifier's guess as well.
+        self.plain()
+        # The category verb answers in a sentence rather than in JSON, so it is
+        # driven here rather than through the helper the describe tests use.
+        with contextlib.redirect_stdout(io.StringIO()):
+            ax.main(["category", "assign", "--", "plain", "code"])
+        self.cli("describe", "set", "--", "plain", "Mine.")
+        os.unlink(ax.DESCRIBE_PATH)
+        row = self.row("plain")
+        self.assertEqual(row["taxonomy"]["category"], "code")
+        self.assertEqual(row["describe"]["state"], "author")
 
 
 if __name__ == "__main__":

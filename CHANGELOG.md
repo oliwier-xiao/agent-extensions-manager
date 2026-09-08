@@ -7,11 +7,12 @@ searchable list on the bar, with what each one costs in tokens on every turn and
 invokes it in the spelling that particular agent expects.
 
 No agent's configuration file is written at any point — nothing here turns a skill on or off, and
-every row says so where you would expect a switch. Two files of its own:
-`~/.config/agent-skills/categories.json`, written only when you file a skill under a category, and a
-cache under `~/.cache/agent-skills` holding one answer pacman already gave. The one thing it can
-change in an agent's tree is a skill directory you have confirmed by name, and it changes it by
-moving it to the desktop trash rather than deleting it.
+every row says so where you would expect a switch. Three files of its own:
+`~/.config/agent-skills/categories.json` for your filing, `descriptions.json` beside it for any
+description you have rewritten, and a cache under `~/.cache/agent-skills` holding one answer pacman
+already gave. Two things it can change in an agent's own tree, each confirmed on its own card: a
+skill directory you named, moved to the desktop trash rather than deleted, and the `description:`
+value of one `SKILL.md`, with the author's own text kept so it can be put back.
 
 ### What it does
 
@@ -33,6 +34,14 @@ moving it to the desktop trash rather than deleting it.
 - **Flags that mean something** — a skill answering to two names across agents, an expired MCP
   token, a copy that has drifted from its original. A category the classifier was unsure of is not a
   problem and is not reported as one.
+- **Rewriting a description**, with `^D`, because the description is not a label — it is what every
+  agent copies into its system prompt on every turn, and eight wordy skills here are a third of the
+  bill. Saving a note changes nothing an agent reads and the row keeps its cost, which the card says
+  plainly; applying it writes the `description:` value of that one `SKILL.md`, and that is what moves
+  the figure. Only that value changes, the file is read back to confirm the new text parses as
+  exactly what was asked for, and the author's words are kept so **return to default** works however
+  long afterwards. A skill installed twice is two files, and the copy that did not get the rewrite
+  says where it went rather than claiming it.
 - **Removing a skill**, with `^Del`, which asks first and names the paths rather than the row. A
   skill is not one thing on disk, so the question is not one question: a directory that is yours goes
   to the trash whole; a skill a package owns is offered only as the links in your own directories; a

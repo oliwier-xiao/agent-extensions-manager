@@ -54,24 +54,22 @@ number. It is the most-reported plugin problem in the Omarchy tracker and is bei
 omarchy plugin remove oliwier.agent-skills-manager
 ```
 
-One file of yours outlives it, so reinstalling later finds your categories again:
+Your own files outlive it, so reinstalling later finds your filing and your rewritten descriptions
+again. To clear them:
 
 ```
-rm -f ~/.config/agent-skills/categories.json
+rm -rf ~/.config/agent-skills ~/.cache/agent-skills
 ```
 
-One more file of its own is worth knowing about but not worth keeping:
+The first holds two files: the categories you filed things under, and any description you rewrote —
+including the author's original, which is what makes **return to default** possible, so deleting it while
+a description is applied leaves that skill carrying your text with nothing to put back. The second is
+only a cached answer from pacman and costs a tenth of a second to rebuild.
 
-```
-rm -rf ~/.cache/agent-skills
-```
-
-That holds one answer pacman already gave — which packages own the skills you did not install — so a scan
-does not have to ask again. Deleting it costs a tenth of a second on the next scan and nothing else.
-
-Beyond those three paths the footprint is nothing, and no agent's configuration file is written at any
-point. The one other thing the widget can move is a skill you asked it to remove, and that goes to your
-desktop trash under `~/.local/share/Trash`, where it stays until you empty it.
+Beyond those, no agent's configuration file is written at any point. Two things in an agent's own tree
+can change, each behind its own confirmation: a skill directory you named, which goes to your desktop
+trash under `~/.local/share/Trash` rather than being deleted, and the `description:` line of one
+`SKILL.md`.
 
 ---
 
@@ -194,7 +192,7 @@ and **Save** commits.
 Backing out with something unsaved asks first, on the same surface, rather than dropping work you had no
 way of knowing was still a draft.
 
-This is the only configuration the widget writes, and it writes it to one file of its own:
+Filing is written to one file of the widget's own:
 
 ```
 ~/.config/agent-skills/categories.json
@@ -206,11 +204,44 @@ category or to move a skill between them.
 
 ---
 
+## Rewriting a description
+
+The description is not a label. It is the text every agent copies into its system prompt on every turn,
+and it is the whole of what a skill costs you. Eight skills on the machine these screenshots come from
+account for a third of the bill purely by being wordy — one of them is 251 tokens of prose about
+self-hosting. So the description is the only real lever you have on that number, and `^D` is it. Open a
+row, and **edit** is in the bottom corner of the card beside **delete**.
+
+It opens its own window, and it offers two different things that are easy to confuse, so it says which is
+which every time:
+
+**Saving a note changes nothing the agent reads.** Your text goes to the widget's own file. The row keeps
+the cost it had, because the agent is still reading the author's words — the panel shows what it costs now
+and, separately and conditionally, what it would cost if you applied it. This is the one worth having if
+you just want the list to make sense to you: your own wording, your own language, and the search reads it.
+
+**Applying it writes `SKILL.md`.** That is the act that moves the figure, because now the agent reads your
+text. It confirms on its own and names the file, because it is writing something this widget did not
+create. Only the `description:` value changes; every other byte of that file, frontmatter and body alike,
+comes through untouched, and the file is read back afterwards to check the new text parses as exactly what
+you asked for — if it does not, the original goes back and the whole thing is refused.
+
+**Return to default** puts the author's words back. They are kept from the moment you apply, so this works
+however long ago it was, and it is offered as long as there is anything to return from.
+
+Where a skill cannot be written — the two Omarchy ships, which pacman owns, and the six Codex rewrites on
+every launch — the window says so instead of offering the control. Where it can be written but will not
+last, it says that too: a plugin update replaces its own checkout, and OpenCode re-fetches what it caches.
+And a skill installed twice is two files: applying names the one the row was drawn from, and the other
+copy says where its rewrite went rather than claiming it.
+
+---
+
 ## Removing a skill
 
-`^Del` asks whether to get rid of the skill under the cursor. It is the one key here that changes
-something outside this widget's own file, so it asks first and the question names what will actually
-happen rather than the name of the row.
+`^Del` asks whether to get rid of the skill under the cursor. It changes something outside this widget's
+own files, so it asks first and the question names what will actually happen rather than the name of the
+row.
 
 Which is not one question, because a skill is not one thing on disk. Four answers, and the helper decides
 which before the panel draws anything:
@@ -307,6 +338,9 @@ Every printable key goes to the search. Commands take Ctrl.
 | `^M` | move the row to another category, or restyle the category under a group header |
 | `^E` | open the categories: rename one, recolour it, or add one |
 | `^O` | open where the skill is installed, in your file manager |
+| `^D` | rewrite the description: a note of your own, or the file the agents read |
+| `^A` | in the editor, write your rewrite into `SKILL.md` |
+| `^Z` | in the editor, return to what the author wrote |
 | `^Del` | ask whether to move the skill under the cursor to the trash |
 | `^G` | regroup by category, agent, kind or nothing |
 | `^R` | read everything again |
