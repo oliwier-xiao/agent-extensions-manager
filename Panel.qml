@@ -13,15 +13,16 @@ import qs.Ui
 // string the user has just asked to have put somewhere.
 //
 // The helper registers five subcommands. `scan` and `doctor` only read.
-// `category` and `describe set` write the two files this plugin owns,
+// `category` and `describe note` write the two files this plugin owns,
 // ~/.config/agent-skills/categories.json and descriptions.json, which record
 // nothing but which shelf a skill was filed on, what that shelf is called, and
-// what you have written instead of a description. `remove`, `describe apply` and
-// `describe reset` are the three that touch something this plugin did not write,
-// and each of them re-stats every path at the moment it acts rather than trusting
-// the row that asked. Nothing here ever opens a file for writing -- each of those
-// is a helper run with the change in argv -- so what a reviewer has to read to
-// believe it is the helper's argument handling rather than the whole of this file.
+// the note somebody wrote about a skill for themselves. `remove`, `describe
+// write` and `describe reset` are the three that touch something this plugin did
+// not write, and each of them re-stats every path at the moment it acts rather
+// than trusting the row that asked. Nothing here ever opens a file for writing
+// -- each of those is a helper run with the change in argv -- so what a reviewer
+// has to read to believe it is the helper's argument handling rather than the
+// whole of this file.
 //
 // The claim that matters, stated at the width it is actually true: no agent's
 // configuration file is written at any point. Two things in an agent's tree can
@@ -308,28 +309,49 @@ Panel {
     && (root.styleColourIndex !== root.styleBaseIndex
         || root.pickerText.trim() !== root.styleBaseLabel)
 
-  // The description editor keeps a draft the same way, and for a stronger
-  // reason: what is typed here can end up in a file this plugin did not write,
-  // so nothing leaves the editor until you say so and nothing reaches SKILL.md
-  // until you say so a second time. `describeBase` is what the field held when
-  // it opened, which is how the panel knows whether there is anything to save
-  // and whether backing out is dropping work.
+  // The description editor keeps two drafts, because it has two fields and they
+  // go to different places. The note is this plugin's own file and costs
+  // nothing; the description is somebody else's SKILL.md and is what every
+  // agent loads on every turn. Neither leaves the editor until you say so, and
+  // the `*Base` value beside each is what the field held when it opened, which
+  // is how the panel knows whether there is anything to save and whether backing
+  // out is dropping work.
   //
-  // Its own text rather than `pickerText`, because that one is a name or a
-  // filter and is capped at thirty-two characters on the way in. A description
-  // is a paragraph, and the cap here is the one the store and the scanner
+  // Their own text rather than `pickerText`, because that one is a name or a
+  // filter and is capped at thirty-two characters on the way in. Both of these
+  // run to a paragraph, and the cap here is the one the store and the scanner
   // already agree on.
   readonly property int describeLimit: 1024
+  property string describeNote: ""
+  property string describeNoteBase: ""
   property string describeText: ""
   property string describeBase: ""
   property bool describeAsking: false
-  readonly property bool describeDirty: root.pickerMode === "describe"
+
+  // Which of the two fields the keystrokes are going into. The panel has no
+  // focused QML editor -- the key catcher owns every key and the caret is drawn
+  // -- so with two fields on screen there has to be a value that says which one
+  // is being typed at, and it has to be visible in the field itself rather than
+  // inferred. "note" or "description", and nothing else answers to it.
+  property string describeFocus: "note"
+
+  // Dirty per field, because Save writes each of them separately and a prompt
+  // that named the wrong one would be asking about a change nobody made.
+  //
+  // The note is dirty when it differs, empty included: clearing a note is a
+  // save. The description is not, because an empty description is not a rewrite
+  // -- the helper refuses one and so does this, and `return to default` is the
+  // control that means "give the row back to its author".
+  readonly property bool describeNoteDirty: root.pickerMode === "describe"
+    && root.describeNote.trim() !== root.describeNoteBase
+  readonly property bool describeTextDirty: root.pickerMode === "describe"
     && root.describeText.trim() !== ""
     && root.describeText.trim() !== root.describeBase
+  readonly property bool describeDirty: root.describeNoteDirty || root.describeTextDirty
 
   // Whether the editor on screen has anything to write. Two editors share the
   // Save button in the title row now -- a category's name and colour, and a
-  // skill's description -- and it is lit for whichever of them is dirty.
+  // skill's note and description -- and it is lit for whichever of them is dirty.
   readonly property bool saveArmed:
     (root.pickerMode === "style" && root.styleDirty)
     || (root.pickerMode === "describe" && root.describeDirty)
@@ -407,11 +429,11 @@ Panel {
   })
   readonly property var attentionPhrase: ({
     // Still the same fault and still worth the top rank, but a user can now be
-    // the cause of it: applying a rewritten description to one copy of a skill
-    // that is installed twice genuinely does make the two differ. The flag is
-    // not suppressed for that -- two agents reading different text is the fact
-    // it reports either way -- so the sentence names the other way it happens.
-    "drift": "Another copy of this skill has different content -- two agents are running different code, and applying a description to one copy is one way that happens",
+    // the cause of it: rewriting the description in one copy of a skill that is
+    // installed twice genuinely does make the two differ. The flag is not
+    // suppressed for that -- two agents reading different text is the fact it
+    // reports either way -- so the sentence names the other way it happens.
+    "drift": "Another copy of this skill has different content -- two agents are running different code, and rewriting the description in one copy is one way that happens",
     "invalid-yaml": "The frontmatter has an unquoted colon",
     "name-mismatch": "The frontmatter name and the directory name disagree, so the tools call it two things",
     "no-description": "No description, so the agent has nothing to match on",
@@ -805,25 +827,40 @@ Panel {
   // thing a user can rewrite that moves the number -- but only once the agent
   // is reading the new text, which means it has to be in SKILL.md.
   //
-  // So it is two acts, confirmed separately, because they are two different
-  // sizes. `set` stores a note in this plugin's own file: nothing an agent
-  // reads changes, the figure does not move, and it is still worth doing,
-  // because the search above reads descriptions and a long unreadable one is
-  // worth restating for yourself. `apply` writes that note into somebody
-  // else's SKILL.md, keeping what was there so `reset` can put it back.
+  // The editor writes two independent things and they go to two different
+  // places. `note` stores your own words about a skill in this plugin's own
+  // file: no agent opens that file, so a note costs nothing and is never in any
+  // figure this panel prints. `write` replaces the `description:` value in
+  // somebody else's SKILL.md, keeping the author's own text so `reset` can put
+  // it back -- and that one moves the figure, at the moment it is saved,
+  // because the file now says something different.
   //
   // The whole of the file work is the helper's. It replaces one value in the
   // frontmatter and passes every other byte through, reads the file back
   // through the parser the panel and the agents will read it with, and puts the
   // original back if the read-back disagrees. None of that is repeated here.
-  function runDescribe(argv, done) {
+  //
+  // A list of runs rather than one, because a single Save can be both of them
+  // and the helper is run one at a time. The second waits for the first to exit
+  // rather than racing it, and a refusal drops what is queued behind it: the
+  // helper refusing is the helper saying the row that asked was already stale,
+  // and the run behind it was built from that same row.
+  property var describeQueue: []
+
+  function runDescribe(jobs) {
     if (describeProc.running) { root.flashResult("One at a time", "error"); return }
-    describeProc.pending = done || ""
+    if (!jobs || jobs.length === 0) return
+    root.describeQueue = jobs.slice(1)
+    root.startDescribeJob(jobs[0])
+  }
+
+  function startDescribeJob(job) {
+    describeProc.pending = String(job.done || "")
     describeProc.detail = ""
     describeProc.code = -1
     describeProc.reported = false
     describeProc.inflight = true
-    root.startHelper(describeProc, ["describe"].concat(argv))
+    root.startHelper(describeProc, ["describe"].concat(job.argv))
   }
 
   // The helper prints one line of JSON and its refusals are one sentence each,
@@ -834,6 +871,21 @@ Panel {
   function settleDescribe() {
     if (describeProc.reported || describeProc.inflight) return
     describeProc.reported = true
+    // Mid-chain: the next run starts here rather than in onExited, so it starts
+    // from a process that has already been read as well as exited, and no scan
+    // is taken between two halves of one Save.
+    if (describeProc.code === 0 && root.describeQueue.length > 0) {
+      var next = root.describeQueue[0]
+      root.describeQueue = root.describeQueue.slice(1)
+      root.startDescribeJob(next)
+      return
+    }
+    root.describeQueue = []
+    // Whatever happened, including a refusal. A refusal is usually the helper
+    // saying the row that asked was already stale -- the skill moved, or
+    // SKILL.md changed underneath -- which is exactly when the list is worth
+    // reading again.
+    root.startScan()
     if (describeProc.code === 0) {
       root.flashResult(describeProc.pending !== "" ? describeProc.pending
         : (describeProc.detail !== "" ? describeProc.detail : "Saved"), "ok")
@@ -860,8 +912,14 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        // The last line, not the whole buffer. One Save can be two runs through
+        // this same collector, and a collector that carried the first run's line
+        // into the second would hand JSON.parse two objects and get nothing back
+        // -- so the refusal that mattered would arrive as no sentence at all.
+        // The helper prints one line either way, which makes this free.
+        var lines = String(text || "").replace(/\s+$/, "").split("\n")
         var parsed = null
-        try { parsed = JSON.parse(String(text || "")) } catch (e) { parsed = null }
+        try { parsed = JSON.parse(lines[lines.length - 1]) } catch (e) { parsed = null }
         if (parsed && typeof parsed === "object")
           // Long enough for a refusal that has to name two absolute paths and
           // then say which of them to act on. At 240 the plugin cache path and
@@ -875,11 +933,6 @@ Panel {
     onExited: function (exitCode, exitStatus) {
       describeProc.code = exitCode
       describeProc.inflight = false
-      // Whatever happened, including a refusal. A refusal is usually the helper
-      // saying the row that asked was already stale -- the skill moved, or
-      // SKILL.md changed underneath -- which is exactly when the list is worth
-      // reading again.
-      root.startScan()
       Qt.callLater(root.settleDescribe)
     }
   }
@@ -1047,18 +1100,18 @@ Panel {
       }
     }
 
-    // What the description currently is, what you have written instead, and
-    // whether the second of those can reach the file. Read from the helper and
-    // never worked out here, for the reason the removal plan is: the helper is
-    // the half that can stat a path and open a file, and a second opinion
+    // Your own note about this skill, what SKILL.md says now, what its author
+    // wrote, and whether this file can be written at all. Read from the helper
+    // and never worked out here, for the reason the removal plan is: the helper
+    // is the half that can stat a path and open a file, and a second opinion
     // computed in QML is how the two halves come to disagree about which text
     // an agent is loading.
     //
     // The three texts go through typable() rather than clean(). They are drawn,
-    // but one of them is also what seeds the editor, and a seed that has had
-    // its spacing collapsed and an ellipsis appended is not the author's
-    // description any more -- it is a rewrite nobody asked for, one Save away
-    // from being written back over the original.
+    // but two of them also seed the editor, and a seed that has had its spacing
+    // collapsed and an ellipsis appended is not the author's description any
+    // more -- it is a rewrite nobody asked for, one Save away from being written
+    // back over the original.
     //
     // An older helper prints no `describe` at all, and then this stays null and
     // the card draws none of the controls. Saying nothing is the honest answer
@@ -1066,23 +1119,19 @@ Panel {
     var describe = null
     var dsc = item.describe
     if (dsc && typeof dsc === "object") {
-      var told = String(dsc.state || "author")
-      if (told !== "note" && told !== "applied") told = "author"
-      var ifApplied = Number(dsc.tokensIfApplied)
       describe = {
-        state: told,
-        fileText: root.typable(dsc.fileText, 1024),
         noteText: root.typable(dsc.noteText, 1024),
+        fileText: root.typable(dsc.fileText, 1024),
         authorText: root.typable(dsc.authorText, 1024),
-        canApply: dsc.canApply === true,
-        applyWhy: root.clean(dsc.applyWhy, 240),
-        applyNote: root.clean(dsc.applyNote, 240),
+        edited: dsc.edited === true,
+        canWrite: dsc.canWrite === true,
+        whyNot: root.clean(dsc.whyNot, 240),
+        writeNote: root.clean(dsc.writeNote, 240),
         handEdited: dsc.handEdited === true,
-        // Null unless the helper gave a number, so the card can tell "applying
-        // would cost this" from "nobody has said what applying would cost" and
-        // print the second as nothing rather than as zero.
-        tokensIfApplied: dsc.tokensIfApplied === null || dsc.tokensIfApplied === undefined
-          || !isFinite(ifApplied) ? null : Math.round(ifApplied)
+        // A path, and drawn only. What travels to the helper is `describeAbs`
+        // below, which is never rebuilt from a string that has been through
+        // clean().
+        otherCopy: root.clean(dsc.otherCopy, 240)
       }
     }
 
@@ -1118,6 +1167,10 @@ Panel {
       },
       toolList: tools,
       tokens: root.showTokens ? (Number(item.tokens && item.tokens.alwaysOn) || 0) : null,
+      // The length the estimate was taken from, so the editor can move the
+      // figure from the same basis the helper used rather than from its own
+      // rounded answer.
+      tokenChars: Number(item.tokens && item.tokens.chars),
       usage: (Number(u.count) || 0) > 0 ? String(u.count) + "×"
         : (u.source === "not tracked" ? "-" : "unused"),
       attention: codes,
@@ -1140,7 +1193,7 @@ Panel {
       // collapses runs of whitespace and truncates, and on a path neither of
       // those is cosmetic -- either one names something else or nothing.
       describeFile: root.clean(root.tildify(String(item.realPath || "")) + "/SKILL.md", 200),
-      // The file `describe apply` and `describe reset` are handed, so that the
+      // The file `describe write` and `describe reset` are handed, so that the
       // file that changes is the file this row promised rather than whichever
       // copy of the name the helper would have reached for first. On a skill
       // installed twice under one name those are different files, and the card
@@ -1159,10 +1212,9 @@ Panel {
             + " by " + root.clean(item.tokens && item.tokens.method, 20) }
       ],
       // A note you have written is searched alongside the description, because
-      // it is a description too -- yours -- and restating an unreadable one so
-      // the search can find it is half of why writing one without applying it
-      // is worth doing at all. It would be a poor kind of storage that took
-      // your words and then could not find them.
+      // it is your own words about this skill and they are the words you will
+      // reach for when you go looking for it. It would be a poor kind of
+      // storage that took them and then could not find them.
       haystack: root.fold(name + " " + desc + " "
         + (describe ? describe.noteText : "") + " " + tax.category + " " + tags + " skill")
     }
@@ -1751,18 +1803,17 @@ Panel {
       if (root.styleAsking) return ["\u0000save", "\u0000discard"]
       return root.swatches.concat(["\u0000clear"])
     }
-    // The description editor is a field and not a grid, so it offers nothing to
-    // step through until it asks the unsaved-changes question, at which point it
-    // borrows the same two answers the style editor asks it with.
+    // The description editor is two fields and not a grid, so it offers nothing
+    // to step through until it asks the unsaved-changes question, at which point
+    // it borrows the same two answers the style editor asks it with.
     if (root.pickerMode === "describe")
       return root.describeAsking ? ["\u0000save", "\u0000discard"] : []
     // Two answers to one question, in the shape the unsaved-category prompt
     // already uses, and the first of them is the one that changes nothing. A
     // mode with nothing to answer draws no chips at all -- an unwritable
-    // SKILL.md and a hand edit this panel must not clobber are both answers the
-    // helper has already given, and the line above the chips says so instead.
-    if (root.pickerMode === "apply")
-      return root.describeApplyable() ? ["\u0000keepnote", "\u0000apply"] : []
+    // SKILL.md, a file changed since this panel wrote it, and an edit that
+    // belongs to another copy of the name are all answers the helper has already
+    // given, and the line above the chips says so instead.
     if (root.pickerMode === "reset")
       return root.describeResettable() ? ["\u0000keepmine", "\u0000restore"] : []
     if (root.pickerMode === "remove")
@@ -1960,77 +2011,118 @@ Panel {
     return out
   }
 
-  // The describe record the scan attached to a row, or null. Everything the
-  // three description screens say is read from here, and a build of the helper
-  // that does not print one leaves the controls undrawn rather than guessed at.
+  // The describe record the scan attached to a row, or null. Everything the two
+  // description screens say is read from here, and a build of the helper that
+  // does not print one leaves the controls undrawn rather than guessed at.
+  //
+  // Tested on the one key the model always fills with a real boolean rather than
+  // on the object merely being there, so a record that arrived as something
+  // empty reads as no answer instead of as an answer of undefined. Taking a
+  // record rather than a row, because the card asks about a view and the picker
+  // asks about a row, and the two must not disagree about what counts.
+  function describeRecord(d) {
+    return d && typeof d === "object" && typeof d.canWrite === "boolean" ? d : null
+  }
+
   function describeOf(row) {
     if (!row || row.rowType === "header" || !row.view) return null
-    var d = row.view.describe
-    if (!d || typeof d !== "object" || !d.state) return null
-    return d
+    return root.describeRecord(row.view.describe)
   }
 
   // The SKILL.md this row is drawn from, absolute, exactly as the scan reported
-  // it. It travels with `apply` and `reset` so the file that changes is the one
-  // the card named: a note is stored per name, a name can be installed twice,
-  // and without this the helper picks a copy of its own. Empty is a refusal
-  // rather than a fallback, because a name-only command is the defect.
+  // it. It travels with `write` and `reset` so the file that changes is the one
+  // the card named: a name can be installed twice, and without this the helper
+  // picks a copy of its own. Empty is a refusal rather than a fallback, because
+  // a name-only command is the defect.
   function describeTarget(row) {
     var abs = row && row.view ? String(row.view.describeAbs || "") : ""
     return abs.charAt(0) === "/" ? abs : ""
   }
 
-  // Whether an apply would change anything, which is the helper's question
-  // rather than this panel's: it prices one only when there is something to
-  // price, so `tokensIfApplied` is the answer and the state is not. The state
-  // cannot stand in for it -- a second rewrite of a skill that is already
-  // applied leaves the state at "applied" while the note and the file say
-  // different things, and gating on the state drops that rewrite on the floor.
-  // Null and undefined are both tested because a JSON null arrives as undefined
-  // in some positions, the same as everywhere else this field is read.
-  function describeUnapplied(d) {
-    return !!d && d.tokensIfApplied !== null && d.tokensIfApplied !== undefined
-      && String(d.noteText || "") !== ""
+  // Whether the description field can reach the file it was seeded from. The
+  // note never asks this -- it goes to this plugin's own store, which is this
+  // plugin's to write -- so an unwritable SKILL.md costs the editor one of its
+  // two fields and nothing else.
+  function describeWritable(row) {
+    var d = root.describeOf(row)
+    if (!d || d.canWrite !== true || root.describeTarget(row) === "") return false
+    // A description longer than the scan carries arrives here already cut, with
+    // an ellipsis where the rest of it was. Saving that would write the cut into
+    // the file and lose the author's last paragraphs to a field that never had
+    // them. One description on this machine is over a thousand characters, so
+    // this is a row somebody will really open.
+    return String(d.fileText || "").length < root.describeLimit
   }
 
-  // Whether there is anything to answer, on each of the two questions. The rule
-  // the removal card already follows: a control the panel could not honour is a
-  // control that lies about what it does, so an unwritable SKILL.md and a Codex
-  // .system directory Codex rewrites on every launch both draw the reason
-  // instead of a chip.
-  function describeApplyable() {
-    var d = root.describeOf(root.pickerRow)
-    return root.describeUnapplied(d) && d.canApply === true
+  // Why the description field is not writable, in the reader's terms. The helper
+  // answers for the file; this answers for the one case the helper cannot see,
+  // which is the editor's own reach.
+  function describeWhyNot(row) {
+    var d = root.describeOf(row)
+    if (!d) return ""
+    if (String(d.fileText || "").length >= root.describeLimit)
+      return "This description is longer than the editor holds, so it can only be changed in the file itself."
+    return String(d.whyNot || "")
   }
 
-  // A hand edit is not asked about here. `handEdited` is keyed on the name and
-  // this question is about one file, so on a skill installed twice it is true of
-  // the copy nobody touched; refusing on it left that row with no way back at
-  // all. The helper answers for the file it is handed, and its refusal is a
-  // better sentence than a chip this panel declined to draw.
+  // What the row will cost once the description in the editor is the description
+  // in the file: the row's own measurement, moved by the characters this field
+  // has gained or lost, at the divisor the scan was taken with. Not a second
+  // tokeniser -- a figure computed one way here and another way in the helper
+  // would be two claims about the single number this panel exists to print, and
+  // they would drift apart by more than rounding.
+  //
+  // The length it is measured against is what the field opened with, which is
+  // what SKILL.md says. The note has no length in this and never will.
+  function describeProjected(now, chars) {
+    var moved = root.describeText.trim().length - root.describeBase.length
+    // From the character count the scan measured, not from the figure it already
+    // rounded. Rounding a rounded number puts this one token away from what the
+    // next scan prints, which is the same number in the same panel disagreeing
+    // with itself. Half up, because that is what the helper does.
+    if (chars !== undefined && chars !== null)
+      return Math.max(0, Math.floor((Number(chars) + moved) / root.divisor + 0.5))
+    return Math.max(0, Math.round(Number(now) + moved / root.divisor))
+  }
+
+  // Whether `return to default` has anything to put back and can put it. The
+  // rule the removal card already follows: a control the panel could not honour
+  // is a control that lies about what it does, so an unwritable SKILL.md, a file
+  // that no longer says what this panel wrote into it, and an edit belonging to
+  // another copy of the name each draw their reason instead of a chip.
+  //
+  // `handEdited` refuses here where it used to be left to the helper, because it
+  // now answers for this file rather than for the name: the copy that holds the
+  // name's edit is `otherCopy`, so a record saying both `edited` and
+  // `handEdited` is saying this very SKILL.md changed underneath, which is
+  // precisely what the helper will decline to overwrite.
+  function describeResettableFor(d) {
+    return !!d && d.edited === true && d.canWrite === true
+      && d.handEdited !== true && String(d.otherCopy || "") === ""
+  }
+
   function describeResettable() {
-    var d = root.describeOf(root.pickerRow)
-    // `otherCopy` is the one case where the helper can say in advance that this
-    // row has nothing to put back: the name's applied text belongs to a copy
-    // somewhere else, and only one copy at a time can hold it. Everywhere else
-    // the helper's refusal is the better sentence, which is what the comment
-    // above argues.
-    return !!d && d.state !== "author" && !d.otherCopy
+    return root.describeResettableFor(root.describeOf(root.pickerRow))
   }
 
-  // Row before mode, for the reason openPicker states. The field is seeded
-  // before either, because the editor's own bindings read it the moment the
+  // Row before mode, for the reason openPicker states. Both fields are seeded
+  // before either, because the editor's own bindings read them the moment the
   // mode changes.
   function openDescribePicker(row) {
     root.pickerRow = row
     var d = root.describeOf(row)
-    // Whatever the description is now: your text if you have written one, the
-    // author's otherwise. The first keystroke edits rather than wipes, the same
-    // as the category editor, and backspace is how you clear it.
-    var seed = ""
-    if (d) seed = String(d.noteText || "") !== "" ? String(d.noteText) : String(d.fileText || "")
-    root.describeText = root.typable(seed, root.describeLimit)
+    // The note as it was left, and the description as SKILL.md says it right
+    // now. The first keystroke edits rather than wipes, the same as the category
+    // editor, and backspace is how either one is cleared.
+    root.describeNote = d ? root.typable(d.noteText, root.describeLimit) : ""
+    root.describeNoteBase = root.describeNote.trim()
+    root.describeText = d ? root.typable(d.fileText, root.describeLimit) : ""
     root.describeBase = root.describeText.trim()
+    // On the note, which is the field that changes nothing outside this plugin.
+    // A caret opening in the field that overwrites somebody else's file is one
+    // keystroke from a rewrite nobody asked for, and every other question here
+    // opens on the answer that leaves things alone.
+    root.describeFocus = "note"
     root.describeAsking = false
     root.pickerMode = "describe"
     root.pickerReturn = ""
@@ -2040,17 +2132,14 @@ Panel {
     root.pickerIndex = 0
   }
 
-  function openApplyPicker(row) {
-    root.pickerRow = row
-    root.pickerMode = "apply"
-    root.pickerReturn = ""
-    root.pickerCategory = ""
-    root.pickerNaming = false
-    root.pickerText = ""
-    // On the answer that changes nothing, the same as the removal card. This
-    // one is undoable and that one is not, but a confirmation that opens with
-    // the cursor on the write is a confirmation in name only either way.
-    root.pickerIndex = 0
+  // Tab is the whole of the switch, and it moves nowhere the keys cannot go: an
+  // unwritable SKILL.md leaves the description on screen to be read with the
+  // caret still in the note, because a caret in a field nothing can save is a
+  // promise the panel cannot keep. The line on that field says why instead.
+  function describeToggleFocus() {
+    if (root.describeFocus === "description") { root.describeFocus = "note"; return }
+    if (!root.describeWritable(root.pickerRow)) return
+    root.describeFocus = "description"
   }
 
   function openResetPicker(row) {
@@ -2060,55 +2149,55 @@ Panel {
     root.pickerCategory = ""
     root.pickerNaming = false
     root.pickerText = ""
+    // On the answer that changes nothing, the same as the removal card. This one
+    // is undoable and that one is not, but a confirmation that opens with the
+    // cursor on the write is a confirmation in name only either way.
     root.pickerIndex = 0
   }
 
-  // Returning to default is two acts wearing one name, and what separates them
-  // is whose file it is. Dropping a note nobody applied changes this plugin's
-  // own store and nothing else, so it happens on the click, the way an unsaved
-  // draft is dropped. Putting the author's description back into SKILL.md is a
-  // write to a file this panel did not create, so it asks first, in a card that
-  // says what it will put there.
-  function resetDescription(row) {
-    var d = root.describeOf(row)
-    if (!d || d.state === "author") return
-    if (d.state === "applied") { root.openResetPicker(row); return }
-    var dir = root.clean(row.view.dirName, 128)
-    var file = root.describeTarget(row)
-    if (dir === "" || file === "") return
-    root.runDescribe(["reset", "--", dir, file],
-                     root.clean(row.view.name, 60) + " back to the author's description")
-  }
-
-  // The same act from inside the editor, which is where the control now lives.
-  // The distinction resetDescription draws still holds; what is added is that
-  // the editor closes on the branch that acts immediately, because the draft in
-  // the field is the text that has just been dropped and leaving it on screen
-  // would offer to save it back.
+  // Returning to default puts the author's description back into a file this
+  // panel did not create, so it asks first, in a card that says what it will put
+  // there. The editor's control comes through here as well, and no draft is lost
+  // on the way: the control is not offered while there is one.
   function describeReset() {
     if (!root.describeResettable()) return
-    var row = root.pickerRow
-    var d = root.describeOf(row)
-    if (d.state === "applied") { root.openResetPicker(row); return }
-    root.closePicker()
-    root.resetDescription(row)
+    root.openResetPicker(root.pickerRow)
   }
 
+  // One Save, up to two writes, each named by what it changed. Neither is sent
+  // unless it differs from what the editor opened with: a run that rewrote a
+  // file with the bytes already in it would be a write nobody asked for and a
+  // modification time nobody can account for.
   function describeSave() {
-    var dir = root.pickerRow && root.pickerRow.view
-      ? root.clean(root.pickerRow.view.dirName, 128) : ""
-    var text = root.describeText.trim()
+    var row = root.pickerRow
+    var dir = row && row.view ? root.clean(row.view.dirName, 128) : ""
     if (dir === "") { root.describeAsking = false; root.closePicker(); return }
-    // The store refuses an empty description and so does this, rather than
-    // quietly writing one: emptying the field is not a rewrite, and the control
-    // that means "I want the author's text back" is the other one. Nothing is
-    // said here because nothing can be -- the message strip is behind this
-    // overlay -- so the line under the field says it while the field is empty,
-    // and the Save button is dark for as long as it is true.
-    if (text === "") return
-    root.runDescribe(["set", "--", dir, text], "Rewrite saved for " + dir)
+    var note = root.describeNote.trim()
+    var text = root.describeText.trim()
+    var jobs = []
+    // An emptied note is a save: clearing one is how you take it off the card.
+    if (note !== root.describeNoteBase)
+      jobs.push({ argv: ["note", "--", dir, note],
+                  done: note === "" ? "Note cleared on " + dir : "Note saved on " + dir })
+    // An emptied description is not. The store refuses one and so does this,
+    // rather than quietly writing it: the control that means "give the row back
+    // to its author" is the other one. Nothing is said here because nothing can
+    // be -- the message strip is behind this overlay -- so the line under the
+    // fields says it while the field is empty.
+    var file = root.describeTarget(row)
+    // `--expect` is what the field was seeded from, which is what SKILL.md said
+    // when the scan drew this row. The panel stays open while somebody types,
+    // and a read-modify-write over another author's file with the window left
+    // open is how an edit made elsewhere in the meantime disappears. The helper
+    // already refuses on a mismatch and says what happened; this is the panel
+    // handing it the thing it needs to notice.
+    if (text !== "" && text !== root.describeBase && root.describeWritable(row))
+      jobs.push({ argv: ["write", "--expect", root.describeBase, "--", dir, file, text],
+                  done: root.clean(row.view.name, 60) + " now reads your description" })
     root.describeAsking = false
+    root.describeNoteBase = note
     root.describeBase = text
+    if (jobs.length > 0) root.runDescribe(jobs)
     root.pickerBack()
   }
 
@@ -2122,71 +2211,26 @@ Panel {
     if (!d) return []
     var file = row && row.view ? String(row.view.describeFile || "") : ""
     var out = []
-    // The editor's own card, which has to keep two texts and two figures apart
-    // and says all four rather than any of them twice: what SKILL.md holds now,
-    // what is stored beside this panel instead, what the row costs on every
-    // turn, and -- as a condition and never as a measurement -- what it would
-    // cost once an apply had put the second text in the first one's place. The
-    // field above is the note being written, so the author's own text has
-    // nowhere else on this screen to be.
+    // The editor states only what its two fields cannot: which copy of the name
+    // this is, the caveat on writing it, and where the edit went when it went to
+    // another copy. What each field does is written on that field, beside the
+    // text it does it to.
     if (root.pickerMode === "describe") {
-      // Which copy this is. A note is stored per name and a name can be
-      // installed twice, so on a machine carrying both the file is the only
-      // thing on this screen that tells the two of them apart.
       out.push({ label: "file", value: file })
-      out.push({ label: "in SKILL.md", value: String(d.fileText || "") })
-      var note = String(d.noteText || "")
-      var stored = ""
-      // The price is asked first, and the phase second. A rewrite saved over one
-      // already applied is `state: "applied"` and is still not in the file, so
-      // reading the phase first prints "this SKILL.md carries it" directly above
-      // a tokens line saying what it would cost once it did.
-      if (note !== "")
-        stored = root.describeUnapplied(d)
-          ? "your rewrite, here only — the agent reads what SKILL.md says"
-          : (d.state === "applied" && d.handEdited !== true
-             ? "your rewrite, and this SKILL.md carries it"
-             : "your rewrite, word for word what SKILL.md already says")
-      out.push({ label: "stored", value: stored })
-      if (root.showTokens && row.view.tokens !== null && row.view.tokens !== undefined) {
-        var bill = root.tokenText(row.view.tokens) + " on every turn now"
-        if (d.tokensIfApplied !== null && d.tokensIfApplied !== undefined)
-          bill += ", " + root.tokenText(d.tokensIfApplied) + " once this is in the file"
-        out.push({ label: "tokens", value: bill })
-      }
-      // Beside the control rather than instead of it: applying is allowed here
-      // and the next plugin update or fetch takes it away again.
-      out.push({ label: "note", value: d.canApply === true ? String(d.applyNote || "") : "" })
-      return out
-    }
-    if (root.pickerMode === "apply") {
-      out.push({ label: "writes", value: file })
-      out.push({ label: "the text", value: String(d.noteText || "") })
-      // The one figure on this card that is a promise rather than a
-      // measurement, and it is written as one: what it is now, and what it
-      // becomes once the file says so.
-      if (root.showTokens && d.tokensIfApplied !== null && d.tokensIfApplied !== undefined)
-        out.push({ label: "tokens", value: root.tokenText(row.view.tokens)
-          + " on every turn now, " + root.tokenText(d.tokensIfApplied)
-          + " once this is in the file" })
-      out.push({ label: "read from", value: "the next session each agent starts" })
-      out.push({ label: "afterwards",
-                 value: "the author's own description is kept, so this can be put back" })
-      out.push({ label: "note", value: String(d.applyNote || "") })
+      out.push({ label: "caveat",
+                 value: d.canWrite === true ? String(d.writeNote || "") : "" })
+      out.push({ label: "edit is in", value: String(d.otherCopy || "") })
       return out
     }
     out.push({ label: "writes", value: file })
     out.push({ label: "puts back", value: String(d.authorText || "") })
-    out.push({ label: "afterwards",
-               value: "your own text is dropped and the row reads what its author wrote" })
-    if (d.handEdited === true)
-      out.push({ label: "note", value: "this copy of SKILL.md does not carry what this panel "
-        + "wrote, so the helper answers for the file and may refuse rather than overwrite it" })
+    out.push({ label: "afterwards", value: "the row reads what its author wrote" })
     return out
   }
 
   // Why this card is shaped the way it is, in one sentence, in the place the
-  // removal card puts the helper's own `why`.
+  // removal card puts the helper's own `why`. It is also where the sentence
+  // stands in for a control this panel has declined to draw.
   function detailWhy() {
     if (root.pickerMode === "remove") {
       var rem = root.removalOf(root.pickerRow)
@@ -2194,14 +2238,19 @@ Panel {
     }
     var d = root.describeOf(root.pickerRow)
     if (!d) return ""
-    if (root.pickerMode === "apply")
-      return root.describeApplyable()
-        ? "Until this is in the file the agent reads the author's text, and the figure on the row is what that costs. Writing it is what moves the figure."
-        : String(d.applyWhy || "")
-    if (root.pickerMode === "reset")
-      return d.handEdited === true
-        ? "This copy of SKILL.md does not say what this panel wrote into it — another copy of the same name may, or this one was changed since. The helper answers for the file it is handed, and it refuses rather than overwrite what it did not write."
-        : "The description in the file is yours. This puts the author's own back where it is."
+    if (root.pickerMode === "describe")
+      return root.describeWritable(root.pickerRow) ? "" : root.describeWhyNot(root.pickerRow)
+    if (root.pickerMode === "reset") {
+      if (root.describeResettable())
+        return "The description in the file is yours. This puts the author's own back where it is."
+      if (d.canWrite !== true) return String(d.whyNot || "")
+      if (String(d.otherCopy || "") !== "")
+        return "The edit under this name is in " + String(d.otherCopy)
+             + ", so there is nothing here to put back."
+      if (d.handEdited === true)
+        return "SKILL.md no longer says what this panel wrote into it, and the helper refuses rather than overwrite what it did not write."
+      return "This row already reads the description its author wrote."
+    }
     return ""
   }
 
@@ -2266,8 +2315,8 @@ Panel {
     }
 
     // The same promise for the description editor, which needs it more: what is
-    // in that field is several sentences you may have just written, and there
-    // is no other copy of them anywhere.
+    // in those two fields is several sentences somebody may have just written,
+    // and there is no other copy of them anywhere.
     if (root.pickerMode === "describe" && root.describeDirty && !root.describeAsking) {
       root.describeAsking = true
       root.pickerIndex = 0
@@ -2275,6 +2324,7 @@ Panel {
     }
     if (root.describeAsking) {
       root.describeAsking = false
+      root.describeNote = root.describeNoteBase
       root.describeText = root.describeBase
     }
 
@@ -2331,8 +2381,11 @@ Panel {
     root.pickerText = ""
     root.pickerIndex = 0
     root.describeAsking = false
+    root.describeNote = ""
+    root.describeNoteBase = ""
     root.describeText = ""
     root.describeBase = ""
+    root.describeFocus = "note"
   }
 
   // The colour the style overlay is currently offering, so the preview box and
@@ -2371,16 +2424,10 @@ Panel {
     }
     if (root.pickerMode === "style")
       return root.pickerText.trim() === "" ? root.pickerCategory : root.pickerText.trim()
-    // In the description editor this box is not a preview of the text, it is
-    // the text, and it stays that while the unsaved question is up -- the same
-    // as the style editor, where the name being saved or discarded is still on
-    // screen while you answer. The field draws it wrapped rather than on this
-    // line, so what this returns is read by nothing but a width calculation.
-    if (root.pickerMode === "describe") return root.describeText
-    if (root.pickerMode === "apply") {
-      if (!root.describeApplyable()) return "Close"
-      return root.pickerIndex === 1 ? "Write it into SKILL.md" : "Leave the file alone"
-    }
+    // The description editor draws two fields of its own instead of this box,
+    // so there is no single line here that Enter would act on: Save writes
+    // whichever of them has changed, and each field says so where it is.
+    if (root.pickerMode === "describe") return ""
     if (root.pickerMode === "reset") {
       if (!root.describeResettable()) return "Close"
       return root.pickerIndex === 1 ? "Put the author's description back" : "Keep what is there"
@@ -2480,6 +2527,7 @@ Panel {
         // Two answers to one question, and the cursor starts on the safe one.
         if (root.pickerIndex === 0) { root.describeSave(); return }
         root.describeAsking = false
+        root.describeNote = root.describeNoteBase
         root.describeText = root.describeBase
         root.pickerBack()
         return
@@ -2488,22 +2536,10 @@ Panel {
       return
     }
 
-    // Both of these read the row before the overlay closes, because closePicker
-    // drops the row the question was about, and send afterwards, so the question
-    // is off the screen by the time the answer is on its way. The same rule and
-    // the same order as the removal below.
-    if (root.pickerMode === "apply") {
-      if (!root.describeApplyable() || root.pickerIndex !== 1) { root.closePicker(); return }
-      var dirApply = root.clean(root.pickerRow.view.dirName, 128)
-      var fileApply = root.describeTarget(root.pickerRow)
-      var namedApply = root.clean(root.pickerRow.view.name, 60)
-      root.closePicker()
-      if (dirApply === "" || fileApply === "") return
-      root.runDescribe(["apply", "--", dirApply, fileApply],
-                       namedApply + " now reads your description")
-      return
-    }
-
+    // The row is read before the overlay closes, because closePicker drops the
+    // row the question was about, and the run is sent afterwards, so the
+    // question is off the screen by the time the answer is on its way. The same
+    // rule and the same order as the removal below.
     if (root.pickerMode === "reset") {
       if (!root.describeResettable() || root.pickerIndex !== 1) { root.closePicker(); return }
       var dirReset = root.clean(root.pickerRow.view.dirName, 128)
@@ -2511,8 +2547,8 @@ Panel {
       var namedReset = root.clean(root.pickerRow.view.name, 60)
       root.closePicker()
       if (dirReset === "" || fileReset === "") return
-      root.runDescribe(["reset", "--", dirReset, fileReset],
-                       namedReset + " back to the author's description")
+      root.runDescribe([{ argv: ["reset", "--", dirReset, fileReset],
+                          done: namedReset + " back to the author's description" }])
       return
     }
 
@@ -2606,12 +2642,11 @@ Panel {
     root.openRemovePicker(r)
   }
 
-  // The three description commands. Each opens a screen and none of them
-  // changes anything by itself -- ^D opens the editor, ^A opens the question
-  // that writes the file, and ^Z either drops your own note or opens the
-  // question that puts the author's text back. They take Ctrl for the reason
-  // every command here does: the panel promises "Type to search" and every
-  // printable key keeps that promise. None of the three letters was in use.
+  // The two description commands. Neither changes anything by itself -- ^D opens
+  // the editor and ^Z opens the question that puts the author's text back. They
+  // take Ctrl for the reason every command here does: the panel promises "Type
+  // to search" and every printable key keeps that promise. Neither letter was in
+  // use.
   function describeCurrent() {
     var r = root.currentRow()
     if (!r) return
@@ -2631,34 +2666,32 @@ Panel {
     root.openDescribePicker(r)
   }
 
-  function applyCurrent() {
-    var r = root.currentRow()
-    if (!r || r.rowType === "header") return
-    var d = root.describeOf(r)
-    if (!d) return
-    // Not the state: an already-applied skill you have rewritten a second time
-    // still reads "applied", and its note is exactly what this key is for.
-    if (!root.describeUnapplied(d)) {
-      root.flash("Nothing is waiting here that SKILL.md does not already say")
-      return
-    }
-    if (d.canApply !== true) {
-      root.flash(String(d.applyWhy || "This one cannot be written from here"))
-      return
-    }
-    root.openApplyPicker(r)
-  }
-
+  // Each refusal in the words the row's own record gives, because the message
+  // strip is on screen here and the reason is the whole of the answer: there is
+  // nothing to put back, the edit is in another copy, the file has changed since,
+  // or it is not this user's to write.
   function resetCurrent() {
     var r = root.currentRow()
     if (!r || r.rowType === "header") return
     var d = root.describeOf(r)
     if (!d) return
-    if (d.state === "author") {
+    if (d.edited !== true) {
       root.flash("This row already reads the description its author wrote")
       return
     }
-    root.resetDescription(r)
+    if (String(d.otherCopy || "") !== "") {
+      root.flash("The edit under this name is in " + String(d.otherCopy))
+      return
+    }
+    if (d.handEdited === true) {
+      root.flash("SKILL.md has changed since this panel wrote it, so it will not be overwritten")
+      return
+    }
+    if (d.canWrite !== true) {
+      root.flash(String(d.whyNot || "This one is not this panel's to write"))
+      return
+    }
+    root.openResetPicker(r)
   }
 
   function revealCurrent() {
@@ -2778,8 +2811,8 @@ Panel {
     property color tone: root.readable
     signal picked()
 
-    width: ccText.implicitWidth + Style.space(18)
-    height: Style.space(22)
+    width: ccText.implicitWidth + Style.space(22)
+    height: Style.space(26)
     radius: height / 2
     color: ccHover.hovered ? Util.alpha(root.fg, 0.18) : Util.alpha(root.fg, 0.08)
 
@@ -2790,11 +2823,200 @@ Panel {
       text: cc.label
       color: ccHover.hovered ? root.fg : cc.tone
       font.family: root.face
-      font.pixelSize: Style.font.caption
+      font.pixelSize: Style.font.bodySmall
     }
 
     HoverHandler { id: ccHover; cursorShape: Qt.PointingHandCursor }
     TapHandler { onTapped: cc.picked() }
+  }
+
+  // One editable field, drawn twice: the note and the description. They are one
+  // component because they have to read as a pair -- same width, same radius,
+  // same rhythm -- and because what separates them has to be their state rather
+  // than their drawing. A label and a tag on one line, the sentence that says
+  // where this text goes under it, and a box holding the text.
+  //
+  // `active` is the whole of the focus signal, and it is deliberately more than
+  // one signal at once: the label brightens and thickens, the ground takes the
+  // accent, the border lights, the pointer becomes an I-beam and the caret
+  // appears. This panel has no focused QML editor to inherit any of that from,
+  // so every part of it is drawn -- and one cue on its own was exactly what left
+  // a reader unsure which field the keys were going into.
+  component DescribeField: Column {
+    id: df
+    property string label: ""
+    property string tag: ""
+    property string caption: ""
+    property string placeholder: ""
+    property string body: ""
+    property bool active: false
+    property bool editable: true
+    property real bodyMax: Style.space(90)
+    signal focusRequested()
+
+    spacing: Style.spacing.xs
+
+    Item {
+      width: parent.width
+      height: dfLabel.implicitHeight
+
+      Text {
+        id: dfLabel
+        anchors.left: parent.left
+        anchors.top: parent.top
+        textFormat: Text.PlainText
+        text: df.label
+        color: df.active ? root.fg : root.soft
+        font.family: root.face
+        font.pixelSize: Style.font.bodySmall
+        font.bold: df.active
+      }
+
+      // What this field costs, on the right where a figure belongs. Empty on the
+      // field that costs nothing to print, rather than a zero: nothing reads a
+      // note, so there is no figure to give.
+      Text {
+        anchors.left: dfLabel.right
+        anchors.leftMargin: Style.spacing.md
+        anchors.right: parent.right
+        anchors.baseline: dfLabel.baseline
+        visible: df.tag !== ""
+        horizontalAlignment: Text.AlignRight
+        textFormat: Text.PlainText
+        text: df.tag
+        color: root.soft
+        font.family: root.face
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+    }
+
+    Text {
+      width: parent.width
+      visible: df.caption !== ""
+      textFormat: Text.PlainText
+      text: df.caption
+      color: root.soft
+      font.family: root.face
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
+    }
+
+    // Visibly a field in both states: a ground and a border either way, and the
+    // accent only on the one being typed into. The quiet one is not a preview of
+    // anything -- it is the same box, waiting its turn.
+    BorderSurface {
+      width: parent.width
+      implicitHeight: dfBody.height + Style.spacing.inputPaddingY * 2
+      radius: Style.cornerRadius
+      color: df.active ? Util.alpha(root.hue, 0.16) : Util.alpha(root.fg, 0.05)
+      // The quiet state takes the theme's own control border, the way every
+      // other resting surface here does. The lit one is written out in the
+      // accent instead, and deliberately not asked for as a control state:
+      // `focus` and `hover-cursor` both default to the foreground at a lower
+      // alpha than `normal`, so a field asking for them would come back with a
+      // fainter border than the field beside it -- the opposite of the one thing
+      // this pair has to say.
+      borderSpec: df.active
+        ? Border.flat(Util.alpha(root.hue, 0.9), Math.max(1, Style.space(1)))
+        : Border.controlSpec("normal", root.fg, root.hue)
+      // Dimmed where the helper has said this file cannot be written. The text
+      // stays on screen to be read, because reading it is still worth doing; the
+      // caption in that state is the helper's own sentence about why.
+      opacity: df.editable ? 1 : 0.6
+
+      // The other way into a field, for the hand already on the mouse. It has to
+      // take the press as well as the hover, or the click falls through to the
+      // floor under the card.
+      //
+      // Above the text, not under it. A TextEdit takes mouse events even when it
+      // is read-only, so declared first this area was covered by the paragraph
+      // and only the padding around it answered a click -- one live strip and a
+      // dead middle, on the field whose whole job is to be typed into. `z` and
+      // not declaration order, so the caret and the placeholder keep theirs.
+      MouseArea {
+        anchors.fill: parent
+        z: 1
+        enabled: df.editable
+        hoverEnabled: true
+        acceptedButtons: Qt.LeftButton
+        cursorShape: df.active ? Qt.IBeamCursor : Qt.PointingHandCursor
+        onClicked: df.focusRequested()
+      }
+
+      // Wrapped, because both of these run to a paragraph, and bounded, because
+      // how long they run is somebody else's answer and a box that grew with it
+      // would push the panel's own footer off the bottom of the screen. Past the
+      // bound the text slides up rather than scrolling under a bar nobody asked
+      // for, so the end being typed is the end that can be seen -- and only in
+      // the field holding the keys, because on the other one the beginning is
+      // what a reader wants.
+      Item {
+        id: dfBody
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.topMargin: Style.spacing.inputPaddingY
+        anchors.leftMargin: Style.spacing.controlPaddingX
+        anchors.rightMargin: Style.spacing.controlPaddingX
+        clip: true
+        height: Math.max(Style.space(18),
+          Math.min(dfEdit.contentHeight, Math.max(Style.space(36), df.bodyMax)))
+
+        // The same placeholder idiom the name field uses: what to type, where it
+        // will be typed, behind the caret rather than after it.
+        Text {
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: parent.top
+          visible: df.body === ""
+          textFormat: Text.PlainText
+          text: df.placeholder
+          color: root.fg
+          opacity: 0.5
+          font.family: root.face
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+          elide: Text.ElideRight
+        }
+
+        // A TextEdit, and read-only, and never focused: this panel has no focused
+        // editor and the key catcher above owns every keystroke. What it is here
+        // for is the two things a wrapped Text cannot do -- lay a paragraph out
+        // and say where the insertion point is -- and the caret is drawn on the
+        // same 530ms the search field uses, because the panel promises the
+        // keyboard is here.
+        TextEdit {
+          id: dfEdit
+          width: parent.width
+          y: df.active ? Math.min(0, dfBody.height - dfEdit.contentHeight) : 0
+          readOnly: true
+          activeFocusOnPress: false
+          selectByMouse: false
+          cursorVisible: df.active
+          cursorPosition: dfEdit.text.length
+          textFormat: TextEdit.PlainText
+          text: df.body
+          color: root.fg
+          font.family: root.face
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: TextEdit.Wrap
+
+          cursorDelegate: Rectangle {
+            width: Math.max(1, Style.space(1))
+            color: root.fg
+
+            SequentialAnimation on opacity {
+              loops: Animation.Infinite
+              PropertyAnimation { to: 1; duration: 0 }
+              PauseAnimation { duration: 530 }
+              PropertyAnimation { to: 0; duration: 0 }
+              PauseAnimation { duration: 530 }
+            }
+          }
+        }
+      }
+    }
   }
 
   component GroupRow: Item {
@@ -2997,6 +3219,15 @@ Panel {
     // before the rows stop touching, and it costs one row of the visible list.
     readonly property int lineHeight: Style.space(32)
     readonly property bool broken: er.view.severity >= 2
+
+    // How far down this row the list is still showing it, in the row's own
+    // coordinates. A row cannot work this out for itself: it is `list.contentY`
+    // and the view's height measured against this delegate's place in the
+    // content, and the delegate is the only thing that can see all three. The
+    // card reads it to keep two controls in view on a card taller than the
+    // panel. Read only -- writing anything back at the view from in here is how
+    // a scroll starts fighting itself.
+    property real visibleBottom: 0
 
     implicitHeight: er.lineHeight + (er.expanded ? detail.implicitHeight + Style.spacing.xl : 0)
 
@@ -3282,604 +3513,697 @@ Panel {
       // before anything was in it.
       Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
 
-      sourceComponent: Column {
-        spacing: Style.spacing.lg
+      sourceComponent: Item {
+        id: card
 
-        // The description, and what is true about it right now. Every skill an
-        // agent can see puts its description into the system prompt on every
-        // turn, used or not, so a shorter one is the largest lever there is --
-        // but only once the agent is reading it. Changing it is a window of its
-        // own, reached from the corner below; this block only reports.
-        //
-        // Which is why this block has one job above every other: keep two texts
-        // apart. What is in SKILL.md is what the agent loads and what the token
-        // figure beside the row was computed from. What you have written instead
-        // is a note in this plugin's own file until you apply it, and it costs
-        // nothing and saves nothing. Drawing them as one string, or letting the
-        // second one anywhere near the figure, would make the panel lie about
-        // the single number it exists to print.
-        Column {
-          id: descBlock
-          width: parent.width
-          spacing: Style.spacing.sm
+        // The card measures itself and the row is exactly as tall as the
+        // measurement. An Item does not size itself to what is in it and the
+        // Loader above only hands down a width, so without this the whole card
+        // measures zero and every line of it goes off screen. Stated twice
+        // because the two are separate: the implicit height is what the row
+        // adds up, the real one is what the card is.
+        implicitHeight: cardBody.implicitHeight
+        height: cardBody.implicitHeight
 
-          readonly property var desc: er.view.describe
-          // Tested on the one field every describe record has rather than on
-          // the record being non-null, so this and describeOf() agree about
-          // what counts as an answer. A record that came through the model as
-          // something empty would otherwise read as a state of "undefined",
-          // and a control would be drawn for it.
-          readonly property bool known: descBlock.desc !== null && descBlock.desc !== undefined
-            && String(descBlock.desc.state || "") !== ""
-          // Not `state`: Item has one of its own, and a property that shadows it
-          // is a warning at best and the wrong value at worst.
-          readonly property string phase: descBlock.known ? String(descBlock.desc.state) : "author"
-          readonly property bool isApplied: descBlock.phase === "applied"
-          // What the phase cannot say. A second rewrite of an already-applied
-          // skill leaves the phase at "applied" while the note and the file say
-          // different things, so anything that speaks about applying reads the
-          // helper's own price for one instead.
-          readonly property bool unapplied: descBlock.known
-            && root.describeUnapplied(descBlock.desc)
-          // Whether anything of yours is stored at all, which is a different
-          // question from whether applying it would change the file. A note
-          // that already says what SKILL.md says leaves the helper with nothing
-          // to price, and a line gated on that price took a note the user had
-          // saved off the only row it belongs to.
-          readonly property bool hasNote: descBlock.known
-            && String(descBlock.desc.noteText || "") !== ""
-          // Whether this copy of the file carries what the panel wrote. A note
-          // is kept per name and a name can be installed twice, so the untouched
-          // twin of an applied skill reads "applied" and holds its author's
-          // text; `handEdited` is how the helper says this file is not the one.
-          readonly property bool carriesOurs: descBlock.isApplied
-            && descBlock.known && descBlock.desc.handEdited !== true
+        // Where the two controls come to rest, in this item's coordinates. The
+        // fact row they park on is a Repeater delegate that nothing out here
+        // can name, so that row reports the place rather than being asked for
+        // it, and nothing else writes this.
+        property real restY: 0
 
-          visible: er.view.description !== "" || descBlock.known
+        // The line the controls may not rise above. Everything over it -- the
+        // description, the per-agent state rows, the mount paths -- is a column
+        // of text, and a control floating across one of those lines reads as
+        // belonging to it. Where a row has no category at all, an MCP server
+        // has no shelf to be on, the first block below it that is drawn takes
+        // the job; asking an undrawn Row for its y gets whatever the Column
+        // left there.
+        readonly property real ceiling: categoryRow.visible ? categoryRow.y
+          : (invocationRow.visible ? invocationRow.y : factsColumn.y)
 
-          // What SKILL.md says, which is what the agent reads. It stays here in
-          // every state and it is never replaced by anything you have written.
-          Text {
-            width: parent.width
-            visible: er.view.description !== ""
-            textFormat: Text.PlainText
-            text: er.view.description
-            color: root.readable
-            font.family: root.face
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-            maximumLineCount: 4
-            elide: Text.ElideRight
-          }
-
-          // Whose text that was, said in the same place every time so it is read
-          // once rather than worked out on each row. The figure beside it is the
-          // row's own, unchanged: this is the cost that is being paid now.
-          Text {
-            width: parent.width
-            visible: descBlock.known
-            textFormat: Text.PlainText
-            text: {
-              var counted = root.showTokens && er.view.tokens !== null
-                && er.view.tokens !== undefined
-              var now = counted
-                ? "  ·  " + root.tokenText(er.view.tokens) + " on every turn" : ""
-              if (er.view.description === "")
-                return "nothing in SKILL.md, so the agent has nothing to match on"
-              return (descBlock.carriesOurs ? "your description, in SKILL.md"
-                                            : "the author's description, in SKILL.md") + now
-            }
-            color: root.soft
-            font.family: root.face
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
-
-          // That a rewrite of yours exists, and what it is not. The note itself
-          // and every control over it are in the edit window now, because the
-          // card is where you read what an agent loads and the window is where
-          // you change it -- but the card cannot go silent about a note being
-          // stored, or the row would show a description nobody has told you is
-          // no longer the one you wrote.
-          //
-          // Drawn on whether a note exists, never on whether applying it would
-          // move the figure: a note that says exactly what SKILL.md says is
-          // still a note, and it says so here rather than vanishing.
-          //
-          // The conditional figure is written as a condition: what the row
-          // costs now, and what it would cost if this were applied. Never the
-          // second on its own, and never in the column the row prints its real
-          // cost in.
-          Text {
-            width: parent.width
-            // Drawn whenever something is stored, including over a rewrite this
-            // file already carries: a second rewrite saved on top of an applied
-            // one is exactly when the reader most needs to be told the file has
-            // not caught up with it yet.
-            visible: descBlock.hasNote && (!descBlock.carriesOurs || descBlock.unapplied)
-            textFormat: Text.PlainText
-            text: {
-              if (!descBlock.unapplied)
-                return "your rewrite, stored here — word for word what SKILL.md already says"
-              var line = "your rewrite, stored here — the agent still reads the description above"
-              if (!root.showTokens || er.view.tokens === null
-                  || er.view.tokens === undefined) return line
-              return line + "  ·  " + root.tokenText(er.view.tokens) + " now, "
-                   + root.tokenText(descBlock.desc.tokensIfApplied) + " if you apply it"
-            }
-            color: root.soft
-            font.family: root.face
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
-
-          // The reassurance that makes applying a reversible act, said on the
-          // row rather than only in the card that asked.
-          Text {
-            width: parent.width
-            visible: descBlock.carriesOurs
-            textFormat: Text.PlainText
-            text: "The author's own description is kept, so return to default puts it back."
-            color: root.soft
-            font.family: root.face
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
-
-          // Where this file is not the one the panel wrote to. Said without
-          // naming a culprit, because there are two ways to arrive here and only
-          // one of them is an edit: a name installed twice has a copy that was
-          // never written to, and it reads the same as a file changed by hand.
-          // Either way the helper answers for the file rather than the name.
-          Text {
-            width: parent.width
-            visible: descBlock.known && descBlock.desc.handEdited === true
-            textFormat: Text.PlainText
-            text: "This copy of SKILL.md does not carry what this panel wrote — another copy of the same name may have it, or this one was changed since. Returning to default asks the helper, which refuses rather than overwrite what it did not write."
-            color: Color.urgent
-            font.family: root.face
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
-
-        }
+        // How far down this card the list is still showing it. The row measures
+        // that edge against its own top and the card starts one row line below
+        // that, so the same edge sits a line height higher in here.
+        readonly property real fold: er.visibleBottom - er.lineHeight
 
         Column {
-          width: parent.width
-          spacing: Style.spacing.xs
-          visible: er.view.attentionText.length > 0
+          id: cardBody
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: parent.top
+          spacing: Style.spacing.lg
 
-          Repeater {
-            model: er.view.attentionText
-            delegate: Text {
-              required property string modelData
+          // The note above the description, and what is true about the description
+          // right now. Every skill an agent can see puts its description into the
+          // system prompt on every turn, used or not, so a shorter one is the
+          // largest lever there is. Changing it is a window of its own, reached
+          // from the corner below; this block only reports.
+          //
+          // Which is why this block has one job above every other: keep two texts
+          // apart. What is in SKILL.md is what the agent loads and what the token
+          // figure beside the row was computed from. The note above it lives in
+          // this plugin's own file, no agent opens that file, and it costs nothing
+          // -- so it is drawn in a voice the description is not, and no figure ever
+          // goes near it. Drawing the two as one string would make the panel lie
+          // about the single number it exists to print.
+          Column {
+            id: descBlock
+            width: parent.width
+            spacing: Style.spacing.sm
+
+            // Through root, so this and describeOf() cannot disagree about what
+            // counts as an answer: the card asks about a view and the picker asks
+            // about a row, and both end up at the same predicate.
+            readonly property var desc: root.describeRecord(er.view.describe)
+            readonly property bool known: descBlock.desc !== null
+              && descBlock.desc !== undefined
+            // Whether anything of the reader's own is stored against this name.
+            readonly property bool hasNote: descBlock.known
+              && String(descBlock.desc.noteText || "") !== ""
+            // Whether this copy of the file carries a description this widget
+            // wrote. `handEdited` is how the helper says the file has changed
+            // since, which makes the text in it nobody's the panel can speak for.
+            readonly property bool carriesOurs: descBlock.known
+              && descBlock.desc.edited === true && descBlock.desc.handEdited !== true
+
+            visible: er.view.description !== "" || descBlock.known
+
+            // The reader's own words, above the text they were written about,
+            // which is the whole of what a note is for. Marked as a quotation
+            // rather than as part of the skill: a rule down its left side, the
+            // slant a quotation takes everywhere else, and a two-word label so
+            // there is no doubt whose sentence this is. No figure anywhere near
+            // it -- nothing reads this but the person who wrote it.
+            Column {
               width: parent.width
+              spacing: Style.spacing.xs
+              visible: descBlock.hasNote
+
+              Text {
+                textFormat: Text.PlainText
+                text: "Note:"
+                color: root.soft
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Item {
+                width: parent.width
+                height: noteBody.implicitHeight
+
+                Rectangle {
+                  id: noteRule
+                  anchors.left: parent.left
+                  anchors.top: parent.top
+                  width: Math.max(1, Style.space(2))
+                  height: noteBody.implicitHeight
+                  radius: width / 2
+                  color: Util.alpha(root.hue, 0.55)
+                }
+
+                Text {
+                  id: noteBody
+                  anchors.left: noteRule.right
+                  anchors.leftMargin: Style.spacing.md
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  textFormat: Text.PlainText
+                  text: descBlock.hasNote ? String(descBlock.desc.noteText) : ""
+                  color: root.readable
+                  font.family: root.face
+                  font.pixelSize: Style.font.bodySmall
+                  font.italic: true
+                  wrapMode: Text.WordWrap
+                  maximumLineCount: 6
+                  elide: Text.ElideRight
+                }
+              }
+            }
+
+            // Whose text this is, above the passage rather than under it, so the
+            // description and the note each sit beneath their own heading and
+            // neither line has to be worked out from what it follows. The figure
+            // beside it is the row's own, unchanged: this is the cost being paid
+            // now, and this line is the only place on the card a figure appears.
+            Text {
+              width: parent.width
+              visible: descBlock.known
               textFormat: Text.PlainText
-              text: "•  " + modelData
-              color: er.broken ? Color.urgent : root.readable
+              text: {
+                var counted = root.showTokens && er.view.tokens !== null
+                  && er.view.tokens !== undefined
+                var now = counted
+                  ? "  ·  " + root.tokenText(er.view.tokens) + " on every turn" : ""
+                if (er.view.description === "")
+                  return "nothing in SKILL.md, so the agent has nothing to match on"
+                return (descBlock.carriesOurs ? "your description, in SKILL.md"
+                                              : "the author's description, in SKILL.md") + now
+              }
+              color: root.soft
+              font.family: root.face
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              wrapMode: Text.WordWrap
+            }
+            // What SKILL.md says, which is what the agent reads. It stays here in
+            // every state and it is never replaced by the note above it.
+            Text {
+              width: parent.width
+              visible: er.view.description !== ""
+              textFormat: Text.PlainText
+              text: er.view.description
+              color: root.readable
+              font.family: root.face
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+              maximumLineCount: 4
+              elide: Text.ElideRight
+            }
+
+
+            // The reassurance that makes a rewrite a reversible act, said on the
+            // row rather than only in the card that asked.
+            Text {
+              width: parent.width
+              visible: descBlock.carriesOurs
+              textFormat: Text.PlainText
+              text: "The author's own description is kept, so return to default puts it back."
+              color: root.soft
               font.family: root.face
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
-          }
-        }
 
-        // Where the state lives. This panel does not write these switches, so the
-        // useful thing it can say is which file holds one and what it says now.
-        Column {
-          width: parent.width
-          spacing: Style.spacing.xs
-          visible: er.view.switches.length > 0
-
-          Repeater {
-            model: er.view.switches
-            delegate: Item {
-              required property var modelData
+            // Where this file no longer says what the panel wrote into it. Said
+            // without naming a culprit, because the panel did not see it happen
+            // and the consequence is the same either way: the author's text cannot
+            // be put back over something this panel cannot account for.
+            Text {
               width: parent.width
-              height: Style.space(15)
-
-              Text {
-                anchors.left: parent.left
-                width: Style.space(86)
-                textFormat: Text.PlainText
-                text: modelData.tool
-                color: root.soft
-                font.family: root.face
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
-              }
-
-              Text {
-                anchors.left: parent.left
-                anchors.leftMargin: Style.space(90)
-                width: Style.space(120)
-                textFormat: Text.PlainText
-                text: modelData.value
-                color: modelData.value === "off" ? root.soft : root.fg
-                font.family: root.face
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
-              }
-
-              Text {
-                anchors.left: parent.left
-                anchors.leftMargin: Style.space(214)
-                anchors.right: parent.right
-                textFormat: Text.PlainText
-                text: modelData.file
-                color: root.soft
-                font.family: root.face
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideMiddle
-              }
-            }
-          }
-        }
-
-        Column {
-          width: parent.width
-          spacing: Style.spacing.xs
-          visible: er.view.mounts.length > 0
-
-          Repeater {
-            model: er.view.mounts
-            delegate: Item {
-              id: mountRow
-              required property var modelData
-              width: parent.width
-              height: Style.space(17)
-
-              readonly property bool openable: String(modelData.abs || "").charAt(0) === "/"
-
-              // A path on screen that you cannot get to is a riddle. Clicking it
-              // opens the directory in whatever the desktop uses for one.
-              Rectangle {
-                anchors.fill: parent
-                anchors.leftMargin: -Style.spacing.xs
-                anchors.rightMargin: -Style.spacing.xs
-                radius: Style.cornerRadius
-                visible: mountHover.hovered && mountRow.openable
-                color: Util.alpha(root.fg, 0.08)
-              }
-
-              HoverHandler {
-                id: mountHover
-                cursorShape: mountRow.openable ? Qt.PointingHandCursor : Qt.ArrowCursor
-              }
-              TapHandler {
-                onTapped: if (mountRow.openable) er.revealRequested(String(mountRow.modelData.abs))
-              }
-
-              Text {
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                width: Style.space(86)
-                textFormat: Text.PlainText
-                text: modelData.tool
-                color: root.soft
-                font.family: root.face
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
-              }
-
-              Text {
-                anchors.left: parent.left
-                anchors.leftMargin: Style.space(90)
-                anchors.right: linkTag.left
-                anchors.rightMargin: Style.spacing.md
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: modelData.path
-                color: mountHover.hovered && mountRow.openable ? root.fg : root.readable
-                font.family: root.face
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideMiddle
-              }
-
-              Text {
-                id: linkTag
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: modelData.link
-                color: modelData.link === "symlink" ? root.hue : root.soft
-                font.family: root.face
-                font.pixelSize: Style.font.caption
-              }
-            }
-          }
-        }
-
-        Column {
-          width: parent.width
-          spacing: Style.spacing.xs
-          visible: er.view.peers.length > 0
-
-          Repeater {
-            model: er.view.peers
-            delegate: Text {
-              required property string modelData
-              width: parent.width
+              visible: descBlock.known && descBlock.desc.handEdited === true
               textFormat: Text.PlainText
-              text: "drifted from  " + modelData
+              text: "SKILL.md has changed since this panel wrote its description, so the author's own cannot be put back from here."
               color: Color.urgent
               font.family: root.face
               font.pixelSize: Style.font.caption
-              elide: Text.ElideMiddle
+              wrapMode: Text.WordWrap
             }
-          }
-        }
 
-        // Said, not warned about. Two copies of one release, each compiled for
-        // the agent that reads it, is the careful thing to do rather than a
-        // mistake -- but it is still worth knowing that the file the other agent
-        // loads is not this one.
-        Column {
-          width: parent.width
-          spacing: Style.spacing.xs
-          visible: er.view.variants.length > 0
-
-          Repeater {
-            model: er.view.variants
-            delegate: Text {
-              required property string modelData
+            // Which copy holds the edit, when it is not this one. A name can be
+            // installed twice and only one of the two carries what was written.
+            Text {
               width: parent.width
+              visible: descBlock.known && String(descBlock.desc.otherCopy || "") !== ""
               textFormat: Text.PlainText
-              text: (er.view.declaredVersion !== ""
-                ? "also built for another agent, same " + er.view.declaredVersion + "  "
-                : "also built for another agent  ") + modelData
+              text: descBlock.known
+                ? "The edit under this name is in " + String(descBlock.desc.otherCopy) : ""
               color: root.soft
               font.family: root.face
               font.pixelSize: Style.font.caption
-              elide: Text.ElideMiddle
-            }
-          }
-        }
-
-        // Which shelf this is on, and the way to change it. A classifier that
-        // reads descriptions will put some things in the wrong place -- it has
-        // no idea what you use a skill for -- so the correction has to be one
-        // click from the thing being corrected, not somewhere else in the panel.
-        // Skills only: an MCP server has no shelf to be on.
-        Row {
-          width: parent.width
-          spacing: Style.spacing.md
-          visible: er.view.kind === "skill"
-
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            // The same column the facts below use, so the card has one grid.
-            width: Style.space(86)
-            textFormat: Text.PlainText
-            text: "category"
-            color: root.soft
-            font.family: root.face
-            font.pixelSize: Style.font.caption
-          }
-
-          Rectangle {
-            id: shelfChip
-            anchors.verticalCenter: parent.verticalCenter
-            readonly property bool unfiled: er.view.category === "unsorted"
-
-            width: shelfChipRow.implicitWidth + Style.space(18)
-            height: Style.space(22)
-            radius: height / 2
-            color: shelfHover.hovered ? Util.alpha(root.fg, 0.18)
-                                      : Util.alpha(root.fg, 0.08)
-
-            Row {
-              id: shelfChipRow
-              anchors.centerIn: parent
-              spacing: Style.spacing.sm
-
-              Rectangle {
-                anchors.verticalCenter: parent.verticalCenter
-                width: Style.space(7)
-                height: width
-                radius: width / 2
-                color: root.categoryColourFor(er.view.category)
-              }
-
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: root.categoryLabelFor(er.view.category)
-                color: shelfHover.hovered ? root.fg : root.readable
-                font.family: root.face
-                font.pixelSize: Style.font.caption
-              }
-
-              // Says what to do, but only when there is something to do. On a
-              // shelved skill the chip is already an answer and does not need to
-              // shout that it is also a button.
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                visible: shelfChip.unfiled || shelfHover.hovered
-                textFormat: Text.PlainText
-                text: shelfChip.unfiled ? "pick one" : "change"
-                color: root.soft
-                font.family: root.face
-                font.pixelSize: Style.font.caption
-                font.italic: true
-              }
+              wrapMode: Text.WordWrap
             }
 
-            HoverHandler { id: shelfHover; cursorShape: Qt.PointingHandCursor }
-            TapHandler { onTapped: er.shelveRequested() }
           }
-        }
 
-        Row {
-          width: parent.width
-          spacing: Style.spacing.md
-          visible: er.view.invocations.length > 0
-
-          Repeater {
-            model: er.view.invocations
-            delegate: Rectangle {
-              required property var modelData
-              required property int index
-              // Only the first invocation opens the picker, because that is the
-              // one Ctrl+C copies; the others are the same skill's name in the
-              // other agents' spelling and take no arguments there.
-              readonly property bool picks: index === 0 && er.argOptions.length > 0
-
-              width: invText.implicitWidth + Style.space(14)
-              height: Style.space(20)
-              radius: height / 2
-              color: invHover.hovered && modelData.ok
-                ? Style.hoverFillFor(root.fg, root.hue) : Util.alpha(root.fg, 0.10)
-
-              Text {
-                id: invText
-                anchors.centerIn: parent
-                textFormat: Text.PlainText
-                text: modelData.text + (parent.picks ? " \u2026" : "")
-                color: modelData.ok ? root.fg : root.soft
-                font.family: root.face
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              HoverHandler { id: invHover; cursorShape: Qt.PointingHandCursor }
-              TapHandler {
-                onTapped: modelData.ok
-                  ? er.copyRequested(modelData.text)
-                  : root.flash("That invocation has characters a prompt would not take safely")
-              }
-            }
-          }
-        }
-
-        Column {
-          width: parent.width
-          spacing: Style.spacing.xs
-
-          Repeater {
-            model: er.view.facts
-            delegate: Item {
-              required property var modelData
-              width: parent.width
-              height: modelData.value === "" ? 0 : Style.space(14)
-              visible: modelData.value !== ""
-
-              Text {
-                anchors.left: parent.left
-                width: Style.space(86)
-                textFormat: Text.PlainText
-                text: modelData.label
-                color: root.soft
-                font.family: root.face
-                font.pixelSize: Style.font.caption
-              }
-
-              Text {
-                anchors.left: parent.left
-                anchors.leftMargin: Style.space(90)
-                anchors.right: parent.right
-                textFormat: Text.PlainText
-                text: modelData.value
-                color: root.soft
-                font.family: root.face
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
-              }
-            }
-          }
-        }
-
-        // Everything this card can do to the skill it is about, in its bottom
-        // corner. None of it goes on the row line: that line carries six
-        // columns the row, the group header and the legend all have to agree
-        // on, and a control there would be a seventh that only some rows could
-        // fill.
-        //
-        // `edit` opens the window that owns the description -- the note you
-        // have written instead of it, what each of them costs, and the two acts
-        // that change a file. `delete` opens the question ^Del asks, so a
-        // pointer reaches what the keyboard already could. Where the helper
-        // says this row is not the panel's to remove, its own answer stands in
-        // the control's place, because this file does not draw a control it
-        // cannot honour.
-        //
-        // The alarm colour is not spent here. It belongs to the answer that
-        // cannot be taken back, one card further on; a chip that opens a
-        // question is not that answer.
-        Column {
-          id: cardActions
-          width: parent.width
-          spacing: Style.spacing.xs
-
-          readonly property var removal: er.view.removal
-          readonly property string mode: cardActions.removal && cardActions.removal.mode
-            ? String(cardActions.removal.mode) : ""
-          // Deliberately not Array.isArray, for the reason pickerOptions gives:
-          // a nested array that has been through a `var` property and a
-          // ListView model is a QVariantList, which still has a length and
-          // still answers false to Array.isArray.
-          readonly property bool removable:
-            (cardActions.mode === "trash" || cardActions.mode === "unlink")
-            && !!cardActions.removal.targets
-            && typeof cardActions.removal.targets.length === "number"
-            && cardActions.removal.targets.length > 0
-          readonly property bool refused:
-            cardActions.mode === "refuse" || cardActions.mode === "delegate"
-
-          // Nothing to say on a row with no description of its own, no removal
-          // plan and nothing to copy -- an MCP server is all three -- so the
-          // block is absent rather than an empty band. Tested on what the row
-          // is rather than on what has just happened to it, so the card cannot
-          // change height because something was copied.
-          visible: descBlock.known || cardActions.mode !== ""
-            || er.view.invocations.length > 0
-
-          // The copy tick, still in this corner and still only once the
-          // clipboard write has been attempted and reported back, never on the
-          // keystroke. It was on the row line for a while, where it covered the
-          // token count and the usage count, and then in the footer, a panel's
-          // height away from the thing it was about; this corner is where it
-          // stopped being in anything's way. The controls have joined it here
-          // and it sits above them, because a confirmation that something is
-          // already in the clipboard must not take the place a reader is going
-          // to look for the button that removes a directory.
-          //
-          // Faded rather than hidden, so its slot is held open whether or not
-          // it is standing in it and the controls below it never move.
-          Row {
-            anchors.right: parent.right
+          Column {
+            width: parent.width
             spacing: Style.spacing.xs
-            opacity: er.copied ? 1 : 0
+            visible: er.view.attentionText.length > 0
+
+            Repeater {
+              model: er.view.attentionText
+              delegate: Text {
+                required property string modelData
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "•  " + modelData
+                color: er.broken ? Color.urgent : root.readable
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+          }
+
+          // Where the state lives. This panel does not write these switches, so the
+          // useful thing it can say is which file holds one and what it says now.
+          Column {
+            width: parent.width
+            spacing: Style.spacing.xs
+            visible: er.view.switches.length > 0
+
+            Repeater {
+              model: er.view.switches
+              delegate: Item {
+                required property var modelData
+                width: parent.width
+                height: Style.space(15)
+
+                Text {
+                  anchors.left: parent.left
+                  width: Style.space(86)
+                  textFormat: Text.PlainText
+                  text: modelData.tool
+                  color: root.soft
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(90)
+                  width: Style.space(120)
+                  textFormat: Text.PlainText
+                  text: modelData.value
+                  color: modelData.value === "off" ? root.soft : root.fg
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(214)
+                  anchors.right: parent.right
+                  textFormat: Text.PlainText
+                  text: modelData.file
+                  color: root.soft
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideMiddle
+                }
+              }
+            }
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.spacing.xs
+            visible: er.view.mounts.length > 0
+
+            Repeater {
+              model: er.view.mounts
+              delegate: Item {
+                id: mountRow
+                required property var modelData
+                width: parent.width
+                height: Style.space(17)
+
+                readonly property bool openable: String(modelData.abs || "").charAt(0) === "/"
+
+                // A path on screen that you cannot get to is a riddle. Clicking it
+                // opens the directory in whatever the desktop uses for one.
+                Rectangle {
+                  anchors.fill: parent
+                  anchors.leftMargin: -Style.spacing.xs
+                  anchors.rightMargin: -Style.spacing.xs
+                  radius: Style.cornerRadius
+                  visible: mountHover.hovered && mountRow.openable
+                  color: Util.alpha(root.fg, 0.08)
+                }
+
+                HoverHandler {
+                  id: mountHover
+                  cursorShape: mountRow.openable ? Qt.PointingHandCursor : Qt.ArrowCursor
+                }
+                TapHandler {
+                  onTapped: if (mountRow.openable) er.revealRequested(String(mountRow.modelData.abs))
+                }
+
+                Text {
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(86)
+                  textFormat: Text.PlainText
+                  text: modelData.tool
+                  color: root.soft
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(90)
+                  anchors.right: linkTag.left
+                  anchors.rightMargin: Style.spacing.md
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: modelData.path
+                  color: mountHover.hovered && mountRow.openable ? root.fg : root.readable
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideMiddle
+                }
+
+                Text {
+                  id: linkTag
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: modelData.link
+                  color: modelData.link === "symlink" ? root.hue : root.soft
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.spacing.xs
+            visible: er.view.peers.length > 0
+
+            Repeater {
+              model: er.view.peers
+              delegate: Text {
+                required property string modelData
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "drifted from  " + modelData
+                color: Color.urgent
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideMiddle
+              }
+            }
+          }
+
+          // Said, not warned about. Two copies of one release, each compiled for
+          // the agent that reads it, is the careful thing to do rather than a
+          // mistake -- but it is still worth knowing that the file the other agent
+          // loads is not this one.
+          Column {
+            width: parent.width
+            spacing: Style.spacing.xs
+            visible: er.view.variants.length > 0
+
+            Repeater {
+              model: er.view.variants
+              delegate: Text {
+                required property string modelData
+                width: parent.width
+                textFormat: Text.PlainText
+                text: (er.view.declaredVersion !== ""
+                  ? "also built for another agent, same " + er.view.declaredVersion + "  "
+                  : "also built for another agent  ") + modelData
+                color: root.soft
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideMiddle
+              }
+            }
+          }
+
+          // Which shelf this is on, and the way to change it. A classifier that
+          // reads descriptions will put some things in the wrong place -- it has
+          // no idea what you use a skill for -- so the correction has to be one
+          // click from the thing being corrected, not somewhere else in the panel.
+          // Skills only: an MCP server has no shelf to be on.
+          Row {
+            id: categoryRow
+            width: parent.width
+            spacing: Style.spacing.md
+            visible: er.view.kind === "skill"
 
             Text {
               anchors.verticalCenter: parent.verticalCenter
+              // The same column the facts below use, so the card has one grid.
+              width: Style.space(86)
               textFormat: Text.PlainText
-              text: "✓"
-              color: root.hue
+              text: "category"
+              color: root.soft
               font.family: root.face
               font.pixelSize: Style.font.caption
-              font.bold: true
             }
 
-            Text {
+            Rectangle {
+              id: shelfChip
               anchors.verticalCenter: parent.verticalCenter
-              textFormat: Text.PlainText
-              text: "copied"
-              color: root.hue
-              font.family: root.face
-              font.pixelSize: Style.font.caption
+              readonly property bool unfiled: er.view.category === "unsorted"
+
+              width: shelfChipRow.implicitWidth + Style.space(18)
+              height: Style.space(22)
+              radius: height / 2
+              color: shelfHover.hovered ? Util.alpha(root.fg, 0.18)
+                                        : Util.alpha(root.fg, 0.08)
+
+              Row {
+                id: shelfChipRow
+                anchors.centerIn: parent
+                spacing: Style.spacing.sm
+
+                Rectangle {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(7)
+                  height: width
+                  radius: width / 2
+                  color: root.categoryColourFor(er.view.category)
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: root.categoryLabelFor(er.view.category)
+                  color: shelfHover.hovered ? root.fg : root.readable
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                }
+
+                // Says what to do, but only when there is something to do. On a
+                // shelved skill the chip is already an answer and does not need to
+                // shout that it is also a button.
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: shelfChip.unfiled || shelfHover.hovered
+                  textFormat: Text.PlainText
+                  text: shelfChip.unfiled ? "pick one" : "change"
+                  color: root.soft
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                  font.italic: true
+                }
+              }
+
+              HoverHandler { id: shelfHover; cursorShape: Qt.PointingHandCursor }
+              TapHandler { onTapped: er.shelveRequested() }
             }
           }
 
           Row {
-            anchors.right: parent.right
-            spacing: Style.spacing.sm
+            id: invocationRow
+            width: parent.width
+            spacing: Style.spacing.md
+            visible: er.view.invocations.length > 0
+
+            Repeater {
+              model: er.view.invocations
+              delegate: Rectangle {
+                required property var modelData
+                required property int index
+                // Only the first invocation opens the picker, because that is the
+                // one Ctrl+C copies; the others are the same skill's name in the
+                // other agents' spelling and take no arguments there.
+                readonly property bool picks: index === 0 && er.argOptions.length > 0
+
+                width: invText.implicitWidth + Style.space(14)
+                height: Style.space(20)
+                radius: height / 2
+                color: invHover.hovered && modelData.ok
+                  ? Style.hoverFillFor(root.fg, root.hue) : Util.alpha(root.fg, 0.10)
+
+                Text {
+                  id: invText
+                  anchors.centerIn: parent
+                  textFormat: Text.PlainText
+                  text: modelData.text + (parent.picks ? " \u2026" : "")
+                  color: modelData.ok ? root.fg : root.soft
+                  font.family: root.face
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                HoverHandler { id: invHover; cursorShape: Qt.PointingHandCursor }
+                TapHandler {
+                  onTapped: modelData.ok
+                    ? er.copyRequested(modelData.text)
+                    : root.flash("That invocation has characters a prompt would not take safely")
+                }
+              }
+            }
+          }
+
+          Column {
+            id: factsColumn
+            width: parent.width
+            spacing: Style.spacing.xs
+
+            Repeater {
+              model: er.view.facts
+              delegate: Item {
+                id: factRow
+                required property var modelData
+                required property int index
+                // The controls ride on the last fact rather than opening a row of
+                // their own beneath it. That row cost a card's height of empty
+                // above the only two things here anybody presses, and pinned them
+                // to a margin neither chip is wide enough to have earned.
+                //
+                // They are no longer drawn in here -- a delegate a Column places
+                // and gives one line to cannot follow a scroll -- so what is left
+                // of that arrangement is this row holding the line open at the
+                // height they need and saying where it is. The height is theirs
+                // whether or not they are standing on it: a card that changed
+                // height as it was scrolled would be moving the list underneath
+                // the scroll.
+                readonly property bool carriesControls:
+                  index === er.view.facts.length - 1 && cardActions.anythingToDo
+                width: parent.width
+                height: modelData.value === "" && !factRow.carriesControls ? 0
+                  : (factRow.carriesControls ? Style.space(26) : Style.space(14))
+                visible: modelData.value !== "" || factRow.carriesControls
+
+                // Where the controls come to rest, in the card's coordinates.
+                // This row is the only thing that knows: it is a Repeater
+                // delegate, and nothing outside the Repeater can name one to ask.
+                Binding {
+                  when: factRow.carriesControls
+                  target: card
+                  property: "restY"
+                  value: factsColumn.y + factRow.y
+                    + Math.round((factRow.height - controls.height) / 2)
+                }
+
+                Text {
+                  anchors.left: parent.left
+                  width: Style.space(86)
+                  textFormat: Text.PlainText
+                  text: modelData.label
+                  color: root.soft
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(90)
+                  anchors.right: parent.right
+                  // The room is kept only while the controls are standing in it.
+                  // Once they float they are over the card carrying their own
+                  // ground, and a `tags` line that went on eliding around
+                  // something that had left the row would be eliding for nothing.
+                  anchors.rightMargin: factRow.carriesControls && controls.parked
+                    ? controls.width + Style.spacing.md : 0
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: modelData.value
+                  color: root.soft
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+              }
+            }
+
+
+          // Everything this card can do to the skill it is about, in its bottom
+          // corner. None of it goes on the row line: that line carries six
+          // columns the row, the group header and the legend all have to agree
+          // on, and a control there would be a seventh that only some rows could
+          // fill.
+          //
+          // `edit` opens the window that owns the description -- the note you
+          // have written instead of it, what each of them costs, and the two acts
+          // that change a file. `delete` opens the question ^Del asks, so a
+          // pointer reaches what the keyboard already could. Where the helper
+          // says this row is not the panel's to remove, its own answer stands in
+          // the control's place, because this file does not draw a control it
+          // cannot honour.
+          //
+          // The alarm colour is not spent here. It belongs to the answer that
+          // cannot be taken back, one card further on; a chip that opens a
+          // question is not that answer.
+          Column {
+            id: cardActions
+            width: parent.width
+            spacing: Style.spacing.xs
+
+            readonly property var removal: er.view.removal
+            readonly property string mode: cardActions.removal && cardActions.removal.mode
+              ? String(cardActions.removal.mode) : ""
+            // Deliberately not Array.isArray, for the reason pickerOptions gives:
+            // a nested array that has been through a `var` property and a
+            // ListView model is a QVariantList, which still has a length and
+            // still answers false to Array.isArray.
+            readonly property bool removable:
+              (cardActions.mode === "trash" || cardActions.mode === "unlink")
+              && !!cardActions.removal.targets
+              && typeof cardActions.removal.targets.length === "number"
+              && cardActions.removal.targets.length > 0
+            readonly property bool refused:
+              cardActions.mode === "refuse" || cardActions.mode === "delegate"
+            // Whether the last fact row has anything to carry. Asked there rather
+            // than answered twice.
+            readonly property bool anythingToDo:
+              descBlock.known || cardActions.removable
+
+            // Nothing to say on a row with no description of its own, no removal
+            // plan and nothing to copy -- an MCP server is all three -- so the
+            // block is absent rather than an empty band. Tested on what the row
+            // is rather than on what has just happened to it, so the card cannot
+            // change height because something was copied.
+            visible: descBlock.known || cardActions.mode !== ""
+              || er.view.invocations.length > 0
+
+            // The copy tick, still in this corner and still only once the
+            // clipboard write has been attempted and reported back, never on the
+            // keystroke. It was on the row line for a while, where it covered the
+            // token count and the usage count, and then in the footer, a panel's
+            // height away from the thing it was about; this corner is where it
+            // stopped being in anything's way. It keeps the corner to itself:
+            // the two controls come to rest on the fact row above it, because a
+            // confirmation that something is already in the clipboard must not
+            // take the place a reader is going to look for the button that
+            // removes a directory.
+            //
+            // Faded rather than hidden, so its slot is held open whether or not
+            // it is standing in it and nothing on this card moves because
+            // something was copied.
+            Row {
+              anchors.right: parent.right
+              spacing: Style.spacing.xs
+              opacity: er.copied ? 1 : 0
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: "✓"
+                color: root.hue
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: "copied"
+                color: root.hue
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+              }
+            }
 
             // The helper's verdict where the chip would be. `refuse` is a
-            // directory this user does not own or one an agent rewrites on
-            // every launch; `delegate` is a skill a plugin brought in, and the
-            // tool that installed it is the one that can take it away.
+            // directory this user does not own or one an agent rewrites on every
+            // launch; `delegate` is a skill a plugin brought in, and the tool that
+            // installed it is the one that can take it away. The chips themselves
+            // rest on the last fact's line and travel up the card from there, so
+            // this sentence has the corner to itself either way.
             Text {
-              anchors.verticalCenter: parent.verticalCenter
+              anchors.right: parent.right
               visible: cardActions.refused
               textFormat: Text.PlainText
               text: cardActions.mode === "delegate"
@@ -3889,6 +4213,82 @@ Panel {
               font.family: root.face
               font.pixelSize: Style.font.caption
             }
+          }
+          }
+        }
+
+        // The two things this card can do to the thing it is about. Their place
+        // is the last fact row and that is still where they come to rest -- but
+        // a card can be taller than the list is, and a control you have to
+        // scroll to the end of a long card to reach is one you have to go
+        // looking for. So they ride the bottom edge of the viewport between two
+        // bounds: never above the category row, never below the line they rest
+        // on. When the whole card is on screen both clamps hold them at rest and
+        // this is the card it has always been.
+        //
+        // Out of the fact row and into the card because a Repeater delegate
+        // cannot float over anything: the Column above it decides where it goes
+        // and it is one line tall. This is one item positioned in the card
+        // instead, and the row it parks on reserves its width for exactly as
+        // long as it is standing there.
+        //
+        // Nothing here may move the list. It reads how far the viewport reaches
+        // and writes only its own y; the fact row keeps its height whether or
+        // not the controls are on it, so a card cannot change height as it is
+        // scrolled and pull the list out from under the scroll.
+        Item {
+          id: controls
+          anchors.right: parent.right
+          width: controlRow.implicitWidth
+          height: controlRow.implicitHeight
+          visible: cardActions.anythingToDo
+
+          // Just inside the bottom edge of the viewport, far enough in that they
+          // are not sitting on the line the list clips at.
+          readonly property real reach:
+            card.fold - controls.height - Style.spacing.md
+          // Standing on the fact row rather than floating over the card. Asked
+          // once here, because two things follow from it and they have to agree:
+          // the row keeps the space clear, and the ground below goes away.
+          readonly property bool parked: controls.reach >= card.restY
+
+          y: Math.max(card.ceiling, Math.min(card.restY, controls.reach))
+
+          // A ground, for as long as they are over the card's own text. Both
+          // chips are a translucent fill over whatever is behind them, which on
+          // a mount path is a line of text read straight through two buttons.
+          // The fill the picker puts under a question is the one surface in this
+          // file that already means "what is underneath does not read through",
+          // so it is the one used here rather than a shadow this palette has
+          // never drawn. Parked, the row has already made the room and there is
+          // nothing to cover.
+          Rectangle {
+            anchors.fill: parent
+            anchors.leftMargin: -Style.spacing.lg
+            anchors.topMargin: -Style.spacing.xs
+            anchors.bottomMargin: -Style.spacing.xs
+            radius: height / 2
+            visible: !controls.parked
+            color: Color.popups.background
+
+            // The card is not the panel: it is the panel's background with the
+            // row's own fill laid over it, so a ground painted in the panel
+            // colour alone comes out lighter than the card it is sitting on and
+            // reads as a plate from somewhere else. The same two layers in the
+            // same order composite to the same colour, and the fill is chosen
+            // the way CursorSurface chooses it so the ground follows the row
+            // under the cursor rather than drifting off it.
+            Rectangle {
+              anchors.fill: parent
+              radius: parent.radius
+              color: er.hasCursor ? Style.hoverFillFor(root.fg, root.hue)
+                                  : Style.selectedFillFor(root.fg, root.hue)
+            }
+          }
+
+          Row {
+            id: controlRow
+            spacing: Style.spacing.sm
 
             CardChip {
               visible: descBlock.known
@@ -3947,33 +4347,48 @@ Panel {
           if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             root.pickerConfirm(); return
           }
-          // The description editor is a field rather than a grid, and until it
+          // The description editor is two fields rather than a grid, and until it
           // asks whether to save it draws no chips at all. Everything below
           // steps through a list that is not there, and every printable key
-          // belongs to the text, so this branch takes the keyboard before any
-          // of it. Its own cap and its own sanitiser: `pickerText` is a name
-          // held to thirty-two characters, and a description is a paragraph
-          // that must keep the space you just pressed.
+          // belongs to one of the two texts, so this branch takes the keyboard
+          // before any of it. Its own cap and its own sanitiser: `pickerText` is
+          // a name held to thirty-two characters, and both of these run to a
+          // paragraph that must keep the space just pressed.
           if (root.pickerMode === "describe" && !root.describeAsking) {
-            // The two acts this window offers besides saving, on the letters
-            // the list gives them, taken before anything can read them as text.
-            // Guarded rather than answered: a refusal here would be flashed to
-            // the message strip, which this overlay is drawn over, so the key
-            // does nothing wherever the control beside it is not drawn and the
-            // sentence in its place is what says why.
-            if (ctrl && event.key === Qt.Key_A) {
-              if (root.describeApplyable() && !root.describeDirty)
-                root.openApplyPicker(root.pickerRow)
+            // The one key that moves the caret between the two fields, taken
+            // first because everything after it edits whichever field has it.
+            // Tab is what a form has always used and it is otherwise unclaimed
+            // in this mode: the chip stepping it drives elsewhere runs below
+            // this branch, and the panel switch it drives outside the overlay
+            // runs after the overlay has returned.
+            if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+              root.describeToggleFocus(); return
+            }
+            // Returning to default, on the letter the list gives it, taken
+            // before anything can read it as text. Guarded rather than answered:
+            // a refusal here would be flashed to the message strip, which this
+            // overlay is drawn over, so the key does nothing wherever the control
+            // beside it is not drawn and the sentence in its place is what says
+            // why.
+            if (ctrl && event.key === Qt.Key_Z) { root.describeReset(); return }
+            if (root.describeFocus === "description") {
+              if (Util.editsFilter(event, root.describeText)) {
+                root.describeText = Util.editedFilter(event, root.describeText)
+                return
+              }
+              if (!ctrl && event.text && event.text.length === 1
+                  && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127)
+                root.describeText = root.typable(root.describeText + event.text,
+                                                 root.describeLimit)
               return
             }
-            if (ctrl && event.key === Qt.Key_Z) { root.describeReset(); return }
-            if (Util.editsFilter(event, root.describeText)) {
-              root.describeText = Util.editedFilter(event, root.describeText)
+            if (Util.editsFilter(event, root.describeNote)) {
+              root.describeNote = Util.editedFilter(event, root.describeNote)
               return
             }
             if (!ctrl && event.text && event.text.length === 1
                 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127)
-              root.describeText = root.typable(root.describeText + event.text,
+              root.describeNote = root.typable(root.describeNote + event.text,
                                                root.describeLimit)
             return
           }
@@ -4005,10 +4420,10 @@ Panel {
           // A removal is answered, not typed at: the two chips are the whole
           // vocabulary, and a letter that quietly filled a field nothing draws
           // would be a keystroke with no effect anybody can see. The same is
-          // true of the two description questions, and of the editor once it
-          // has stopped being a field and started asking one.
-          if (root.pickerMode === "remove" || root.pickerMode === "apply"
-              || root.pickerMode === "reset" || root.describeAsking) return
+          // true of the return-to-default question, and of the editor once it
+          // has stopped being two fields and started asking one.
+          if (root.pickerMode === "remove" || root.pickerMode === "reset"
+              || root.describeAsking) return
 
           // Typing means different things in the three modes, and each is the
           // obvious one. Filtering a category list, naming the category being
@@ -4133,14 +4548,13 @@ Panel {
           // driven entirely by keys is most of them.
           if (letter === "e") { root.openShelvesPicker(); event.accepted = true; return }
           if (letter === "o") { root.revealCurrent(); event.accepted = true; return }
-          // Three letters nothing here was using: d for the description, a for
-          // applying it, z for going back to what the author wrote. Each one
-          // opens a screen rather than doing anything, which is what lets ^A sit
-          // among the letters at all -- it is the only one that ends in a write
-          // to a file this panel did not create, and the question it opens has
-          // the cursor on the answer that leaves the file alone.
+          // Two letters nothing here was using: d for the note and description,
+          // z for going back to what the author wrote. Each opens a screen
+          // rather than doing anything, which is what lets ^Z sit among the
+          // letters at all -- it is the one that ends in a write to a file this
+          // panel did not create, and the question it opens has the cursor on
+          // the answer that leaves the file alone.
           if (letter === "d") { root.describeCurrent(); event.accepted = true; return }
-          if (letter === "a") { root.applyCurrent(); event.accepted = true; return }
           if (letter === "z") { root.resetCurrent(); event.accepted = true; return }
           return
         }
@@ -5175,6 +5589,14 @@ Panel {
               view: rowHost.modelData.view
               hasCursor: root.cursorActive && root.selectedIndex === rowHost.index
               expanded: root.expandedKey === rowHost.modelData.key
+              // How far down this row the viewport still reaches. Handed down
+              // rather than worked out inside the row, because the scroll offset
+              // and the view's height belong to the list and the row's place in
+              // the content belongs to this delegate, and only here are all
+              // three in one scope. It is read and never written back: the view
+              // steers itself, as the note above says, and a card that answered
+              // a scroll by scrolling is the pause-then-jump all over again.
+              visibleBottom: list.contentY + list.height - rowHost.y
               onEntered: { root.cursorActive = true; root.selectedIndex = rowHost.index }
               onActivated: {
                 root.cursorActive = true
@@ -5245,18 +5667,16 @@ Panel {
             // The promise changes with the row, because on a row that documents
             // actions Ctrl+C does not copy: it asks which one.
             parts.push(picks ? "^C to pick an action" : "^C to copy")
-            // Each of the three only where it has something to do, the same
-            // rule the removal key follows. Applying is offered only where the
-            // helper has said it would be allowed, and returning to default
-            // only where there is something of yours to return from.
+            // Each of the two only where it has something to do, the same rule
+            // the removal key follows. Returning to default is offered only
+            // where this file carries a description the panel wrote and the
+            // helper would let it be put back.
             var dsc = cur && cur.rowType !== "header" ? root.describeOf(cur) : null
             // Named for the control it opens rather than for what you do in
             // there. The card's chip says edit, this key opens the same window,
             // and one act with two names is one the reader has to map.
             if (dsc) parts.push("^D to edit")
-            if (root.describeUnapplied(dsc) && dsc.canApply === true)
-              parts.push("^A to apply")
-            if (dsc && dsc.state !== "author") parts.push("^Z to default")
+            if (root.describeResettableFor(dsc)) parts.push("^Z to default")
             // Only on a row that has an answer to the question. A destructive
             // key nobody has been told about is either never used or used by
             // accident, and this one is only ever offered where the helper has
@@ -5271,10 +5691,10 @@ Panel {
           color: root.soft
           font.family: root.face
           font.pixelSize: Style.font.caption
-          // Wraps to a second line before it elides. On a row that has a
-          // description you have rewritten this line carries three more
-          // promises than it used to, and a hint cut off at the right edge is
-          // the panel keeping a key to itself.
+          // Wraps to a second line before it elides. On a row whose description
+          // this panel wrote, this line carries two more promises than it does
+          // elsewhere, and a hint cut off at the right edge is the panel keeping
+          // a key to itself.
           wrapMode: Text.WordWrap
           maximumLineCount: 2
           elide: Text.ElideRight
@@ -5317,18 +5737,18 @@ Panel {
         readonly property bool shelving: root.pickerMode === "category"
         readonly property bool managing: root.pickerMode === "shelves"
         readonly property bool removing: root.pickerMode === "remove"
-        // The three description screens. `describing` is the field you type in;
-        // the other two are questions with two answers each, laid out exactly
-        // as the removal question is, because they are the same shape.
+        // The two description screens. `describing` is the pair of fields typed
+        // into; `restoring` is a question with two answers, laid out exactly as
+        // the removal question is, because it is the same shape.
         readonly property bool describing: root.pickerMode === "describe"
-        readonly property bool applying: root.pickerMode === "apply"
         readonly property bool restoring: root.pickerMode === "reset"
         // Everything that draws the label-and-value grid under its question.
-        // The editor is one of them now: it has two texts and two figures to
-        // keep apart, and the grid the other cards state theirs in is the one
-        // place in this panel a reader has already learned to read them.
-        readonly property bool detailed: picker.removing || picker.applying
-          || picker.restoring || picker.describing
+        // The editor is one of them: which copy of a name it is about, and the
+        // caveats on writing it, are facts rather than fields, and the grid the
+        // other cards state theirs in is the one place in this panel a reader
+        // has already learned to read them.
+        readonly property bool detailed: picker.removing || picker.restoring
+          || picker.describing
         // Both of these draw a shelf: a colour, a name and how much is on it.
         // One of them files a skill and the other opens the shelf for editing,
         // which is a difference in what Enter does, not in what a shelf is.
@@ -5402,19 +5822,16 @@ Panel {
                 if (!root.pickerOpen || !root.pickerRow) return ""
                 var n = root.clean(root.pickerRow.view.name, 60)
                 if (root.describeAsking) return n + "  ·  unsaved changes"
-                if (picker.describing) return n + "  ·  rewrite the description"
-                // The same three-way shape the removal heading has, and for the
-                // same reason: two of the three answers the helper can give are
-                // not a write at all, and this is where that is said first.
-                if (picker.applying) return root.describeApplyable()
-                  ? n + "  ·  write it into SKILL.md"
-                  : n + "  ·  not this panel's to write"
-                if (picker.restoring) {
-                  var dr = root.describeOf(root.pickerRow)
-                  if (dr && dr.handEdited === true)
-                    return n + "  ·  not the copy this panel wrote to"
-                  return n + "  ·  return to default"
-                }
+                // The two fields, named, because the window is the only place
+                // both of them exist and the heading is where the reader learns
+                // there are two.
+                if (picker.describing) return n + "  ·  note and description"
+                // The same two-way shape the removal heading has, and for the
+                // same reason: some of the answers the helper can give are not a
+                // write at all, and this is where that is said first.
+                if (picker.restoring) return root.describeResettable()
+                  ? n + "  ·  return to default"
+                  : n + "  ·  nothing to put back"
                 if (picker.removing) {
                   // Three of them, because the helper has three answers and two
                   // of them are not a removal at all. The heading is where that
@@ -5436,13 +5853,87 @@ Panel {
 
           }
 
+          // The two fields, when this is the editor. They replace the preview box
+          // below rather than sitting inside it, because that box is a picture of
+          // what Enter will do and these are the thing itself: what is in them is
+          // what gets written, and a field that looks like a preview is a field
+          // nobody tries to type in.
+          //
+          // Same width, same radius, same rhythm, so they read as a pair -- and
+          // the one holding the keys is unmistakable, because that was the whole
+          // complaint: it carries the caret, the I-beam and a lit border, and the
+          // other goes quiet.
+          Column {
+            width: parent.width
+            spacing: Style.spacing.xl
+            visible: picker.describing
+
+            DescribeField {
+              width: parent.width
+              label: "Note"
+              tag: "costs nothing"
+              caption: "Kept in this panel's own file. No agent reads it."
+              placeholder: "Your own words, shown above the description in this skill's card"
+              body: root.describeNote
+              // Nothing is lit while the unsaved question is up: the keys have
+              // gone to the two chips, and a caret still blinking in a field
+              // would be the panel offering a third place to type.
+              active: picker.describing && !root.describeAsking
+                && root.describeFocus === "note"
+              // The one field on this screen that is always writable: it goes to
+              // a file this plugin owns, so nothing about somebody else's tree
+              // can take it away.
+              editable: true
+              bodyMax: picker.height * 0.16
+              onFocusRequested: root.describeFocus = "note"
+            }
+
+            DescribeField {
+              id: descriptionField
+              width: parent.width
+              label: "Description"
+              // The figure the whole feature exists for, on the one field that
+              // moves it, and only while it is moving: the row's own measurement
+              // now, and what that measurement becomes once this text is in the
+              // file. Never on the note, under any circumstance.
+              tag: {
+                if (!root.showTokens || !root.pickerRow || !root.pickerRow.view) return ""
+                var counted = root.pickerRow.view.tokens
+                if (counted === null || counted === undefined) return ""
+                var now = Number(counted)
+                var chars = root.pickerRow.view.tokenChars
+                var live = root.describeText.trim()
+                if (live === "" || live === root.describeBase)
+                  return root.tokenText(now) + " on every turn"
+                return root.tokenText(now) + " on every turn, "
+                     + root.tokenText(root.describeProjected(now, chars)) + " once saved"
+              }
+              // Where writing is refused the helper's own sentence takes the
+              // caption, because it is the sentence that stands in for the
+              // control this field would otherwise be. A build that refuses
+              // without saying why still gets a caption, because the pair reads
+              // as a pair only while both of them have one.
+              caption: descriptionField.editable
+                ? "SKILL.md itself, which every agent loads."
+                : (root.detailWhy() !== "" ? root.detailWhy()
+                   : "SKILL.md itself, and not this panel's to write.")
+              placeholder: "The description an agent matches on"
+              body: root.describeText
+              active: picker.describing && !root.describeAsking
+                && root.describeFocus === "description"
+              editable: root.describeWritable(root.pickerRow)
+              bodyMax: picker.height * 0.16
+              onFocusRequested: root.describeFocus = "description"
+            }
+          }
+
           // What Enter does, at the size of the thing it is. Everything else on
-          // this overlay exists to change this one line.
+          // this overlay exists to change this one line -- except in the editor,
+          // which has two fields of its own above and hides this.
           BorderSurface {
             width: parent.width
-            implicitHeight: (picker.describing ? describeField.height
-                                               : commandText.implicitHeight)
-              + Style.spacing.xxl * 2
+            visible: !picker.describing
+            implicitHeight: commandText.implicitHeight + Style.spacing.xxl * 2
             radius: Style.cornerRadius
             color: Util.alpha(picker.styling ? root.pickerSwatch() : root.hue, 0.14)
             borderSpec: Border.controlSpec("hover-cursor", root.fg, root.hue)
@@ -5450,85 +5941,11 @@ Panel {
             // In the style overlay this box is not a preview of the name, it is
             // the name, and typing goes into it. So it says so: an I-beam over
             // it and a caret in it, the same two signals the search field uses.
-            // The description editor is the same box doing the same job at the
-            // size of a paragraph. Everywhere else the box is a preview of what
-            // Enter will do and the pointer stays an arrow, because there is
-            // nothing here to type into.
+            // Everywhere else the box is a preview of what Enter will do and the
+            // pointer stays an arrow, because there is nothing here to type into.
             HoverHandler {
-              enabled: picker.styling || root.pickerNaming || picker.describing
+              enabled: picker.styling || root.pickerNaming
               cursorShape: Qt.IBeamCursor
-            }
-
-            // The description as it is being written: wrapped, because it runs
-            // to a paragraph, and bounded, because how long it is is somebody
-            // else's answer and a box that grows with it would push the panel's
-            // own footer off the bottom of the screen. Past the bound the text
-            // slides up rather than scrolling under a bar nobody asked for, so
-            // the end you are typing is the end you can see.
-            Item {
-              id: describeField
-              anchors.left: parent.left
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              anchors.leftMargin: Style.spacing.controlPaddingX
-              anchors.rightMargin: Style.spacing.controlPaddingX
-              visible: picker.describing
-              clip: true
-              height: visible ? Math.max(Style.space(20),
-                Math.min(describeEdit.contentHeight, picker.height * 0.32)) : 0
-
-              // The same placeholder idiom the name field uses: what to type,
-              // where it will be typed, behind the caret rather than after it.
-              Text {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                visible: root.describeText === ""
-                textFormat: Text.PlainText
-                text: "Type the description you want an agent to read"
-                color: root.fg
-                opacity: 0.5
-                font.family: root.face
-                font.pixelSize: Style.font.bodySmall
-                wrapMode: Text.WordWrap
-                elide: Text.ElideRight
-              }
-
-              // A TextEdit, and read-only, and never focused: this panel has no
-              // focused editor and the key catcher above owns every keystroke.
-              // What it is here for is the two things a wrapped Text cannot do
-              // -- lay a paragraph out and say where the insertion point is --
-              // and the caret is drawn on the same 530ms the search field uses,
-              // because the panel promises the keyboard is here.
-              TextEdit {
-                id: describeEdit
-                width: parent.width
-                y: Math.min(0, describeField.height - describeEdit.contentHeight)
-                readOnly: true
-                activeFocusOnPress: false
-                selectByMouse: false
-                cursorVisible: true
-                cursorPosition: describeEdit.text.length
-                textFormat: TextEdit.PlainText
-                text: root.describeText
-                color: root.fg
-                font.family: root.face
-                font.pixelSize: Style.font.bodySmall
-                wrapMode: TextEdit.Wrap
-
-                cursorDelegate: Rectangle {
-                  width: Math.max(1, Style.space(1))
-                  color: root.fg
-
-                  SequentialAnimation on opacity {
-                    loops: Animation.Infinite
-                    PropertyAnimation { to: 1; duration: 0 }
-                    PauseAnimation { duration: 530 }
-                    PropertyAnimation { to: 0; duration: 0 }
-                    PauseAnimation { duration: 530 }
-                  }
-                }
-              }
             }
 
             Row {
@@ -5538,7 +5955,6 @@ Panel {
               anchors.leftMargin: Style.spacing.controlPaddingX
               anchors.rightMargin: Style.spacing.controlPaddingX
               spacing: Style.spacing.md
-              visible: !picker.describing
 
               // The colour being applied, shown as itself rather than named.
               Rectangle {
@@ -5617,27 +6033,30 @@ Panel {
                 return "Save the new " + (both ? "name and colour" : renamed ? "name" : "colour")
                      + ", or discard " + (both ? "them" : "it") + " and keep what was there?"
               }
-              // The honesty this whole feature turns on, said where it cannot be
-              // missed: what is typed here is stored beside this panel's own
-              // settings, the agent goes on reading the author's text, and the
-              // figure on the row does not move until the second act writes the
-              // file. A panel that showed a smaller number because you had typed
-              // a shorter one somewhere the agent cannot see would be lying
-              // about the one figure it exists to print.
-              if (root.describeAsking)
-                return "Save your rewrite, or discard it and keep what was there? Saving stores it here; it does not touch SKILL.md."
+              // Name only what actually changed here too. The two fields go to
+              // two different files, and a prompt that offered to save "your
+              // changes" over one edited field is a prompt about work nobody did.
+              if (root.describeAsking) {
+                var noted = root.describeNoteDirty
+                var wrote = root.describeTextDirty
+                var pair = noted && wrote
+                return "Save the " + (pair ? "note and the description"
+                                           : noted ? "note" : "description")
+                     + ", or discard " + (pair ? "them" : "it")
+                     + " and keep what was there?"
+              }
+              // Two states, and each is only said where it is true: a field left
+              // empty is not a rewrite and is not sent, and a field at the cap
+              // has stopped taking what is typed at it.
               if (picker.describing && root.describeText.trim() === "")
-                return "An empty description is not a rewrite, so there is nothing to save. Return to default is what drops your text and gives the row back to its author."
+                return "The description is empty, so saving leaves SKILL.md as it is."
               if (picker.describing)
-                return "Saving stores this beside this panel's own settings: nothing an agent reads changes, and the figure on the row does not move. Applying it to SKILL.md is the separate act below. Up to "
-                  + String(root.describeLimit) + " characters — a longer description reaches this editor already shortened."
-              if (picker.applying)
-                return root.describeApplyable()
-                  ? "This writes a file this panel did not create. Only the value of the description changes; every other byte of it comes through untouched."
-                  : ""
+                return root.describeText.length >= root.describeLimit
+                  || root.describeNote.length >= root.describeLimit
+                  ? "Full at " + String(root.describeLimit) + " characters." : ""
               if (picker.restoring)
                 return root.describeResettable()
-                  ? "This puts the author's own description back where yours is now."
+                  ? "This writes a file this panel did not create. Only the value of the description changes; every other byte comes through untouched."
                   : ""
               if (picker.removing) {
                 // What the run will actually do, and only what it will do. The
@@ -5682,12 +6101,12 @@ Panel {
           Flickable {
             width: parent.width
             visible: picker.detailed
-            // A smaller share in the editor, which is the one mode where this
-            // grid is not the tallest thing on the card: the field above it is
-            // already allowed a third of the height, and two thirds spent
-            // before the controls are reached would push them off the bottom.
+            // A much smaller share in the editor, which is the one mode where
+            // this grid is not the tallest thing on the card: two fields above it
+            // are already allowed a sixth of the height each, and a third spent
+            // here before the controls are reached would push them off the bottom.
             height: visible ? Math.min(removeDetail.implicitHeight,
-              picker.height * (picker.describing ? 0.22 : 0.34)) : 0
+              picker.height * (picker.describing ? 0.16 : 0.34)) : 0
             contentHeight: removeDetail.implicitHeight
             clip: true
             boundsBehavior: Flickable.StopAtBounds
@@ -5833,43 +6252,43 @@ Panel {
             }
           }
 
-          // The two answers this window holds besides saving: one writes a file
-          // this panel did not create, the other gives the row back to whoever
-          // wrote it. They are drawn as controls rather than as chips in the
-          // grid below, because this mode is a field -- every printable key
-          // belongs to the text, so the grid the arrows step through is empty
-          // here and an answer has to be something you can point at. ^A and ^Z
-          // reach them from the keyboard, on the letters the list already uses.
+          // The one answer this window holds besides saving: giving the row back
+          // to whoever wrote it. It is drawn as a control rather than as a chip
+          // in the grid below, because this mode is two fields -- every printable
+          // key belongs to one of the texts, so the grid the arrows step through
+          // is empty here and an answer has to be something that can be pointed
+          // at. ^Z reaches it from the keyboard, on the letter the list uses.
           //
-          // Neither is drawn where the helper has said it cannot be honoured,
-          // which is this file's rule everywhere else; the sentence above them
-          // is what stands in the missing control's place.
+          // It is not drawn where the helper has said it cannot be honoured,
+          // which is this file's rule everywhere else; the sentence above it is
+          // what stands in the missing control's place.
           Column {
             id: describeAnswers
             width: parent.width
             spacing: Style.spacing.sm
 
-            // An apply writes what is stored, so a field carrying changes
-            // nobody has saved is not offering one yet -- the control would
-            // write a text the reader is no longer looking at.
-            readonly property bool applyable: root.describeApplyable()
-              && !root.describeDirty
+            // A draft nobody has saved is not offering this yet: returning to
+            // default replaces the description in the file, and the field is
+            // showing a different one that would be dropped without being asked
+            // about.
             readonly property bool resettable: root.describeResettable()
+              && !root.describeDirty
             readonly property string caveat: {
               var d = root.describeOf(root.pickerRow)
-              if (!d) return ""
-              // Saying which of the two it is: a control waiting for one more
-              // press, or one that was never going to be offered here.
-              if (root.describeDirty)
-                return "Save this first — applying writes what is stored, and the field now says something else."
-              if (root.describeUnapplied(d) && d.canApply !== true)
-                return String(d.applyWhy || "")
+              if (!d || d.edited !== true) return ""
+              // Which of them it is: a control one press away, or one that was
+              // never going to be offered on this row.
+              if (root.describeResettable() && root.describeDirty)
+                return "Save or discard first, then return to default."
+              if (String(d.otherCopy || "") !== "")
+                return "The edit under this name is in another copy, so there is nothing here to put back."
+              if (d.handEdited === true)
+                return "SKILL.md has changed since this panel wrote its description, and the helper refuses rather than overwrite what it did not write."
               return ""
             }
 
             visible: picker.describing && !root.describeAsking
-              && (describeAnswers.caveat !== "" || describeAnswers.applyable
-                  || describeAnswers.resettable)
+              && (describeAnswers.caveat !== "" || describeAnswers.resettable)
 
             Text {
               width: parent.width
@@ -5885,16 +6304,9 @@ Panel {
             Flow {
               width: parent.width
               spacing: Style.spacing.sm
-              visible: describeAnswers.applyable || describeAnswers.resettable
+              visible: describeAnswers.resettable
 
               CardChip {
-                visible: describeAnswers.applyable
-                label: "apply to SKILL.md"
-                onPicked: root.openApplyPicker(root.pickerRow)
-              }
-
-              CardChip {
-                visible: describeAnswers.resettable
                 label: "return to default"
                 onPicked: root.describeReset()
               }
@@ -6008,8 +6420,6 @@ Panel {
                         // Each of these names the act rather than agreeing with
                         // the question, so the chip and the line above it are
                         // one sentence and neither has to be read twice.
-                        if (String(chip.modelData) === "\u0000keepnote") return "Leave the file alone"
-                        if (String(chip.modelData) === "\u0000apply") return "Write it into SKILL.md"
                         if (String(chip.modelData) === "\u0000keepmine") return "Keep what is there"
                         if (String(chip.modelData) === "\u0000restore") return "Put the author's back"
                         // Named by the mode the helper chose, so the chip and
@@ -6073,18 +6483,18 @@ Panel {
               if (picker.describing) {
                 // Swapped by state rather than grown, the same rule the panel's
                 // own footer follows: a key is named here only where the control
-                // beside it is on screen to be pointed at instead.
-                var keys = ["Type to rewrite", "Enter to save"]
-                if (root.describeApplyable() && !root.describeDirty) keys.push("^A to apply")
-                if (root.describeResettable()) keys.push("^Z to default")
+                // beside it is on screen to be pointed at instead. Tab leads,
+                // because with two fields on screen it is the first thing a
+                // reader needs and the only gesture this window added.
+                var keys = [root.describeWritable(root.pickerRow)
+                  ? "Tab between the fields" : "Type the note", "Enter to save"]
+                if (root.describeResettable() && !root.describeDirty)
+                  keys.push("^Z to default")
                 keys.push("Esc to go back")
                 return keys.join("  \u00b7  ")
               }
               // Escape says what it leaves behind rather than where it goes,
-              // because on these three overlays leaving is itself an answer.
-              if (picker.applying) return root.describeApplyable()
-                ? "Arrows to choose  \u00b7  Enter to answer  \u00b7  Esc to leave the file alone"
-                : "Nothing to answer here  \u00b7  Esc to go back"
+              // because on these overlays leaving is itself an answer.
               if (picker.restoring) return root.describeResettable()
                 ? "Arrows to choose  \u00b7  Enter to answer  \u00b7  Esc to keep what is there"
                 : "Nothing to answer here  \u00b7  Esc to go back"

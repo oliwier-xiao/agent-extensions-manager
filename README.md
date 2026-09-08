@@ -204,36 +204,32 @@ category or to move a skill between them.
 
 ---
 
-## Rewriting a description
+## The note, and the description
 
-The description is not a label. It is the text every agent copies into its system prompt on every turn,
-and it is the whole of what a skill costs you. Eight skills on the machine these screenshots come from
-account for a third of the bill purely by being wordy — one of them is 251 tokens of prose about
-self-hosting. So the description is the only real lever you have on that number, and `^D` is it. Open a
-row, and **edit** is in the bottom corner of the card beside **delete**.
+![Editing a skill's note and its description](docs/describe.png)
 
-It opens its own window, and it offers two different things that are easy to confuse, so it says which is
-which every time:
+`^D` on an open row, or **edit** in the corner of its card. Two fields, and they have nothing to do with
+each other.
 
-**Saving a note changes nothing the agent reads.** Your text goes to the widget's own file. The row keeps
-the cost it had, because the agent is still reading the author's words — the panel shows what it costs now
-and, separately and conditionally, what it would cost if you applied it. This is the one worth having if
-you just want the list to make sense to you: your own wording, your own language, and the search reads it.
+**The note** is yours and starts empty. It is drawn above the description in this skill's card, no agent
+ever sees it, and it is in no figure anywhere. Write what the skill is for in your own words, or in your
+own language — the search reads it too.
 
-**Applying it writes `SKILL.md`.** That is the act that moves the figure, because now the agent reads your
-text. It confirms on its own and names the file, because it is writing something this widget did not
-create. Only the `description:` value changes; every other byte of that file, frontmatter and body alike,
-comes through untouched, and the file is read back afterwards to check the new text parses as exactly what
-you asked for — if it does not, the original goes back and the whole thing is refused.
+**The description** is the one in `SKILL.md`, and saving it writes that file. This is the text every agent
+copies into its system prompt on every turn, so it is the whole of what the skill costs you, and the
+editor shows the figure moving as you cut. Eight wordy skills on the machine these screenshots come from
+are a third of the bill.
 
-**Return to default** puts the author's words back. They are kept from the moment you apply, so this works
-however long ago it was, and it is offered as long as there is anything to return from.
+Only the `description:` value changes. Everything else in the file comes through byte for byte, and the
+file is read back afterwards through the same parser the agents use — if the result does not read as
+exactly what you typed, the original goes back and nothing is saved. **Return to default** restores the
+author's own words, kept from the moment you first wrote over them.
 
-Where a skill cannot be written — the two Omarchy ships, which pacman owns, and the six Codex rewrites on
-every launch — the window says so instead of offering the control. Where it can be written but will not
-last, it says that too: a plugin update replaces its own checkout, and OpenCode re-fetches what it caches.
-And a skill installed twice is two files: applying names the one the row was drawn from, and the other
-copy says where its rewrite went rather than claiming it.
+Where a file cannot be written the editor says so instead of offering the control: the two skills Omarchy
+ships under pacman, and the six Codex rewrites from an embedded copy on every launch. Where it can be
+written but will not last it says that too — a plugin update replaces its own checkout, and OpenCode
+re-fetches what it caches. A skill installed twice is two files, and the copy that did not get the rewrite
+says where it went.
 
 ---
 
@@ -338,9 +334,8 @@ Every printable key goes to the search. Commands take Ctrl.
 | `^M` | move the row to another category, or restyle the category under a group header |
 | `^E` | open the categories: rename one, recolour it, or add one |
 | `^O` | open where the skill is installed, in your file manager |
-| `^D` | rewrite the description: a note of your own, or the file the agents read |
-| `^A` | in the editor, write your rewrite into `SKILL.md` |
-| `^Z` | in the editor, return to what the author wrote |
+| `^D` | open the note and the description for editing |
+| `^Z` | in the editor, put the author's description back |
 | `^Del` | ask whether to move the skill under the cursor to the trash |
 | `^G` | regroup by category, agent, kind or nothing |
 | `^R` | read everything again |

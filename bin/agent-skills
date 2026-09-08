@@ -626,37 +626,39 @@ def _write_json_store(path: str, payload: dict) -> None:
 
 # ------------------------------------------------------- description store
 #
-# The second file this program owns, and the one that can move the figure the
-# widget prints. A skill's name and description sit in the system prompt of every
-# turn whether the skill is ever used or not, so the description is the largest
-# lever a reader has over what they pay -- and pulling it is two acts rather than
-# one, which is why the store keeps them apart:
+# The second file this program owns. It holds two things that have nothing to do
+# with each other, and keeping them apart is the whole of its design:
 #
-#   {"notes":   {"nextjs": "Next.js 16 App Router work, in one line."},
-#    "applied": {"nextjs": {"original": "...", "wrote": "...", "at": 1757000000,
-#                           "file": "/home/you/.claude/skills/nextjs/SKILL.md"}}}
+#   {"notes":  {"nextjs": "Mine: only the App Router rewrite, nothing else."},
+#    "edited": {"nextjs": {"original": "...", "wrote": "...", "at": 1757000000,
+#                          "file": "/home/you/.claude/skills/nextjs/SKILL.md"}}}
 #
-# A note is ours alone. The panel's search reads it and so does the person who
-# wrote it, the agent never sees it, and nothing about the bill changes -- which
-# is why `tokens.alwaysOn` is computed from SKILL.md and never from here. An
-# `applied` entry is what a note becomes once it has been written into somebody
-# else's SKILL.md: `original` is the author's own words, which is what makes
-# reset exact, `wrote` is what we put there, which is how a hand edit made
-# afterwards is noticed and left alone rather than clobbered, and `file` is the
-# one it went into.
+# A note is somebody's own words about a skill, in their own language, for
+# themselves. It is kept here and drawn above the description on the card, and no
+# agent ever opens this file -- so a note costs nothing on any turn, which is why
+# `tokens.alwaysOn` is computed from SKILL.md and never from here, and why
+# nothing in this program may suggest that writing one saves anybody a token.
+#
+# An `edited` entry is the other thing entirely: this widget has written a
+# description into somebody else's SKILL.md. `original` is the author's own
+# words, which is what makes reset exact, `wrote` is what we put there, which is
+# how a hand edit made afterwards is told from our own text, and `file` is the
+# one it went into. Neither half feeds the other: clearing a note opens no file,
+# and resetting a description leaves the note where it is.
 #
 # That last key is why the two halves are keyed differently. A note is per name,
 # because a name is what a person means by a skill and the panel has nothing
-# else to file it under. An apply is not: it happens to one SKILL.md, and a name
+# else to file it under. An edit is not: it happens to one SKILL.md, and a name
 # reaches more than one -- impeccable ships one build for OpenCode and another
 # inside a Claude Code plugin. Keyed by name alone, the copy nobody wrote to
-# inherited the entry and its row claimed an apply that had happened to another
+# inherited the entry and its row claimed an edit that had happened to another
 # file, offering to put back a description its author never wrote.
 DESCRIBE_PATH = os.path.join(STORE_DIR, "descriptions.json")
 
-# One line of prose. Longer than every description on this machine and the same
-# bound the scanner already calls `long-description`, so a note that reaches it
-# has stopped being the restatement it was meant to be.
+# One line of prose, for a note and for a description alike. Longer than every
+# description on this machine and the same bound the scanner already calls
+# `long-description`, so a text that reaches it has stopped being the one-line
+# summary either field is read as.
 MAX_DESCRIPTION = 1024
 # What an author's own description may be and still be recorded for an undo. It
 # is deliberately not the bound above: their text is theirs, one description here
@@ -678,13 +680,18 @@ def read_describe_store(findings: list | None = None) -> dict:
         # anything on, and one of the two is worth knowing about.
         if err and findings is not None:
             findings.append({"what": "descriptions.json", "detail": err})
-        return {"notes": {}, "applied": {}}
+        return {"notes": {}, "edited": {}}
     notes = {}
     for k, v in list(as_dict(value.get("notes")).items())[:MAX_NOTES]:
         if isinstance(k, str) and isinstance(v, str) and SKILL_NAME.match(k) and v.strip():
             notes[k] = clip(v, MAX_DESCRIPTION)
-    applied = {}
-    for k, v in list(as_dict(value.get("applied")).items())[:MAX_NOTES]:
+    # `applied` is what this key was called while a note was a thing you applied.
+    # Nothing is applied any more -- something was edited -- but a store written
+    # by the shipped code holds real author text under the old name, and dropping
+    # it would leave those files carrying our words with nothing to put back.
+    written = as_dict(value.get("edited")) or as_dict(value.get("applied"))
+    edited = {}
+    for k, v in list(written.items())[:MAX_NOTES]:
         entry = as_dict(v)
         if not (isinstance(k, str) and SKILL_NAME.match(k)):
             continue
@@ -701,18 +708,18 @@ def read_describe_store(findings: list | None = None) -> dict:
         # An old store therefore understates -- a row reads as its author's --
         # which is the direction to be wrong in.
         wrote_to = entry.get("file")
-        applied[k] = {"original": clip(entry["original"], MAX_ORIGINAL),
-                      "wrote": clip(entry["wrote"], MAX_DESCRIPTION),
-                      "file": (clip(wrote_to, MAX_PATH)
-                               if isinstance(wrote_to, str) and os.path.isabs(wrote_to) else ""),
-                      "at": int(at) if isinstance(at, (int, float)) else 0}
-    return {"notes": notes, "applied": applied}
+        edited[k] = {"original": clip(entry["original"], MAX_ORIGINAL),
+                     "wrote": clip(entry["wrote"], MAX_DESCRIPTION),
+                     "file": (clip(wrote_to, MAX_PATH)
+                              if isinstance(wrote_to, str) and os.path.isabs(wrote_to) else ""),
+                     "at": int(at) if isinstance(at, (int, float)) else 0}
+    return {"notes": notes, "edited": edited}
 
 
 def write_describe_store(store: dict) -> None:
     _write_json_store(DESCRIBE_PATH, {"version": 1,
                                       "notes": store.get("notes", {}),
-                                      "applied": store.get("applied", {})})
+                                      "edited": store.get("edited", {})})
 
 
 def same_file(one: str, other: str) -> bool:
@@ -722,33 +729,19 @@ def same_file(one: str, other: str) -> bool:
     return bool(one) and os.path.realpath(one) == os.path.realpath(other)
 
 
-def applied_entry(store: dict, dir_name: str, skill_md: str | None = None) -> dict | None:
-    """The applied record filed under this name, where it is this file's.
+def edited_entry(store: dict, dir_name: str, skill_md: str | None = None) -> dict | None:
+    """The edit filed under this name, where it is this file's.
 
-    An apply happens to one SKILL.md and a name reaches more than one, so the
-    entry names the file it went into and a copy that is not that file is not
-    applied, whatever the name over it says. Asked without a file the question
-    is the name's own, which is what the verbs ask before the caller has told
-    them which copy they mean.
+    An edit happens to one SKILL.md and a name reaches more than one, so the
+    entry names the file it went into and a copy that is not that file was not
+    edited, whatever the name over it says. Asked without a file the question is
+    the name's own, which is what the verbs ask before the caller has told them
+    which copy they mean.
     """
-    entry = store["applied"].get(dir_name)
+    entry = store["edited"].get(dir_name)
     if entry is None or skill_md is None:
         return entry
     return entry if same_file(entry["file"], skill_md) else None
-
-
-def describe_state(store: dict, dir_name: str, skill_md: str | None = None) -> str:
-    """Which of the three states this skill is in, from the store alone.
-
-    `applied` outranks `note` because it is the stronger fact: the agent is
-    reading our text out of SKILL.md, whatever the note beside it now says. It
-    is also a fact about one file rather than about the name, so a row is asked
-    with its own SKILL.md and the copy nobody wrote to reads as `note`, or
-    `author` where there is no note either -- which is what it is.
-    """
-    if applied_entry(store, dir_name, skill_md) is not None:
-        return "applied"
-    return "note" if dir_name in store["notes"] else "author"
 
 
 def known_categories(store: dict) -> list:
@@ -1188,32 +1181,35 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
     # to move it off, not a red dot.
 
     # What the agent reads is what is in SKILL.md, so `fileText` is that text and
-    # the token estimate below is taken from it -- never from a note, which the
-    # agent cannot see. A note moves `tokensIfApplied` and nothing else, which is
-    # the whole difference between telling somebody what a change would save and
-    # pretending they have already made it.
+    # the token estimate below is taken from it -- never from the note, which the
+    # agent cannot see and which therefore appears in no figure anywhere. The
+    # note is an annotation drawn above the description; the description is the
+    # text that is charged for, and it is charged for at whatever it says now.
     note = descriptions["notes"].get(dir_name)
     # Asked with this row's own SKILL.md. A note is per name and every copy of
-    # the name shows it, but an apply happened to one file: the copy it happened
+    # the name shows it, but an edit happened to one file: the copy it happened
     # to says so and offers the author's text back, and the copy it did not is
     # the author's own already.
-    applied = applied_entry(descriptions, dir_name, skill_md)
+    edited = edited_entry(descriptions, dir_name, skill_md)
     file_text = clip(description, 1024)
-    can_apply, apply_why, apply_note = _describe_gate(
+    can_write, why_not, write_note = _describe_gate(
         skill_md, "bundled" if bundled else root["scope"], root.get("plugin"))
     # One entry per name holds one author's text, so only one copy at a time can
     # be put back. When the entry belongs to a different copy, this row can be
-    # neither applied to nor reset -- and it has to say so on the card rather
-    # than let the panel draw both controls and the helper refuse them after the
-    # window has already closed. The path is what the panel needs, because the
-    # answer is always "go and do it on that one".
-    named = applied_entry(descriptions, dir_name)
+    # neither written nor reset -- and it has to say so on the card rather than
+    # let the panel draw the control and the helper refuse it after the window
+    # has already closed. The path is what the panel needs, because the answer is
+    # always "go and do it on that one".
+    named = edited_entry(descriptions, dir_name)
     other_copy = None
     if named and named.get("file") and not same_file(named["file"], skill_md):
         other_copy = named["file"]
-        can_apply = False
-        apply_why = ("your description is already in %s, which is another copy of this name; "
-                     "reset that one first" % tilde(other_copy))
+        can_write = False
+        # Capitalised like the sentences `_describe_gate` returns, because the
+        # card draws whichever of them it is given and one of two grammars in the
+        # same slot reads as a bug in the panel.
+        why_not = ("Your description is already in %s, which is another copy of this name; "
+                   "reset that one first." % tilde(other_copy))
 
     u = usage.get(dir_name) or usage.get(display) or {}
     last = u.get("lastUsedAt")
@@ -1244,25 +1240,33 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
                              "opencode": f"/{display}", "codex": f"${display}"}),
         "argumentHint": clip(str(fm.get("argument-hint") or ""), 400) or None,
         "argumentChoices": parse_argument_hint(fm.get("argument-hint")),
+        # `chars` is the length the estimate was taken from, published because the
+        # panel cannot reconstruct it: `whenToUse` never reaches the scan output
+        # and `alwaysOn` has already been rounded. Without it the editor's "once
+        # saved" figure rounds a rounded number and disagrees with the next scan
+        # on about one row in five -- two claims about the single figure this
+        # widget exists to print.
         "tokens": {"alwaysOn": token_estimate(dir_name, description, when_to_use, divisor),
+                   "chars": len(" ".join(x for x in (dir_name, description, when_to_use) if x)),
                    "method": f"chars/{divisor}"},
         "describe": {
-            "state": describe_state(descriptions, dir_name, skill_md),
-            "fileText": file_text,
+            # The reader's own words about this skill, drawn above the
+            # description on the card. No agent reads it and no figure counts it.
             "noteText": note,
-            "authorText": clip(applied["original"], 1024) if applied else file_text,
-            "canApply": can_apply,
-            "applyWhy": apply_why,
-            "applyNote": apply_note,
-            "handEdited": bool(applied) and file_text != applied["wrote"],
-            # The copy that holds this name's applied entry, when it is not this
-            # one. Null the rest of the time, which is nearly always.
+            # The description as it stands in SKILL.md: what the agent reads, and
+            # what the token figure above was taken from.
+            "fileText": file_text,
+            # What its author wrote, which is what reset puts back. The same text
+            # as `fileText` until this widget has written the file.
+            "authorText": clip(edited["original"], 1024) if edited else file_text,
+            "edited": edited is not None,
+            "canWrite": can_write,
+            "whyNot": why_not,
+            "writeNote": write_note,
+            "handEdited": bool(edited) and file_text != edited["wrote"],
+            # The copy that holds this name's edit, when it is not this one. Null
+            # the rest of the time, which is nearly always.
             "otherCopy": tilde(other_copy) if other_copy else None,
-            # A figure only while there is something an apply would change. A note
-            # the file already carries would save nothing, and a nought sitting
-            # beside the real cost is a number the panel has to explain away.
-            "tokensIfApplied": (token_estimate(dir_name, note, when_to_use, divisor)
-                                if note and note != file_text else None),
         },
         "usage": {"count": u.get("usageCount", 0), "lastUsedAt": last,
                   "daysSinceUse": (int((time.time() * 1000 - last) / 86400000) if last else None),
@@ -1302,7 +1306,7 @@ def _mark_drift(items: list[dict]) -> None:
     and the old behaviour holds -- most hand-written skills declare no version,
     and for those a content difference really is the only signal there is.
 
-    The reader can now be the cause of one. Applying a description writes a single
+    The reader can now be the cause of one. Writing a description writes a single
     copy of a name, so where two copies declare no version the difference that
     appears afterwards is a real one: two files, two texts, both loaded, and the
     agent reading whichever it reaches first. The flag is right to say so, and it
@@ -1948,15 +1952,17 @@ def category_command(args) -> int:
 
 
 def describe_command(args) -> int:
-    """Three verbs over one skill's description, and the split between them is
-    the whole design. `set` writes a note into this plugin's own file, where the
-    panel reads it and the agent does not, so nothing about the bill moves.
-    `apply` is the separate act that puts that note into the skill's SKILL.md,
-    where the agent does read it and the bill does move. `reset` takes both back
-    off again. Every path prints one line of JSON and either makes the one change
-    it was asked for or changes nothing at all.
+    """Three verbs over one skill, and the first has nothing to do with the other two.
 
-    A note is per name, so `set` is named by the directory alone. The two verbs
+    `note` keeps the reader's own words in this plugin's file, where the panel
+    draws them above the description and no agent ever looks; it opens no
+    SKILL.md and moves no figure. `write` puts a description into the skill's own
+    SKILL.md, where every agent reads it on every turn, so that one moves the
+    figure the moment the file changes. `reset` puts the author's description
+    back and leaves the note alone. Every path prints one line of JSON and either
+    makes the one change it was asked for or changes nothing at all.
+
+    A note is per name, so `note` is named by the directory alone. The two verbs
     that write somebody else's file are named by the file as well, because one
     name reaches more than one of them and the row the user clicked is one file's
     row.
@@ -1966,16 +1972,14 @@ def describe_command(args) -> int:
     # cleaned: a name that had to be tidied up to get through is not the name of
     # any directory, and a note filed under one is a note nothing will ever read.
     if not SKILL_NAME.match(skill):
-        return _describe_says(False, "author",
-                              "a skill is named by its directory: anything but a slash, "
-                              "and not . or ..", code=1)
+        return _describe_says(False, "a skill is named by its directory: anything but a "
+                                     "slash, and not . or ..")
     store = read_describe_store()
-    state = describe_state(store, skill)
     try:
-        if args.action == "set":
-            return _describe_set(store, skill, args.text)
-        if args.action == "apply":
-            return _describe_apply(store, skill, args.file, args.expect)
+        if args.action == "note":
+            return _describe_note(store, skill, args.text)
+        if args.action == "write":
+            return _describe_write(store, skill, args.file, args.text, args.expect)
         return _describe_reset(store, skill, args.file)
     except Exception as exc:  # noqa: BLE001 - the caller is owed one line of JSON, always
         # The panel reads one line and nothing else, so a traceback on stderr and
@@ -1984,40 +1988,62 @@ def describe_command(args) -> int:
         # the SKILL.md already rewritten. Every verb below leaves the file the way
         # it found it before it gets this far, so the sentence can say so.
         detail = clip(getattr(exc, "strerror", None) or str(exc) or type(exc).__name__, 160)
-        return _describe_says(False, state, f"the change could not be finished: {detail}")
+        return _describe_says(False, f"the change could not be finished: {detail}")
 
 
-def _describe_says(ok: bool, state: str, detail: str, code: int | None = None) -> int:
+def _describe_says(ok: bool, detail: str) -> int:
     """One line, and the exit code the caller acts on: 0 done, 2 refused and
-    nothing written, 1 for arguments that could not have named a skill at all."""
-    sys.stdout.write(json.dumps({"ok": ok, "state": state, "detail": detail},
-                                ensure_ascii=False) + "\n")
-    return (0 if ok else 2) if code is None else code
+    nothing written. There is no third code, because there is no third outcome --
+    an argument this program cannot use is a refusal like any other."""
+    sys.stdout.write(json.dumps({"ok": ok, "detail": detail}, ensure_ascii=False) + "\n")
+    return 0 if ok else 2
 
 
-def _describe_set(store: dict, skill: str, text: str) -> int:
-    # Collapsed to one line before anything else, because that is what a
-    # description is: the frontmatter has no way to carry a paragraph break that
-    # every reader agrees on, and a note whose newlines vanished at write time
-    # would be a different text from the one the panel had been showing.
-    note = clip(" ".join(str(text).split()), MAX_DESCRIPTION)
+def _not_absolute(path: str) -> str:
+    """Asked at the top of both writing verbs and again inside `_describe_target`.
+
+    The first is so that a path this program could not act on is refused before
+    the filesystem is touched at all; the second is so that the function that
+    picks the target is right on its own, wherever it is called from.
+    """
+    return (f"{clip(path, 240)} is not an absolute path; the file to write is the "
+            f"`realPath` a scan gave, never a display string re-expanded")
+
+
+def _describe_note(store: dict, skill: str, text: str) -> int:
+    """The reader's own annotation, kept here and shown above the description.
+
+    No SKILL.md is opened on any path through this, and nothing it stores appears
+    in any token figure: the agents never read this file. Empty text clears the
+    note rather than storing an empty one, because a field somebody emptied is a
+    field they are done with, and there is no other control for taking one back.
+    """
+    # Collapsed to one line before anything else, because a card draws it on one:
+    # a note that kept its line breaks would be one text in this file and another
+    # on the screen.
+    note = clip(" ".join(str(text or "").split()), MAX_DESCRIPTION)
     if not note:
-        return _describe_says(False, describe_state(store, skill),
-                              "a description of nothing is not a description; "
-                              "`describe reset` is how you go back to the author's", code=1)
+        if store["notes"].pop(skill, None) is None:
+            return _describe_says(True, f"{skill} had no note, so there was none to clear")
+        write_describe_store(store)
+        return _describe_says(True, f"the note on {skill} is gone; no SKILL.md was opened")
     if skill not in store["notes"] and len(store["notes"]) >= MAX_NOTES:
-        return _describe_says(False, describe_state(store, skill),
-                              f"there is room for {MAX_NOTES} notes")
+        return _describe_says(False, f"there is room for {MAX_NOTES} notes")
     store["notes"][skill] = note
     write_describe_store(store)
-    return _describe_says(True, describe_state(store, skill),
-                          f"{skill} has a note of {len(note)} "
-                          f"character{'' if len(note) == 1 else 's'}; the agents go on "
-                          f"reading the author's description until it is applied")
+    return _describe_says(True, f"{skill} has a note of {len(note)} "
+                                f"character{'' if len(note) == 1 else 's'}, which is yours to "
+                                f"read and costs the agents nothing")
 
 
-def _describe_apply(store: dict, skill: str, path: str, expect: str | None) -> int:
-    """Write the note into the file the agent actually reads, and into that file.
+def _describe_write(store: dict, skill: str, path: str, text: str, expect: str | None) -> int:
+    """Put this text in as the description of the file the agent actually reads.
+
+    The text arrives on the command line, because this is the field somebody typed
+    into and saved: there is no staging area between the two and nothing here to
+    look up. What the file said a moment ago becomes `original` the first time,
+    and only the first time, so reset restores the author rather than our own
+    earlier wording.
 
     The file is named by the caller rather than chosen here. A name reaches more
     than one SKILL.md -- impeccable ships one build for OpenCode and another
@@ -2031,94 +2057,87 @@ def _describe_apply(store: dict, skill: str, path: str, expect: str | None) -> i
     be minutes old, and in between the skill can have moved, lost its write
     permission, or been edited by hand. The one thing this side cannot know on
     its own is what the row said, so `--expect` is there for a caller that wants
-    to hand it back; where we wrote the file ourselves we know it already,
-    because `wrote` says so.
+    to be sure it is overwriting the text it was showing.
     """
-    note = store["notes"].get(skill)
-    state = describe_state(store, skill)
-    if not note:
-        return _describe_says(False, state,
-                              f"there is no note for {skill} to apply; set one first")
+    if not os.path.isabs(path):
+        return _describe_says(False, _not_absolute(path))
+    # One line, for the reason a note is one: the frontmatter has no paragraph
+    # break every reader agrees on, so the collapse happens here rather than at
+    # write time, where it would silently change the text that was asked for.
+    value = clip(" ".join(str(text or "").split()), MAX_DESCRIPTION)
+    if not value:
+        return _describe_says(False, "a description of nothing is not a description; "
+                                     "`describe reset` is how you go back to the author's")
     candidates = _describe_candidates(skill)
     if not candidates:
-        return _describe_says(False, state,
-                              f"no directory named {skill} with a SKILL.md in it sits in any "
-                              f"root the agents scan")
+        return _describe_says(False, f"no directory named {skill} with a SKILL.md in it sits "
+                                     f"in any root the agents scan")
     target, wrong = _describe_target(candidates, path)
     if target is None:
-        return _describe_says(False, state, wrong)
+        return _describe_says(False, wrong)
     can_write, why, caveat = _describe_gate(target["skillMd"], target["scope"], target["plugin"])
     if not can_write:
-        return _describe_says(False, state, why)
+        return _describe_says(False, why)
 
-    text = read_text(target["skillMd"])
-    if text is None:
-        return _describe_says(False, state,
-                              f"{tilde(target['skillMd'])} could not be read a second time, "
-                              f"so nothing was written")
-    current = _description_in(text)
-    applied = store["applied"].get(skill)
-    if applied and applied["file"] and not same_file(applied["file"], target["skillMd"]):
+    text_now = read_text(target["skillMd"])
+    if text_now is None:
+        return _describe_says(False, f"{tilde(target['skillMd'])} could not be read a second "
+                                     f"time, so nothing was written")
+    current = _description_in(text_now)
+    edited = store["edited"].get(skill)
+    if edited and edited["file"] and not same_file(edited["file"], target["skillMd"]):
         # One entry per name holds one author's text, so writing a second copy
         # would drop the first file's, leaving that file carrying our words with
         # nothing left to put back. The copy that already has them is named,
         # because it is the one to reset.
-        return _describe_says(False, state,
-                              f"your description is already in {tilde(applied['file'])}, which "
-                              f"is another copy of this name; only one copy at a time can be "
-                              f"put back, so reset that one before writing this one")
-    if applied and clip(current, MAX_DESCRIPTION) != applied["wrote"]:
-        # Said without blaming anyone. This is a hand edit wherever the entry
-        # names this file, but an entry from a store older than that key names
-        # none, and then it may as easily be the copy nobody wrote to.
-        return _describe_says(False, state,
-                              f"{tilde(target['skillMd'])} does not carry the description "
-                              f"written under this name, so either another copy of it does "
-                              f"or this file was changed by hand; it is left as it is")
+        return _describe_says(False, f"your description is already in "
+                                     f"{tilde(edited['file'])}, which is another copy of this "
+                                     f"name; only one copy at a time can be put back, so reset "
+                                     f"that one before writing this one")
     if expect is not None and clip(current, MAX_DESCRIPTION) != clip(expect, MAX_DESCRIPTION):
-        return _describe_says(False, state,
-                              f"{tilde(target['skillMd'])} no longer says what the row was "
-                              f"drawn from, so it changed since the scan; run another one")
+        return _describe_says(False, f"{tilde(target['skillMd'])} no longer says what the row "
+                                     f"was drawn from, so it changed since the scan; run "
+                                     f"another one")
     if len(current) > MAX_ORIGINAL:
-        return _describe_says(False, state,
-                              f"the description in {tilde(target['skillMd'])} is longer than "
-                              f"this program can record for an undo, so it is left alone")
-    if skill not in store["applied"] and len(store["applied"]) >= MAX_NOTES:
-        return _describe_says(False, state, f"there is room for {MAX_NOTES} applied notes")
+        return _describe_says(False, f"the description in {tilde(target['skillMd'])} is longer "
+                                     f"than this program can record for an undo, so it is "
+                                     f"left alone")
+    if skill not in store["edited"] and len(store["edited"]) >= MAX_NOTES:
+        return _describe_says(False, f"there is room for {MAX_NOTES} edited descriptions")
 
     # The author's words are recorded before the file is touched, never after.
     # Recorded after, a store that could not be written -- a full disk, a quota,
     # a read-only $HOME -- left the SKILL.md already rewritten with the only copy
     # of the original held nowhere, which is a description nothing can put back.
-    # The author's words are also recorded once and never again: a second apply
-    # over our own text keeps the first `original`, so reset still restores what
-    # the author wrote rather than what we did.
+    # They are recorded once and never again: a second write over our own text
+    # keeps the first `original`, so reset still restores what the author wrote
+    # rather than what we did on the way here.
     #
     # The file is recorded by its real path, which is the name it keeps: a root
     # holds links as often as directories, and the link can be remade tomorrow
     # while the file under it stays where it is.
-    store["applied"][skill] = {"original": applied["original"] if applied else current,
-                               "wrote": note, "at": int(time.time()),
-                               "file": os.path.realpath(target["skillMd"])}
+    store["edited"][skill] = {"original": edited["original"] if edited else current,
+                              "wrote": value, "at": int(time.time()),
+                              "file": os.path.realpath(target["skillMd"])}
     write_describe_store(store)
 
-    failed = _write_description(target["skillMd"], note)
+    failed = _write_description(target["skillMd"], value)
     if failed:
         # An entry is only true while the file carries it, so one recorded for a
         # write that did not happen goes back the way it was. Best effort, and
         # the refusal the caller reads is the write's rather than this one's: a
         # store that will not take the undo has already taken the entry, and the
-        # row that results says the file was written by hand, which is the state
-        # this feature is built to leave alone.
-        if applied is None:
-            store["applied"].pop(skill, None)
+        # row that results reads as hand edited, which is a state this feature
+        # describes rather than acts on.
+        if edited is None:
+            store["edited"].pop(skill, None)
         else:
-            store["applied"][skill] = applied
+            store["edited"][skill] = edited
         try:
             write_describe_store(store)
         except OSError:
             pass
-        return _describe_says(False, state, failed)
+        return _describe_says(False, failed)
     said = [f"{tilde(target['skillMd'])} now carries your description, and the author's is "
             f"kept, so reset puts it back."]
     if caveat:
@@ -2127,78 +2146,75 @@ def _describe_apply(store: dict, skill: str, path: str, expect: str | None) -> i
     if others:
         said.append(f"{others} other cop{'y' if others == 1 else 'ies'} of this name "
                     f"{'was' if others == 1 else 'were'} left alone.")
-    return _describe_says(True, "applied", " ".join(said))
+    return _describe_says(True, " ".join(said))
 
 
 def _describe_reset(store: dict, skill: str, path: str) -> int:
     """Back to the author's description, in the file the caller names, and only
     where that can be done exactly.
 
-    A note that was never applied is dropped and no SKILL.md is opened at all. An
-    applied one is put back from `original`, which is the author's own text: what
-    reset restores is what the skill said, to the character, and it is written
-    the way this program writes any description. Where the author wrote one plain
-    line the file comes back byte for byte; where they folded it over several
-    lines, or quoted a sentence that needs no quoting, the text is theirs again
-    and the layout is ours.
+    The description is put back from `original`, which is the author's own text:
+    what reset restores is what the skill said, to the character, and it is
+    written the way this program writes any description. Where the author wrote
+    one plain line the file comes back byte for byte; where they folded it over
+    several lines, or quoted a sentence that needs no quoting, the text is theirs
+    again and the layout is ours.
 
-    The file is named for the same reason `apply` names one: the row the user
+    The note is not touched, on any path through this. The two fields are
+    independent -- one is the reader's own words about the skill, the other is
+    the skill's own -- and putting a description back is no reason to throw away
+    what somebody wrote about it. `describe note` with no text is how a note goes.
+
+    The file is named for the same reason `write` names one: the row the user
     clicked is one file's row, and a name can reach several. A file that does not
-    carry what we wrote is left exactly as it is, note and all -- it is either
-    another copy of the name or somebody's hand edit, and there is no version of
-    overwriting the second that the person who typed it would thank us for.
+    carry what we wrote is left exactly as it is -- it is either another copy of
+    the name or somebody's hand edit, and there is no version of overwriting the
+    second that the person who typed it would thank us for.
     """
-    note = store["notes"].get(skill)
-    applied = store["applied"].get(skill)
-    if note is None and applied is None:
-        return _describe_says(True, "author", f"{skill} was already the author's own description")
-    if applied is not None:
-        candidates = _describe_candidates(skill)
-        if not candidates:
-            return _describe_says(False, "applied",
-                                  f"no directory named {skill} with a SKILL.md in it is "
-                                  f"there to put anything back into")
-        target, wrong = _describe_target(candidates, path)
-        if target is None:
-            return _describe_says(False, "applied", wrong)
-        if applied["file"] and not same_file(applied["file"], target["skillMd"]):
-            # Nothing was ever written here, so there is nothing here to put
-            # back, and forgetting the entry would leave the copy that does
-            # carry our words with no author's text behind it. Both files are
-            # left as they are and the name is told where its edit actually is.
-            return _describe_says(False, "applied",
-                                  f"what was written under this name is in "
-                                  f"{tilde(applied['file'])}, not in "
-                                  f"{tilde(target['skillMd'])}, which nothing here ever wrote "
-                                  f"to; both are left exactly as they are, and it is the "
-                                  f"other copy to reset")
-        current = clip(_current_description(target["skillMd"]), MAX_DESCRIPTION)
-        # A file that already reads as its author wrote it has nothing left to put
-        # back, and forgetting the entry that says otherwise is the whole of what
-        # remains. That is the state left behind when the file was restored and
-        # the store could not then be written -- an unwritable ~/.config, a full
-        # disk -- and without this there is no way out of it: the file no longer
-        # says what we wrote, so every later reset would refuse.
-        if current != clip(applied["original"], MAX_DESCRIPTION):
-            if current != applied["wrote"]:
-                return _describe_says(False, "applied",
-                                      f"{tilde(target['skillMd'])} does not carry the "
-                                      f"description written under this name, so either another "
-                                      f"copy of it does or this file was changed by hand; it is "
-                                      f"left exactly as it is and the note is kept")
-            can_write, why, _ = _describe_gate(target["skillMd"], target["scope"],
-                                               target["plugin"])
-            if not can_write:
-                return _describe_says(False, "applied", why)
-            failed = _write_description(target["skillMd"], applied["original"])
-            if failed:
-                return _describe_says(False, "applied", failed)
-    store["notes"].pop(skill, None)
-    store["applied"].pop(skill, None)
+    if not os.path.isabs(path):
+        return _describe_says(False, _not_absolute(path))
+    edited = store["edited"].get(skill)
+    if edited is None:
+        return _describe_says(True, f"{skill} already carries the description its author wrote")
+    candidates = _describe_candidates(skill)
+    if not candidates:
+        return _describe_says(False, f"no directory named {skill} with a SKILL.md in it is "
+                                     f"there to put anything back into")
+    target, wrong = _describe_target(candidates, path)
+    if target is None:
+        return _describe_says(False, wrong)
+    if edited["file"] and not same_file(edited["file"], target["skillMd"]):
+        # Nothing was ever written here, so there is nothing here to put back,
+        # and forgetting the entry would leave the copy that does carry our words
+        # with no author's text behind it. Both files are left as they are and
+        # the name is told where its edit actually is.
+        return _describe_says(False, f"what was written under this name is in "
+                                     f"{tilde(edited['file'])}, not in "
+                                     f"{tilde(target['skillMd'])}, which nothing here ever "
+                                     f"wrote to; both are left exactly as they are, and it is "
+                                     f"the other copy to reset")
+    current = clip(_current_description(target["skillMd"]), MAX_DESCRIPTION)
+    # A file that already reads as its author wrote it has nothing left to put
+    # back, and forgetting the entry that says otherwise is the whole of what
+    # remains. That is the state left behind when the file was restored and the
+    # store could not then be written -- an unwritable ~/.config, a full disk --
+    # and without this there is no way out of it: the file no longer says what we
+    # wrote, so every later reset would refuse.
+    if current != clip(edited["original"], MAX_DESCRIPTION):
+        if current != edited["wrote"]:
+            return _describe_says(False, f"{tilde(target['skillMd'])} does not carry the "
+                                         f"description written under this name, so either "
+                                         f"another copy of it does or this file was changed by "
+                                         f"hand; it is left exactly as it is")
+        can_write, why, _ = _describe_gate(target["skillMd"], target["scope"], target["plugin"])
+        if not can_write:
+            return _describe_says(False, why)
+        failed = _write_description(target["skillMd"], edited["original"])
+        if failed:
+            return _describe_says(False, failed)
+    store["edited"].pop(skill, None)
     write_describe_store(store)
-    return _describe_says(True, "author",
-                          f"{skill} reads as its author wrote it" if applied
-                          else f"the note on {skill} is gone and no file was touched")
+    return _describe_says(True, f"{skill} reads as its author wrote it")
 
 
 def _description_in(text: str) -> str:
@@ -2619,8 +2635,7 @@ def _describe_target(candidates: list[dict], path: str) -> tuple[dict | None, st
     caller has the real path while the walk has the name it was found under.
     """
     if not os.path.isabs(path):
-        return None, (f"{clip(path, 240)} is not an absolute path; the file to write is the "
-                      f"`realPath` a scan gave, never a display string re-expanded")
+        return None, _not_absolute(path)
     real = os.path.realpath(path)
     for c in candidates:
         if real == os.path.realpath(c["skillMd"]):
@@ -2638,7 +2653,7 @@ def _describe_gate(skill_md: str, scope: str,
     """Whether this SKILL.md can be written, why not, and what to warn about.
 
     Asked in the same words by the scan, which draws the answer on the row, and
-    by `apply`, which acts on it minutes later, so the two cannot end up
+    by `write`, which acts on it minutes later, so the two cannot end up
     disagreeing about what is writable. The caveats are the other half: an edit
     that lands and then disappears on the next plugin update or the next fetch is
     worth saying before the click rather than explaining afterwards.
@@ -2651,7 +2666,7 @@ def _describe_gate(skill_md: str, scope: str,
     # Writability is asked first and existence only when that fails, because the
     # scan asks this of every skill on the machine and the file it is asking
     # about is one it has just read. A missing SKILL.md still gets its own
-    # sentence: the row may be minutes old by the time `apply` asks the same
+    # sentence: the row may be minutes old by the time `write` asks the same
     # question, and by then the skill may have gone.
     if not os.access(skill_md, os.W_OK):
         if not os.path.isfile(skill_md):
@@ -2739,18 +2754,22 @@ def main(argv: list[str]) -> int:
 
     cat_sub.add_parser("list", help="print the store as JSON")
 
-    # The half of the write side that can move the figure the widget prints, and
-    # the only verb that writes into a file this program did not create. It is
-    # two acts rather than one on purpose: `set` is ours and reversible and the
-    # agents never see it, `apply` is the separate, separately-confirmed act that
-    # puts the note where the agent reads it and the cost follows.
-    p_desc = sub.add_parser("describe", help="restate a skill's description, and write it if "
-                                             "you mean the agent to read it")
+    # Two unrelated fields and the way back from one of them. `note` is the
+    # reader's own words, kept in this plugin's file, read by nobody else and
+    # counted in no figure. `write` is the only verb here that changes a file
+    # this program did not create, and the only one that moves what the agents
+    # pay -- it moves it at the moment it writes, because the file now says
+    # something different.
+    p_desc = sub.add_parser("describe", help="annotate a skill for yourself, or rewrite the "
+                                             "description every agent reads")
     desc_sub = p_desc.add_subparsers(dest="action", required=True)
 
-    p_set = desc_sub.add_parser("set", help="store your wording, touching no skill")
-    p_set.add_argument("skill", help="the skill's directory name")
-    p_set.add_argument("text", help=f"the description, up to {MAX_DESCRIPTION} characters")
+    p_note = desc_sub.add_parser("note", help="your own words about a skill, shown above its "
+                                              "description and read by no agent")
+    p_note.add_argument("skill", help="the skill's directory name")
+    p_note.add_argument("text", nargs="?", default="",
+                        help=f"the note, up to {MAX_DESCRIPTION} characters; leave it out to "
+                             f"clear the one that is there")
 
     # Both of these name the file as well as the skill, because a name reaches
     # more than one SKILL.md and the panel draws a row per file. The path is the
@@ -2758,19 +2777,22 @@ def main(argv: list[str]) -> int:
     # display string beside it, and never whichever copy this side would have
     # picked, which is the one that made the card promise one file and the write
     # land in another.
-    p_apply = desc_sub.add_parser("apply", help="write the note into that skill's SKILL.md")
-    p_apply.add_argument("skill")
-    p_apply.add_argument("file", metavar="SKILL_MD",
+    p_write = desc_sub.add_parser("write", help="write this text as the skill's description, "
+                                                "which every agent then reads")
+    p_write.add_argument("skill")
+    p_write.add_argument("file", metavar="SKILL_MD",
                          help="absolute path to the SKILL.md the row names, from a scan's "
                               "realPath; refused unless this name reaches it")
-    p_apply.add_argument("--expect", default=None,
+    p_write.add_argument("text", help=f"the description, up to {MAX_DESCRIPTION} characters")
+    p_write.add_argument("--expect", default=None,
                          help="the description the row was drawn from; refuse if the file "
                               "no longer says it")
 
-    p_reset = desc_sub.add_parser("reset", help="put the author's description back")
+    p_reset = desc_sub.add_parser("reset", help="put the author's description back, keeping "
+                                                "the note")
     p_reset.add_argument("skill")
     p_reset.add_argument("file", metavar="SKILL_MD",
-                         help="absolute path to the SKILL.md the row names, as for apply")
+                         help="absolute path to the SKILL.md the row names, as for write")
 
     # The one verb that takes something away. It is given absolute paths -- the `abs` field of a
     # scan's `removal.targets`, never the `~` display string beside it -- and it
