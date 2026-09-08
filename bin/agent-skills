@@ -637,6 +637,14 @@ def skill_roots() -> list[dict]:
     unless OPENCODE_DISABLE_EXTERNAL_SKILLS is set; Claude Code reads neither of
     the other two. That asymmetry is why `tools` is a list per root rather than
     one tool per path.
+
+    The fifth root is the one nobody puts anything in by hand. OpenCode's
+    `skills.urls` fetches skills over HTTP and caches them under
+    ~/.cache/opencode/skills, and they are loaded and charged for exactly like
+    the ones on disk -- on the machine this was written for, two of them, worth
+    about 274 tokens on every OpenCode turn. Leaving a cache directory out
+    because it is a cache would understate the one figure this widget exists to
+    print.
     """
     oc_external = not os.environ.get("OPENCODE_DISABLE_EXTERNAL_SKILLS")
     claude_tools = ["claude"] + (["opencode"] if oc_external else [])
@@ -646,6 +654,7 @@ def skill_roots() -> list[dict]:
         {"path": f"{HOME}/.config/opencode/skills", "tools": ["opencode"], "scope": "user"},
         {"path": f"{HOME}/.codex/skills", "tools": ["codex"], "scope": "user"},
         {"path": f"{HOME}/.agents/skills", "tools": agents_tools, "scope": "shared"},
+        {"path": f"{HOME}/.cache/opencode/skills", "tools": ["opencode"], "scope": "fetched"},
     ] + plugin_skill_roots()
 
 
@@ -926,8 +935,13 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
     if existing is not None:
         for tool in root["tools"]:
             if not any(m["tool"] == tool and m["path"] == mount_path for m in existing["mounts"]):
+                # `abs` on every mount, not only on the first root that reached the
+                # skill. It is the only field that can name a path to act on, and a
+                # display string with `~` in it re-expanded on the far side is how
+                # something gets deleted that nobody pointed at.
                 existing["mounts"].append(
-                    {"tool": tool, "path": mount_path, "link": "symlink" if is_link else "real"})
+                    {"tool": tool, "path": mount_path, "abs": dir_path,
+                     "link": "symlink" if is_link else "real"})
             # One file reachable from several roots is one skill in several tools.
             # diagnose-crash is a single SKILL.md that all three agents load, and
             # a `tools` list left at whichever root was scanned first would hide
@@ -935,8 +949,8 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
             if tool not in existing["tools"]:
                 existing["tools"].append(tool)
                 existing["state"].update(
-                    _skill_state(existing["dirName"], [tool], overrides,
-                                 existing["flags"]["builtin"]))
+                    _skill_state(existing["dirName"], existing["displayName"], [tool],
+                                 overrides, existing["flags"]["builtin"]))
         return
 
     why: list[str] = []
@@ -1012,7 +1026,7 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
                     "link": "symlink" if is_link else "real"}
                    for t in root["tools"]],
         "tools": list(root["tools"]),
-        "state": _skill_state(dir_name, root["tools"], overrides, bundled),
+        "state": _skill_state(dir_name, display, root["tools"], overrides, bundled),
         # A plugin's skill is addressed through its plugin: Claude Code calls it
         # `/impeccable:impeccable`, not `/impeccable`. Getting this wrong hands
         # the user a command their agent does not have.
@@ -1081,17 +1095,40 @@ def _mark_drift(items: list[dict]) -> None:
             it["driftPeers"] = peers
 
 
-def _skill_state(dir_name, tools, overrides, bundled):
+def _claude_override(overrides, dir_name, declared_name):
+    """Which `skillOverrides` key Claude Code will actually read for this skill.
+
+    Its own lookup is `overrides[name] ?? overrides[unqualifiedName]`, so a skill
+    answers to two keys and either one can be the one somebody wrote. Nearly always
+    they are the same string; `taste-skill` is the case where they are not, because
+    its SKILL.md declares `name: design-taste-frontend`. Reading only the directory
+    would miss an override written under the declared name, and reading only the
+    declared name would miss the far more common one. Declared first, to match the
+    order above, and the directory as the fallback it is there to be.
+    """
+    for key in (declared_name, dir_name):
+        if key and key in overrides:
+            return overrides[key]
+    return "on"
+
+
+def _skill_state(dir_name, declared_name, tools, overrides, bundled):
     state = {}
     if "claude" in tools:
         state["claude"] = {
-            "value": overrides.get(dir_name, "on"),
+            "value": _claude_override(overrides, dir_name, declared_name),
             "ladder": ["on", "name-only", "user-invocable-only", "off"],
             "writable": not bundled,
             "file": tilde(f"{HOME}/.claude/settings.json"),
         }
     if "opencode" in tools:
-        state["opencode"] = {"value": "allow", "writable": not bundled,
+        # Not writable, and the honest reason is that nobody has found the switch.
+        # Claude has `skillOverrides` and Codex has a `[[skills.config]]` block, both
+        # of them a documented key in a file the user owns. The nearest thing OpenCode
+        # has is `disabled_skills` in a config belonging to oh-my-openagent, which is
+        # a plugin and not OpenCode -- so claiming this is writable would promise a
+        # switch that only exists on machines running somebody else's add-on.
+        state["opencode"] = {"value": "allow", "writable": False,
                              "file": tilde(f"{HOME}/.config/opencode/opencode.json")}
     if "codex" in tools:
         state["codex"] = {"value": "enabled", "writable": not bundled, "needsRestart": True,

@@ -60,6 +60,86 @@ def write_skill(root, name, description="One skill, for the walk to find."):
         fh.write(f"---\nname: {name}\ndescription: {description}\n---\nbody\n")
 
 
+class ClaudeOverrideKey(unittest.TestCase):
+    """Claude Code reads `overrides[name] ?? overrides[unqualifiedName]`, so a
+    skill answers to two keys. Reading only one of them reports a state the agent
+    does not have -- on the very field the panel invites you to go and check."""
+
+    def _state(self, home, dir_name):
+        def build(d):
+            root = os.path.join(d, ".claude", "skills")
+            os.makedirs(os.path.join(root, dir_name), exist_ok=True)
+            with open(os.path.join(root, dir_name, "SKILL.md"), "w", encoding="utf-8") as fh:
+                fh.write("---\nname: design-taste-frontend\ndescription: A skill.\n---\nbody\n")
+            os.makedirs(os.path.join(d, ".claude"), exist_ok=True)
+            with open(os.path.join(d, ".claude", "settings.json"), "w", encoding="utf-8") as fh:
+                json.dump({"skillOverrides": home}, fh)
+        result = scan_with_home(build)
+        item = next(i for i in result["items"] if i["dirName"] == dir_name)
+        return item["state"]["claude"]["value"]
+
+    def test_an_override_under_the_directory_name_is_read(self):
+        self.assertEqual(self._state({"taste-skill": "off"}, "taste-skill"), "off")
+
+    def test_an_override_under_the_declared_name_is_read(self):
+        # The case that used to be invisible: the directory is `taste-skill` and
+        # the SKILL.md declares `design-taste-frontend`.
+        self.assertEqual(self._state({"design-taste-frontend": "off"}, "taste-skill"), "off")
+
+    def test_the_declared_name_wins_the_way_it_does_in_the_agent(self):
+        self.assertEqual(
+            self._state({"design-taste-frontend": "name-only", "taste-skill": "off"}, "taste-skill"),
+            "name-only")
+
+    def test_no_override_is_still_on(self):
+        self.assertEqual(self._state({}, "taste-skill"), "on")
+
+
+class MountsAreAddressable(unittest.TestCase):
+    """Every mount carries the absolute path it was found at. `path` is a display
+    string with a `~` in it, and re-expanding one on the far side to build an
+    argument for a destructive command is how something gets removed that nobody
+    pointed at."""
+
+    def test_a_skill_reached_from_a_second_root_keeps_abs_on_both(self):
+        def build(d):
+            claude = os.path.join(d, ".claude", "skills")
+            agents = os.path.join(d, ".agents", "skills")
+            write_skill(claude, "shared")
+            os.makedirs(agents, exist_ok=True)
+            os.symlink(os.path.join(claude, "shared"), os.path.join(agents, "shared"))
+        result = scan_with_home(build)
+        item = next(i for i in result["items"] if i["dirName"] == "shared")
+        self.assertGreater(len(item["mounts"]), 1, item["mounts"])
+        for m in item["mounts"]:
+            self.assertIn("abs", m, m)
+            self.assertTrue(m["abs"].startswith("/"), m)
+
+
+class FetchedSkillsAreCounted(unittest.TestCase):
+    """OpenCode's `skills.urls` fetches skills over HTTP and caches them under
+    ~/.cache/opencode/skills. They are loaded and charged for like any other, so
+    leaving the cache out understates the one figure this widget prints."""
+
+    def test_a_cached_skill_counts_against_opencode(self):
+        def build(d):
+            write_skill(os.path.join(d, ".cache", "opencode", "skills"), "security-review")
+        result = scan_with_home(build)
+        item = next(i for i in result["items"] if i["dirName"] == "security-review")
+        self.assertEqual(item["tools"], ["opencode"])
+        self.assertEqual(item["scope"], "fetched")
+        self.assertGreater(result["counts"]["alwaysOnTokens"].get("opencode", 0), 0)
+
+    def test_it_is_not_hidden_as_a_builtin(self):
+        # `showBundled` is off by default. A fetched skill that read as bundled
+        # would vanish from the default view and take its cost with it.
+        def build(d):
+            write_skill(os.path.join(d, ".cache", "opencode", "skills"), "security-review")
+        result = scan_with_home(build)
+        item = next(i for i in result["items"] if i["dirName"] == "security-review")
+        self.assertFalse(item["flags"]["builtin"], item["flags"])
+
+
 class Frontmatter(unittest.TestCase):
     def test_plain_scalar(self):
         fm = ax.parse_frontmatter_block("name: api-design\ndescription: REST patterns.")

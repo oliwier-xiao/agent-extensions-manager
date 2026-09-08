@@ -86,7 +86,7 @@
         "type": "boolean",
         "label": "Rescan every time the panel opens",
         "defaultValue": true,
-        "description": "A full scan of four skill roots and every config file takes about thirty milliseconds, which is well under the time it takes the panel to draw, so this is on and the list is never stale. Turn it off only if you keep skills on a network mount, where a stat of every file is no longer free; the cached scan is then reused and refreshed in the background."
+        "description": "A full scan of five skill roots and every config file takes about thirty milliseconds, which is well under the time it takes the panel to draw, so this is on and the list is never stale. Turn it off only if you keep skills on a network mount, where a stat of every file is no longer free; the cached scan is then reused and refreshed in the background."
       }
     ]
   }

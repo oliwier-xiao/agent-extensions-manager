@@ -304,15 +304,15 @@ bin/agent-skills doctor
 ```
 
 ```
-agent-skills 0.1.0   scan 27.1 ms
-skills            39
+agent-skills 0.1.0   scan 22.6 ms
+skills            41
   claude          16   ~1406 tok always on
   codex            8   ~808 tok always on
-  opencode        32   ~4186 tok always on
+  opencode        34   ~4460 tok always on
 mcp servers       7
 claude plugins    1
 running now       claude, opencode
-categories        automation 16, agents 5, code 4, design 3, content 2, infra 2, media 2, system 2, data 1, security 1, web 1
+categories        automation 16, agents 5, code 4, design 3, security 3, content 2, infra 2, media 2, system 2, data 1, web 1
 ```
 
 `bin/agent-skills scan` prints the same inventory as one line of JSON, which is what the panel reads.
