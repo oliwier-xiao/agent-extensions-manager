@@ -6,18 +6,11 @@ First release. Every skill, plugin and MCP server Claude Code, OpenCode and Code
 searchable list on the bar, with what each one costs in tokens on every turn and the command that
 invokes it in the spelling that particular agent expects.
 
-No agent's configuration file is written at any point — nothing here turns a skill on or off, and
-every row says so where you would expect a switch. Three files of its own:
-`~/.config/agent-skills/categories.json` for your filing, `descriptions.json` beside it for any
-description you have rewritten, and a cache under `~/.cache/agent-skills` holding one answer pacman
-already gave. Two things it can change in an agent's own tree, each confirmed on its own card: a
-skill directory you named, moved to the desktop trash rather than deleted, and the `description:`
-value of one `SKILL.md`, with the author's own text kept so it can be put back.
-
-Both stores refuse to be written through a symlink rather than renaming over one, so a store kept in a
-dotfiles checkout is left alone instead of being orphaned; every rename is committed to disk, not only the
-bytes it renamed; and a store that cannot be read stops every `describe` verb rather than reading as a
-machine nobody has edited anything on.
+**Read-only over everything that is not its own.** No `SKILL.md` is opened for writing, no agent's
+configuration file is touched, nothing is deleted or moved, and the helper starts no other program.
+It writes two files, both under `~/.config/agent-skills`: `categories.json` for the categories you
+filed things under, and `descriptions.json` for the notes you wrote yourself, which no agent reads.
+The test suite asserts that rather than the README promising it.
 
 ### What it does
 
@@ -41,27 +34,13 @@ machine nobody has edited anything on.
 - **Flags that mean something** — a skill answering to two names across agents, an expired MCP
   token, a copy that has drifted from its original. A category the classifier was unsure of is not a
   problem and is not reported as one.
-- **Rewriting a description**, with `^D`, because the description is not a label — it is what every
-  agent copies into its system prompt on every turn, and eight wordy skills here are a third of the
-  bill. Saving a note changes nothing an agent reads and the row keeps its cost, which the card says
-  plainly; applying it writes the `description:` value of that one `SKILL.md`, and that is what moves
-  the figure. Only that value changes, the file is read back to confirm the new text parses as
-  exactly what was asked for, and the author's words are kept so **return to default** works however
-  long afterwards. A skill installed twice is two files, and the copy that did not get the rewrite
-  says where it went rather than claiming it.
-- **Removing a skill**, with `^Del`, which asks first and names the paths rather than the row. A
-  skill is not one thing on disk, so the question is not one question: a directory that is yours goes
-  to the trash whole; a skill a package owns is offered only as the links in your own directories; a
-  skill a plugin brought points at the plugin; and the six Codex rewrites from an embedded copy every
-  launch are refused outright, because a panel that offered the button anyway would be lying about
-  what it can do. Nothing is deleted, every path is re-examined at the moment it is acted on, and a
-  link that cannot be moved holds back the directory it points at.
-
+- **A note of your own**, with `^D`, kept in the widget's own file and drawn above the description in
+  that skill's card. No agent reads it and it is in no figure anywhere, so it costs nothing on any
+  turn — write what a skill is for in your own words, or in your own language, and the search reads it
+  too. The description under it is the file's own and is reported as it stands: what an agent loads on
+  its next turn is not a bar widget's to change.
 ### Requirements
 
-Omarchy 4 with its Quickshell bar, `python3` at `/usr/bin/python3`, and — for removal only —
-`/usr/bin/gio` from `glib2`, which a stock install already has because most of the desktop depends on
-it. Without it the panel still reads everything and only the removal is refused. No Python package
-beyond the standard library: the frontmatter reader is hand-written rather than reaching for PyYAML, which is
-not in the Omarchy base set and which rejects real skill files all three agents read without
-complaint.
+Omarchy 4 with its Quickshell bar and `python3` at `/usr/bin/python3`. No Python package beyond the
+standard library: the frontmatter reader is hand-written rather than reaching for PyYAML, which is not
+in the Omarchy base set and which rejects real skill files all three agents read without complaint.

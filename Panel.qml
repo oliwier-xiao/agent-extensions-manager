@@ -12,27 +12,25 @@ import qs.Ui
 // wl-copy and xdg-open are the other two, and neither is handed anything but a
 // string the user has just asked to have put somewhere.
 //
-// The helper registers five subcommands. `scan` and `doctor` only read.
+// The helper registers four subcommands. `scan` and `doctor` only read.
 // `category` and `describe note` write the two files this plugin owns,
 // ~/.config/agent-skills/categories.json and descriptions.json, which record
 // nothing but which shelf a skill was filed on, what that shelf is called, and
-// the note somebody wrote about a skill for themselves. `remove`, `describe
-// write` and `describe reset` are the three that touch something this plugin did
-// not write, and each of them re-stats every path at the moment it acts rather
-// than trusting the row that asked. Nothing here ever opens a file for writing
-// -- each of those is a helper run with the change in argv -- so what a reviewer
-// has to read to believe it is the helper's argument handling rather than the
-// whole of this file.
+// the note somebody wrote about a skill for themselves. Nothing here ever opens
+// a file for writing -- each of those two is a helper run with the change in
+// argv -- so what a reviewer has to read to believe it is the helper's argument
+// handling rather than the whole of this file.
 //
-// The claim that matters, stated at the width it is actually true: no agent's
-// configuration file is written at any point. Two things in an agent's tree can
-// change, and each is confirmed by name on its own card before it does: a skill
-// directory, which is moved to the desktop trash rather than deleted, and the
-// value of one `description:` key, whose author's text is kept so it can be put
-// back and every other byte of the file comes through untouched. Every row still
-// says where its own state is written and what it currently is, because that
-// state is theirs and this panel never writes it -- removing a skill and
-// switching one off are different acts, and only the first is here.
+// The claim that matters, stated at the width it is actually true: nothing
+// outside those two files is written at any point. No SKILL.md is opened for
+// writing, no agent's configuration file is touched, nothing is deleted or
+// moved. Two earlier versions of this panel could rewrite the `description:`
+// value of somebody else's SKILL.md and move a skill directory to the desktop
+// trash; both are gone, because those are changes to what an agent loads on its
+// next turn and no confirmation makes that the right shape for a bar widget
+// somebody installs from a marketplace. Every row still says where its own state
+// is written and what it currently is, because that state is theirs to change
+// and this panel only reports it.
 Panel {
   id: root
   moduleName: "oliwier.agent-skills-manager"
@@ -343,37 +341,19 @@ Panel {
   // is how the panel knows whether there is anything to save and whether backing
   // out is dropping work.
   //
-  // Their own text rather than `pickerText`, because that one is a name or a
-  // filter and is capped at thirty-two characters on the way in. Both of these
-  // run to a paragraph, and the cap here is the one the store and the scanner
-  // already agree on.
+  // Its own text rather than `pickerText`, because that one is a name or a
+  // filter and is capped at thirty-two characters on the way in. A note runs to
+  // a paragraph, and the cap here is the one the store and the scanner already
+  // agree on.
   readonly property int describeLimit: 1024
   property string describeNote: ""
   property string describeNoteBase: ""
-  property string describeText: ""
-  property string describeBase: ""
   property bool describeAsking: false
 
-  // Which of the two fields the keystrokes are going into. The panel has no
-  // focused QML editor -- the key catcher owns every key and the caret is drawn
-  // -- so with two fields on screen there has to be a value that says which one
-  // is being typed at, and it has to be visible in the field itself rather than
-  // inferred. "note" or "description", and nothing else answers to it.
-  property string describeFocus: "note"
-
-  // Dirty per field, because Save writes each of them separately and a prompt
-  // that named the wrong one would be asking about a change nobody made.
-  //
-  // The note is dirty when it differs, empty included: clearing a note is a
-  // save. The description is not, because an empty description is not a rewrite
-  // -- the helper refuses one and so does this, and `return to default` is the
-  // control that means "give the row back to its author".
-  readonly property bool describeNoteDirty: root.pickerMode === "describe"
+  // Dirty when it differs, empty included: clearing a note is a save, and there
+  // is no other control for taking one back.
+  readonly property bool describeDirty: root.pickerMode === "describe"
     && root.describeNote.trim() !== root.describeNoteBase
-  readonly property bool describeTextDirty: root.pickerMode === "describe"
-    && root.describeText.trim() !== ""
-    && root.describeText.trim() !== root.describeBase
-  readonly property bool describeDirty: root.describeNoteDirty || root.describeTextDirty
 
   // Whether the editor on screen has anything to write. Two editors share the
   // Save button in the title row now -- a category's name and colour, and a
@@ -722,21 +702,19 @@ Panel {
     onTriggered: if (scanProc.running) scanProc.signal(9)
   }
 
-  // The same deadline the scan has always had, for the two verbs that write and
-  // the one that files. The scan's own timeout message names the hazard --
-  // "a skill root may be on a network mount" -- and every one of these walks the
-  // same roots: the helper re-stats each path at the moment it acts, and on a
-  // hung mount that blocks in uninterruptible sleep with nothing bounding it.
-  // Without this the panel's writing half simply stops: both openers refuse a
-  // second run while the first is alive, so one wedged helper leaves the row
-  // that asked with no answer, no timeout and no way out short of reloading the
-  // shell.
+  // The same deadline the scan has always had, for the two verbs that write this
+  // plugin's own files. The scan's own timeout message names the hazard --
+  // "a skill root may be on a network mount" -- and both of these walk the same
+  // roots to find the skill they are named after, which on a hung mount blocks
+  // in uninterruptible sleep with nothing bounding it. Without this the panel's
+  // writing half simply stops: both openers refuse a second run while the first
+  // is alive, so one wedged helper leaves the row that asked with no answer, no
+  // timeout and no way out short of reloading the shell.
   //
-  // Reported, never killed. A removal that is still going is a filesystem change
-  // in progress and its own report is the only record of which paths went; and a
-  // signalled helper skips the cleanup that unlinks its temp file, which would
-  // strand a SKILL.md.tmp in somebody else's skill directory with nothing to
-  // sweep it. So the deadline buys a sentence, not an interrupt.
+  // Reported, never killed. Both of these write one small file of this plugin's
+  // own, whole and then renamed, so there is no half-written state to interrupt
+  // and nothing a signal would tidy up. The deadline buys a sentence, not an
+  // interrupt.
   //
   // `reported` is set first so a late answer from a helper that did come back
   // cannot flash a second line contradicting this one.
@@ -753,22 +731,8 @@ Panel {
   }
 
   WriteWatchdog {
-    id: removeWatchdog
-    what: "removal"
-    // Thirty seconds a path is what the helper allows `gio trash`, spent one
-    // path at a time, plus room for the re-stat that precedes them.
-    interval: Math.max(60000, 30000 * removeProc.paths + 15000)
-    onFired: {
-      if (!removeProc.inflight) return
-      removeProc.reported = true
-      root.flashResult(removeWatchdog.say() + " Run it in a terminal: "
-                       + root.helperPath + " remove --dry-run", "error")
-    }
-  }
-
-  WriteWatchdog {
     id: describeWatchdog
-    what: "description"
+    what: "note"
     interval: 15000
     onFired: {
       if (!describeProc.inflight) return
@@ -813,114 +777,6 @@ Panel {
         // version of the same sentence.
         root.flashResult("The change was refused. Run bin/agent-skills category by hand to see why", "error")
       }
-    }
-  }
-
-  // ---- Removal ------------------------------------------------------------
-  //
-  // The other thing the panel changes, and the only one that touches anything
-  // outside this plugin's own config file. It goes through the same spawn as a
-  // shelf change and through the helper's own `remove`, which moves a path to
-  // the desktop trash rather than deleting it and re-checks every path at the
-  // moment it acts. That re-check is the important half: the row this was
-  // started from was drawn by a scan that has already finished, so what it says
-  // is advisory, and what the helper stats is what is there now.
-  //
-  // One at a time and refused rather than queued, the same rule a shelf change
-  // follows. It matters more here: two removals started from two keystrokes are
-  // two changes to a filesystem that nothing in this panel could put back in
-  // order if the second one went wrong half way.
-  function runRemove(paths, label) {
-    if (removeProc.running) { root.flashResult("One at a time", "error"); return }
-    removeProc.label = String(label || "")
-    removeProc.reported = false
-    removeProc.inflight = true
-    removeProc.paths = paths.length
-    removeWatchdog.restart()
-    root.startHelper(removeProc, ["remove", "--"].concat(paths))
-  }
-
-  // Report what the helper said it did, and nothing else. A count worked out
-  // here from what was asked for would be a claim about a filesystem this panel
-  // never looked at, and the one case that matters is exactly the case where the
-  // two disagree: a skill root on a network mount, where the trash is refused
-  // and the path is still there afterwards.
-  //
-  // `removed` is what gio confirmed. The helper lists a path there without
-  // moving it only under --dry-run, which nothing in this panel asks for.
-  function consumeRemoval(raw) {
-    var parsed = null
-    try { parsed = JSON.parse(String(raw || "")) } catch (e) { parsed = null }
-    if (!parsed || typeof parsed !== "object") return
-    removeProc.reported = true
-
-    var gone = parsed.removed && typeof parsed.removed.length === "number" ? parsed.removed : []
-    var kept = parsed.refused && typeof parsed.refused.length === "number" ? parsed.refused : []
-    var named = removeProc.label !== "" ? "  " + removeProc.label : ""
-    var paths = String(gone.length) + (gone.length === 1 ? " path" : " paths")
-
-    if (kept.length === 0 && gone.length > 0) {
-      root.flashResult("Moved to the trash" + named + "  ·  " + paths, "ok")
-      return
-    }
-    // A refusal is repeated in the helper's own words. It names the path and the
-    // reason, and the panel has nothing truer to say about either -- least of
-    // all about "Trashing on system internal mounts is not supported", which is
-    // the sentence a user whose skills live on another filesystem has to read.
-    var first = kept.length > 0 ? root.clean(kept[0].reason, 150) : "no reason given"
-    if (gone.length === 0) {
-      root.flashResult("Nothing was removed  ·  " + first, "error")
-      return
-    }
-    root.flashResult(paths + " removed, " + String(kept.length) + " refused  ·  " + first,
-                     "error")
-  }
-
-  // exited and streamFinished have no guaranteed order, so the verdict is taken
-  // one turn later, when both have certainly landed. Silence is never read as a
-  // success: a run whose report could not be parsed is reported as a run nobody
-  // can vouch for, and the exit code is not consulted, because the helper exits
-  // 0 for a run that removed one path and refused three.
-  function settleRemoval() {
-    if (removeProc.reported || removeProc.inflight) return
-    removeProc.reported = true
-    root.flashResult("bin/agent-skills did not say what it removed. Run it in a terminal: "
-      + root.helperPath + " remove --dry-run", "error")
-  }
-
-  Process {
-    id: removeProc
-    // What was under the cursor when this was sent, so the answer can still name
-    // it after the rescan has taken the row away.
-    property string label: ""
-    // How many paths went with this run, so the deadline can be what the helper
-    // is actually allowed to spend rather than one flat number.
-    property int paths: 0
-    // Whether the helper's own report has been read, and whether the run is
-    // still going. Both are the panel's own, rather than the process's, for the
-    // reason the scan keeps `scanning`: they have to be true at the moment the
-    // verdict is taken rather than at the moment the process object noticed.
-    property bool reported: false
-    property bool inflight: false
-
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.consumeRemoval(text)
-        Qt.callLater(root.settleRemoval)
-      }
-    }
-
-    onExited: function (exitCode, exitStatus) {
-      removeWatchdog.stop()
-      removeProc.inflight = false
-      // Re-read whatever happened, a run that removed nothing included. More
-      // rows than this one can be stale by the end: a skill reached through a
-      // symlink from another agent's root leaves the scan the moment its target
-      // does, and one that was only unlinked is still on disk under the agent
-      // that owns it.
-      root.startScan()
-      Qt.callLater(root.settleRemoval)
     }
   }
 
@@ -1166,59 +1022,13 @@ Panel {
     else if (by === "path") placedBy = "where it is installed"
     else if (by === "none") placedBy = "nothing matched, so it is waiting to be filed"
 
-    // What removing this skill would mean, decided by the helper because the
-    // helper is the half that can stat a path and this one cannot. Nothing here
-    // is re-derived: not the mode, not the paths, not which agents lose it. A
-    // second opinion computed in QML is how the two halves come to disagree
-    // about which directory is about to move, and `linkage` reads "real" for a
-    // skill that other roots reach by symlink, so the mounts are the only honest
-    // source for a target and the helper has already reduced them to one.
+    // Your own note about this skill, and nothing else: the description under it
+    // on the card is the file's own and is reported rather than editable.
     //
-    // Every string that will be drawn goes through clean() like the rest of the
-    // record. `abs` deliberately does not: it is never drawn, it is what names
-    // the directory to `agent-skills remove`, and clean() collapses runs of
-    // whitespace and truncates -- on a path neither of those is cosmetic, and
-    // either one names something else or nothing. Absolute is the only thing
-    // checked here, because the helper re-stats every path before it acts.
-    var removal = null
-    var rem = item.removal
-    if (rem && typeof rem === "object") {
-      var targets = []
-      var srcRem = Array.isArray(rem.targets) ? rem.targets : []
-      for (var ri = 0; ri < srcRem.length && ri < 12; ri++) {
-        var tgt = srcRem[ri]
-        if (!tgt) continue
-        var abs = String(tgt.abs || "")
-        if (abs.charAt(0) !== "/" || abs.length > 4096) continue
-        targets.push({ abs: abs,
-                       path: root.clean(tgt.path, 200),
-                       link: root.clean(tgt.link, 16),
-                       tools: root.toolNames(tgt.tools) })
-      }
-      removal = {
-        mode: root.clean(rem.mode, 16),
-        why: root.clean(rem.why, 300),
-        targets: targets,
-        loses: root.toolNames(rem.loses),
-        keeps: root.toolNames(rem.keeps),
-        restorable: rem.restorable === true,
-        restoreNote: root.clean(rem.restoreNote, 200),
-        command: root.clean(root.argvText(rem.command), 200)
-      }
-    }
-
-    // Your own note about this skill, what SKILL.md says now, what its author
-    // wrote, and whether this file can be written at all. Read from the helper
-    // and never worked out here, for the reason the removal plan is: the helper
-    // is the half that can stat a path and open a file, and a second opinion
-    // computed in QML is how the two halves come to disagree about which text
-    // an agent is loading.
-    //
-    // The three texts go through typable() rather than clean(). They are drawn,
-    // but two of them also seed the editor, and a seed that has had its spacing
-    // collapsed and an ellipsis appended is not the author's description any
-    // more -- it is a rewrite nobody asked for, one Save away from being written
-    // back over the original.
+    // It goes through typable() rather than clean(). It is drawn, but it also
+    // seeds the editor, and a seed that has had its spacing collapsed and an
+    // ellipsis appended is not what you wrote -- it is an edit nobody asked for,
+    // one Save away from replacing the note it came from.
     //
     // An older helper prints no `describe` at all, and then this stays null and
     // the card draws none of the controls. Saying nothing is the honest answer
@@ -1226,31 +1036,8 @@ Panel {
     var describe = null
     var dsc = item.describe
     if (dsc && typeof dsc === "object") {
-      describe = {
-        noteText: root.typable(dsc.noteText, 1024),
-        fileText: root.typable(dsc.fileText, 1024),
-        authorText: root.typable(dsc.authorText, 1024),
-        edited: dsc.edited === true,
-        canWrite: dsc.canWrite === true,
-        whyNot: root.clean(dsc.whyNot, 240),
-        writeNote: root.clean(dsc.writeNote, 240),
-        handEdited: dsc.handEdited === true,
-        // A path, and drawn only. What travels to the helper is `describeAbs`
-        // below, which is never rebuilt from a string that has been through
-        // clean().
-        otherCopy: root.clean(dsc.otherCopy, 240)
-      }
+      describe = { noteText: root.typable(dsc.noteText, 1024) }
     }
-
-    // The file the two writing verbs are told to change, built from the path the
-    // helper reported rather than from the string the card draws: tildify() is
-    // one-way, and a path re-expanded from `~` is a guess about where home was
-    // when the scan ran. Absolute is the only thing checked here, the same as a
-    // removal target, because the helper recomputes its own candidates for this
-    // name and refuses anything that is not one of them.
-    var realDir = String(item.realPath || "")
-    var descAbs = realDir.charAt(0) === "/" && realDir.length <= 4096
-      ? realDir + "/SKILL.md" : ""
 
     var name = root.clean(item.displayName, 120)
     var desc = root.clean(item.description, 600)
@@ -1297,7 +1084,6 @@ Panel {
       description: desc,
       switches: switches,
       mounts: mounts,
-      removal: removal,
       peers: peers,
       variants: variants,
       declaredVersion: root.clean(item.declaredVersion, 32),
@@ -1305,18 +1091,10 @@ Panel {
       argumentChoices: args,
       argumentHint: root.clean(item.argumentHint, 200),
       describe: describe,
-      // Where the helper will write, in the two strings a removal target already
-      // keeps: this one is drawn and the one below is the one that travels. The
-      // drawn string is never the string anything is done to, because clean()
-      // collapses runs of whitespace and truncates, and on a path neither of
-      // those is cosmetic -- either one names something else or nothing.
+      // Drawn only, and never handed to anything: the note the editor writes is
+      // filed under the skill's name, not under a path. It is here so the editor
+      // can say which copy of the name you opened.
       describeFile: root.clean(root.tildify(String(item.realPath || "")) + "/SKILL.md", 200),
-      // The file `describe write` and `describe reset` are handed, so that the
-      // file that changes is the file this row promised rather than whichever
-      // copy of the name the helper would have reached for first. On a skill
-      // installed twice under one name those are different files, and the card
-      // names this one.
-      describeAbs: descAbs,
       facts: [
         // The hint as its author wrote it, so the picker's list can be checked
         // against the source rather than trusted.
@@ -1949,16 +1727,6 @@ Panel {
     // it borrows the same two answers the style editor asks it with.
     if (root.pickerMode === "describe")
       return root.describeAsking ? ["\u0000save", "\u0000discard"] : []
-    // Two answers to one question, in the shape the unsaved-category prompt
-    // already uses, and the first of them is the one that changes nothing. A
-    // mode with nothing to answer draws no chips at all -- an unwritable
-    // SKILL.md, a file changed since this panel wrote it, and an edit that
-    // belongs to another copy of the name are all answers the helper has already
-    // given, and the line above the chips says so instead.
-    if (root.pickerMode === "reset")
-      return root.describeResettable() ? ["\u0000keepmine", "\u0000restore"] : []
-    if (root.pickerMode === "remove")
-      return root.removeAnswerable() ? ["\u0000keep", "\u0000remove"] : []
     return []
   }
 
@@ -2016,234 +1784,22 @@ Panel {
     root.pickerIndex = 0
   }
 
-  // One row at a time, and deliberately no multi-select. Three reasons, decided
-  // rather than missed: the set you can point at and the set that can actually
-  // be removed are not the same set -- a plugin's skill is its plugin's to
-  // remove and one under a .system directory is written back on the next launch
-  // -- so a checkbox column would offer a choice the panel would then have to
-  // take back one row at a time; the rows are independent, so removing four is
-  // four small decisions rather than one big one; and a confirmation covering a
-  // list is the confirmation least likely to be read, which is the worst place
-  // to put the one action here that cannot be undone from inside the panel.
-  //
-  // Row before mode, for the reason openPicker states: the overlay's model and
-  // its command line are bound to the mode and would otherwise re-evaluate
-  // against the previous pick's null row.
-  function openRemovePicker(row) {
-    root.pickerRow = row
-    root.pickerMode = "remove"
-    root.pickerReturn = ""
-    root.pickerCategory = ""
-    root.pickerNaming = false
-    root.pickerText = ""
-    // On the answer that changes nothing. A confirmation for something
-    // irreversible that opens with the irreversible answer under the cursor is
-    // a confirmation in name only.
-    root.pickerIndex = 0
-  }
-
-  // The removal the scan attached to a row, or null. Everything the
-  // confirmation says is read from here, which is what keeps the panel from
-  // deciding for itself what removing a skill would mean.
-  function removalOf(row) {
-    if (!row || row.rowType === "header" || !row.view) return null
-    var rem = row.view.removal
-    if (!rem || typeof rem !== "object" || !rem.mode) return null
-    return rem
-  }
-
-  function removeMode() {
-    var rem = root.removalOf(root.pickerRow)
-    return rem ? String(rem.mode) : ""
-  }
-
-  // Whether there is anything to answer. `refuse` and `delegate` are the
-  // helper's way of saying that this skill is not the panel's to move -- a
-  // directory another user owns, one Codex rewrites on every launch, one a
-  // plugin brought in -- and neither draws an answer chip, because a control
-  // the panel could not honour is a control that lies about what it does.
-  function removeAnswerable() {
-    var mode = root.removeMode()
-    if (mode !== "trash" && mode !== "unlink") return false
-    return root.removeTargets().length > 0
-  }
-
-  // The paths, in the order the helper put them: every symlink first and the
-  // real directory last, so a run that is refused half way cannot leave a link
-  // pointing at a directory that has already gone. Each path travels once --
-  // a second invocation on a path already trashed could only fail, and would be
-  // reported as a failure that never happened.
-  function removeTargets() {
-    var rem = root.removalOf(root.pickerRow)
-    var src = rem && rem.targets && typeof rem.targets.length === "number" ? rem.targets : []
-    var out = []
-    for (var i = 0; i < src.length; i++) {
-      var abs = String(src[i].abs || "")
-      if (abs.charAt(0) !== "/") continue
-      if (out.indexOf(abs) < 0) out.push(abs)
-    }
-    return out
-  }
-
-  // The same targets as the confirmation draws them. The display path and the
-  // absolute path are two different strings on purpose: the one on screen is
-  // the one the rest of the panel shows, and the one that travels is never
-  // rebuilt from it, because a path re-expanded from `~` is a guess about where
-  // home was when the scan ran.
-  function removeTargetRows() {
-    var rem = root.removalOf(root.pickerRow)
-    var src = rem && rem.targets && typeof rem.targets.length === "number" ? rem.targets : []
-    var out = []
-    var seen = []
-    for (var i = 0; i < src.length; i++) {
-      // Dropped on the same rule and in the same order as the list that
-      // travels, so the card cannot draw a chip for a path nothing will be done
-      // to, or leave one out.
-      var abs = String(src[i].abs || "")
-      if (abs.charAt(0) !== "/" || seen.indexOf(abs) >= 0) continue
-      seen.push(abs)
-      out.push({ path: String(src[i].path || ""),
-                 link: String(src[i].link || ""),
-                 tools: String(src[i].tools || "") })
-    }
-    return out
-  }
-
-  // What the second chip does, in the words of the mode the helper chose.
-  // `unlink` trashes the links and leaves what they point at, because what they
-  // point at is not this user's to move.
-  function removeVerb() {
-    if (root.removeMode() === "unlink")
-      return root.removeTargets().length === 1 ? "Trash the link" : "Trash the links"
-    return "Move to the trash"
-  }
-
-  function removeSentence() {
-    var named = root.pickerRow && root.pickerRow.view
-      ? root.clean(root.pickerRow.view.name, 60) : ""
-    if (root.removeMode() === "unlink")
-      return root.removeTargets().length === 1
-        ? "Trash the link to " + named + ", and leave what it points at"
-        : "Trash the links to " + named + ", and leave what they point at"
-    return "Move " + named + " to the trash"
-  }
-
-  // The rest of the removal object, as the label-and-value grid the expanded row
-  // already uses for its facts. Only what the helper filled in: an empty value
-  // draws no row, so a removal that leaves no agent behind prints no "kept by"
-  // line rather than an empty one.
-  function removeFacts() {
-    var rem = root.removalOf(root.pickerRow)
-    if (!rem) return []
-    var out = []
-    out.push({ label: "loses it", value: String(rem.loses || "") })
-    out.push({ label: "kept by", value: String(rem.keeps || "") })
-    // What `restorable` false means is that the helper will not vouch for the
-    // way back, not that the skill is about to be destroyed -- it says so of a
-    // path on another filesystem, where the likeliest outcome is that the trash
-    // refuses it and nothing moves at all. So the line promises or declines to
-    // promise, and the note underneath is where the reason is.
-    if (root.removeAnswerable())
-      out.push({ label: "afterwards", value: rem.restorable === true
-        ? "you can put it back from the trash"
-        : "no promise you can put this one back" })
-    out.push({ label: "note", value: String(rem.restoreNote || "") })
-    out.push({ label: "removed by", value: String(rem.command || "") })
-    return out
-  }
-
   // The describe record the scan attached to a row, or null. Everything the two
   // description screens say is read from here, and a build of the helper that
   // does not print one leaves the controls undrawn rather than guessed at.
   //
-  // Tested on the one key the model always fills with a real boolean rather than
+  // Tested on the one key the model always fills with a real string rather than
   // on the object merely being there, so a record that arrived as something
   // empty reads as no answer instead of as an answer of undefined. Taking a
   // record rather than a row, because the card asks about a view and the picker
   // asks about a row, and the two must not disagree about what counts.
   function describeRecord(d) {
-    return d && typeof d === "object" && typeof d.canWrite === "boolean" ? d : null
+    return d && typeof d === "object" && typeof d.noteText === "string" ? d : null
   }
 
   function describeOf(row) {
     if (!row || row.rowType === "header" || !row.view) return null
     return root.describeRecord(row.view.describe)
-  }
-
-  // The SKILL.md this row is drawn from, absolute, exactly as the scan reported
-  // it. It travels with `write` and `reset` so the file that changes is the one
-  // the card named: a name can be installed twice, and without this the helper
-  // picks a copy of its own. Empty is a refusal rather than a fallback, because
-  // a name-only command is the defect.
-  function describeTarget(row) {
-    var abs = row && row.view ? String(row.view.describeAbs || "") : ""
-    return abs.charAt(0) === "/" ? abs : ""
-  }
-
-  // Whether the description field can reach the file it was seeded from. The
-  // note never asks this -- it goes to this plugin's own store, which is this
-  // plugin's to write -- so an unwritable SKILL.md costs the editor one of its
-  // two fields and nothing else.
-  function describeWritable(row) {
-    var d = root.describeOf(row)
-    if (!d || d.canWrite !== true || root.describeTarget(row) === "") return false
-    // A description longer than the scan carries arrives here already cut, with
-    // an ellipsis where the rest of it was. Saving that would write the cut into
-    // the file and lose the author's last paragraphs to a field that never had
-    // them. One description on this machine is over a thousand characters, so
-    // this is a row somebody will really open.
-    return String(d.fileText || "").length < root.describeLimit
-  }
-
-  // Why the description field is not writable, in the reader's terms. The helper
-  // answers for the file; this answers for the one case the helper cannot see,
-  // which is the editor's own reach.
-  function describeWhyNot(row) {
-    var d = root.describeOf(row)
-    if (!d) return ""
-    if (String(d.fileText || "").length >= root.describeLimit)
-      return "This description is longer than the editor holds, so it can only be changed in the file itself."
-    return String(d.whyNot || "")
-  }
-
-  // What the row will cost once the description in the editor is the description
-  // in the file: the row's own measurement, moved by the characters this field
-  // has gained or lost, at the divisor the scan was taken with. Not a second
-  // tokeniser -- a figure computed one way here and another way in the helper
-  // would be two claims about the single number this panel exists to print, and
-  // they would drift apart by more than rounding.
-  //
-  // The length it is measured against is what the field opened with, which is
-  // what SKILL.md says. The note has no length in this and never will.
-  function describeProjected(now, chars) {
-    var moved = root.describeText.trim().length - root.describeBase.length
-    // From the character count the scan measured, not from the figure it already
-    // rounded. Rounding a rounded number puts this one token away from what the
-    // next scan prints, which is the same number in the same panel disagreeing
-    // with itself. Half up, because that is what the helper does.
-    if (chars !== undefined && chars !== null)
-      return Math.max(0, Math.floor((Number(chars) + moved) / root.divisor + 0.5))
-    return Math.max(0, Math.round(Number(now) + moved / root.divisor))
-  }
-
-  // Whether `return to default` has anything to put back and can put it. The
-  // rule the removal card already follows: a control the panel could not honour
-  // is a control that lies about what it does, so an unwritable SKILL.md, a file
-  // that no longer says what this panel wrote into it, and an edit belonging to
-  // another copy of the name each draw their reason instead of a chip.
-  //
-  // `handEdited` refuses here where it used to be left to the helper, because it
-  // now answers for this file rather than for the name: the copy that holds the
-  // name's edit is `otherCopy`, so a record saying both `edited` and
-  // `handEdited` is saying this very SKILL.md changed underneath, which is
-  // precisely what the helper will decline to overwrite.
-  function describeResettableFor(d) {
-    return !!d && d.edited === true && d.canWrite === true
-      && d.handEdited !== true && String(d.otherCopy || "") === ""
-  }
-
-  function describeResettable() {
-    return root.describeResettableFor(root.describeOf(root.pickerRow))
   }
 
   // Row before mode, for the reason openPicker states. Both fields are seeded
@@ -2252,18 +1808,10 @@ Panel {
   function openDescribePicker(row) {
     root.pickerRow = row
     var d = root.describeOf(row)
-    // The note as it was left, and the description as SKILL.md says it right
-    // now. The first keystroke edits rather than wipes, the same as the category
-    // editor, and backspace is how either one is cleared.
+    // The note as it was left. The first keystroke edits rather than wipes, the
+    // same as the category editor, and backspace is how it is cleared.
     root.describeNote = d ? root.typable(d.noteText, root.describeLimit) : ""
     root.describeNoteBase = root.describeNote.trim()
-    root.describeText = d ? root.typable(d.fileText, root.describeLimit) : ""
-    root.describeBase = root.describeText.trim()
-    // On the note, which is the field that changes nothing outside this plugin.
-    // A caret opening in the field that overwrites somebody else's file is one
-    // keystroke from a rewrite nobody asked for, and every other question here
-    // opens on the answer that leaves things alone.
-    root.describeFocus = "note"
     root.describeAsking = false
     root.pickerMode = "describe"
     root.pickerReturn = ""
@@ -2273,125 +1821,42 @@ Panel {
     root.pickerIndex = 0
   }
 
-  // Tab is the whole of the switch, and it moves nowhere the keys cannot go: an
-  // unwritable SKILL.md leaves the description on screen to be read with the
-  // caret still in the note, because a caret in a field nothing can save is a
-  // promise the panel cannot keep. The line on that field says why instead.
-  function describeToggleFocus() {
-    if (root.describeFocus === "description") { root.describeFocus = "note"; return }
-    if (!root.describeWritable(root.pickerRow)) return
-    root.describeFocus = "description"
-  }
-
-  function openResetPicker(row) {
-    root.pickerRow = row
-    root.pickerMode = "reset"
-    root.pickerReturn = ""
-    root.pickerCategory = ""
-    root.pickerNaming = false
-    root.pickerText = ""
-    // On the answer that changes nothing, the same as the removal card. This one
-    // is undoable and that one is not, but a confirmation that opens with the
-    // cursor on the write is a confirmation in name only either way.
-    root.pickerIndex = 0
-  }
-
-  // Returning to default puts the author's description back into a file this
-  // panel did not create, so it asks first, in a card that says what it will put
-  // there. The editor's control comes through here as well, and no draft is lost
-  // on the way: the control is not offered while there is one.
-  function describeReset() {
-    if (!root.describeResettable()) return
-    root.openResetPicker(root.pickerRow)
-  }
-
-  // One Save, up to two writes, each named by what it changed. Neither is sent
-  // unless it differs from what the editor opened with: a run that rewrote a
-  // file with the bytes already in it would be a write nobody asked for and a
-  // modification time nobody can account for.
+  // One Save, one write, and it is not sent unless the field differs from what
+  // the editor opened with: a run that stored the text already in the file would
+  // be a write nobody asked for.
   function describeSave() {
     var row = root.pickerRow
     var dir = row && row.view ? String(row.view.dirKey || "") : ""
     if (dir === "") { root.describeAsking = false; root.closePicker(); return }
     var note = root.describeNote.trim()
-    var text = root.describeText.trim()
-    var jobs = []
-    // An emptied note is a save: clearing one is how you take it off the card.
+    // An emptied note is a save: clearing one is how you take it off the card,
+    // and there is no other control for taking one back.
     if (note !== root.describeNoteBase)
-      jobs.push({ argv: ["note", "--", dir, note],
-                  done: note === "" ? "Note cleared on " + dir : "Note saved on " + dir })
-    // An emptied description is not. The store refuses one and so does this,
-    // rather than quietly writing it: the control that means "give the row back
-    // to its author" is the other one. Nothing is said here because nothing can
-    // be -- the message strip is behind this overlay -- so the line under the
-    // fields says it while the field is empty.
-    var file = root.describeTarget(row)
-    // `--expect` is what the field was seeded from, which is what SKILL.md said
-    // when the scan drew this row. The panel stays open while somebody types,
-    // and a read-modify-write over another author's file with the window left
-    // open is how an edit made elsewhere in the meantime disappears. The helper
-    // already refuses on a mismatch and says what happened; this is the panel
-    // handing it the thing it needs to notice.
-    if (text !== "" && text !== root.describeBase && root.describeWritable(row))
-      jobs.push({ argv: ["write", "--expect", root.describeBase, "--", dir, file, text],
-                  done: root.clean(row.view.name, 60) + " now reads your description" })
+      root.runDescribe([{ argv: ["note", "--", dir, note],
+                          done: note === "" ? "Note cleared on " + dir
+                                            : "Note saved on " + dir }])
     root.describeAsking = false
     root.describeNoteBase = note
-    root.describeBase = text
-    if (jobs.length > 0) root.runDescribe(jobs)
     root.pickerBack()
   }
 
-  // What the two description cards say under their question, in the same
-  // label-and-value grid the removal card and the expanded row already use. An
-  // empty value draws no row, so a caveat that does not apply prints nothing
-  // rather than an empty line.
+  // What the editor states under its field, in the same label-and-value grid the
+  // expanded row already uses. An empty value draws no row, so a fact that does
+  // not apply prints nothing rather than an empty line.
   function describeFacts() {
     var row = root.pickerRow
-    var d = root.describeOf(row)
-    if (!d) return []
-    var file = row && row.view ? String(row.view.describeFile || "") : ""
-    var out = []
-    // The editor states only what its two fields cannot: which copy of the name
-    // this is, the caveat on writing it, and where the edit went when it went to
-    // another copy. What each field does is written on that field, beside the
-    // text it does it to.
-    if (root.pickerMode === "describe") {
-      out.push({ label: "file", value: file })
-      out.push({ label: "caveat",
-                 value: d.canWrite === true ? String(d.writeNote || "") : "" })
-      out.push({ label: "edit is in", value: String(d.otherCopy || "") })
-      return out
-    }
-    out.push({ label: "writes", value: file })
-    out.push({ label: "puts back", value: String(d.authorText || "") })
-    out.push({ label: "afterwards", value: "the row reads what its author wrote" })
-    return out
+    if (!row || !row.view) return []
+    // Which copy of the name this is. A note is per name and every copy shows
+    // it, so this is here to say which row you opened rather than to warn about
+    // anything: nothing on this screen opens that file.
+    return [{ label: "about", value: String(row.view.describeFile || "") }]
   }
 
-  // Why this card is shaped the way it is, in one sentence, in the place the
-  // removal card puts the helper's own `why`. It is also where the sentence
-  // stands in for a control this panel has declined to draw.
+  // Kept as the one place a card can put a sentence under its question. The
+  // removal and reset cards that used it are gone -- this plugin reads every
+  // SKILL.md and writes none -- and the note editor has nothing to refuse, so it
+  // answers empty and the card draws no line.
   function detailWhy() {
-    if (root.pickerMode === "remove") {
-      var rem = root.removalOf(root.pickerRow)
-      return rem ? String(rem.why || "") : ""
-    }
-    var d = root.describeOf(root.pickerRow)
-    if (!d) return ""
-    if (root.pickerMode === "describe")
-      return root.describeWritable(root.pickerRow) ? "" : root.describeWhyNot(root.pickerRow)
-    if (root.pickerMode === "reset") {
-      if (root.describeResettable())
-        return "The description in the file is yours. This puts the author's own back where it is."
-      if (d.canWrite !== true) return String(d.whyNot || "")
-      if (String(d.otherCopy || "") !== "")
-        return "The edit under this name is in " + String(d.otherCopy)
-             + ", so there is nothing here to put back."
-      if (d.handEdited === true)
-        return "SKILL.md no longer says what this panel wrote into it, and the helper refuses rather than overwrite what it did not write."
-      return "This row already reads the description its author wrote."
-    }
     return ""
   }
 
@@ -2466,7 +1931,6 @@ Panel {
     if (root.describeAsking) {
       root.describeAsking = false
       root.describeNote = root.describeNoteBase
-      root.describeText = root.describeBase
     }
 
     // Naming is a step inside the shelf index, so backing out of it lands on the
@@ -2532,9 +1996,6 @@ Panel {
     root.describeAsking = false
     root.describeNote = ""
     root.describeNoteBase = ""
-    root.describeText = ""
-    root.describeBase = ""
-    root.describeFocus = "note"
   }
 
   // The colour the style overlay is currently offering, so the preview box and
@@ -2574,22 +2035,10 @@ Panel {
     }
     if (root.pickerMode === "style")
       return root.pickerText.trim() === "" ? root.pickerCategory : root.pickerText.trim()
-    // The description editor draws two fields of its own instead of this box,
-    // so there is no single line here that Enter would act on: Save writes
-    // whichever of them has changed, and each field says so where it is.
+    // The note editor draws a field of its own instead of this box, so there is
+    // no single line here that Enter would act on: Save writes the field, and
+    // the field says so where it is.
     if (root.pickerMode === "describe") return ""
-    if (root.pickerMode === "reset") {
-      if (!root.describeResettable()) return "Close"
-      return root.pickerIndex === 1 ? "Put the author's description back" : "Keep what is there"
-    }
-    if (root.pickerMode === "remove") {
-      // The same rule as everywhere else on this line: what Enter does from
-      // where the cursor is. With nothing to answer, Enter can only close, and
-      // saying so is better than a line that promises a removal the helper has
-      // already refused.
-      if (!root.removeAnswerable()) return "Close"
-      return root.pickerIndex === 1 ? root.removeSentence() : "Keep it"
-    }
     return ""
   }
 
@@ -2686,7 +2135,6 @@ Panel {
         if (root.pickerIndex === 0) { root.describeSave(); return }
         root.describeAsking = false
         root.describeNote = root.describeNoteBase
-        root.describeText = root.describeBase
         root.pickerBack()
         return
       }
@@ -2694,42 +2142,6 @@ Panel {
       return
     }
 
-    // The row is read before the overlay closes, because closePicker drops the
-    // row the question was about, and the run is sent afterwards, so the
-    // question is off the screen by the time the answer is on its way. The same
-    // rule and the same order as the removal below.
-    if (root.pickerMode === "reset") {
-      if (!root.describeResettable() || root.pickerIndex !== 1) { root.closePicker(); return }
-      var dirReset = String(root.pickerRow.view.dirKey || "")
-      var fileReset = root.describeTarget(root.pickerRow)
-      var namedReset = root.clean(root.pickerRow.view.name, 60)
-      root.closePicker()
-      if (dirReset === "" || fileReset === "") return
-      root.runDescribe([{ argv: ["reset", "--", dirReset, fileReset],
-                          done: namedReset + " back to the author's description" }])
-      return
-    }
-
-    if (root.pickerMode === "remove") {
-      // Anything that is not the second chip is the first one. A mode with
-      // nothing to answer draws no chips, so Enter there can only close, which
-      // is what the line above the chips says it will do.
-      if (!root.removeAnswerable() || root.pickerIndex !== 1) { root.closePicker(); return }
-      var paths = root.removeTargets()
-      var what = root.pickerRow && root.pickerRow.view
-        ? root.clean(root.pickerRow.view.name, 60) : ""
-      if (paths.length === 0) {
-        root.flashResult("The helper named no path to remove on that row", "error")
-        root.closePicker()
-        return
-      }
-      // Both read before the overlay closes, because closePicker drops the row
-      // the question was about; sent after, so the question is off the screen
-      // by the time the answer is on its way.
-      root.closePicker()
-      root.runRemove(paths, what)
-      return
-    }
   }
 
   // The file manager, at the directory the skill is actually installed in.
@@ -2769,37 +2181,6 @@ Panel {
     root.openCategoryPicker(r)
   }
 
-  // Ctrl+Delete asks whether to remove the row under the cursor. A command has
-  // to take Ctrl here, because the panel promises "Type to search" and every
-  // printable key keeps that promise; of what is left, Delete is the one key
-  // that already means this everywhere else, and it is the length of a keyboard
-  // away from ^C, ^R, ^G, ^M and ^E, which are five letters one slip from each
-  // other. This is the only command in the panel that touches a file, so being
-  // hard to reach by accident is the point rather than a cost.
-  //
-  // It opens a question and never removes anything by itself.
-  function removeCurrent() {
-    var r = root.currentRow()
-    if (!r) return
-    if (r.rowType === "header") { root.flash("A group header is not a skill"); return }
-    if (r.view.kind === "mcp") { root.flash("MCP servers are read-only in this version"); return }
-    if (r.view.kind !== "skill") {
-      // Where the delegate trail ends. A skill a plugin brought in is sent to
-      // its plugin's row, and that row has to say something true when it gets
-      // there rather than repeat the refusal it was sent to escape.
-      root.flash("A plugin is removed by the tool that installed it, not from here")
-      return
-    }
-    if (!root.removalOf(r)) {
-      // Said rather than guessed. An older helper prints a scan with no removal
-      // in it, and working one out here from the mounts is exactly the second
-      // opinion this panel refuses to have.
-      root.flash("This build of bin/agent-skills does not say how to remove a skill")
-      return
-    }
-    root.openRemovePicker(r)
-  }
-
   // The two description commands. Neither changes anything by itself -- ^D opens
   // the editor and ^Z opens the question that puts the author's text back. They
   // take Ctrl for the reason every command here does: the panel promises "Type
@@ -2822,34 +2203,6 @@ Panel {
       return
     }
     root.openDescribePicker(r)
-  }
-
-  // Each refusal in the words the row's own record gives, because the message
-  // strip is on screen here and the reason is the whole of the answer: there is
-  // nothing to put back, the edit is in another copy, the file has changed since,
-  // or it is not this user's to write.
-  function resetCurrent() {
-    var r = root.currentRow()
-    if (!r || r.rowType === "header") return
-    var d = root.describeOf(r)
-    if (!d) return
-    if (d.edited !== true) {
-      root.flash("This row already reads the description its author wrote")
-      return
-    }
-    if (String(d.otherCopy || "") !== "") {
-      root.flash("The edit under this name is in " + String(d.otherCopy))
-      return
-    }
-    if (d.handEdited === true) {
-      root.flash("SKILL.md has changed since this panel wrote it, so it will not be overwritten")
-      return
-    }
-    if (d.canWrite !== true) {
-      root.flash(String(d.whyNot || "This one is not this panel's to write"))
-      return
-    }
-    root.openResetPicker(r)
   }
 
   function revealCurrent() {
@@ -3364,7 +2717,6 @@ Panel {
     signal revealRequested(string path)
     signal shelveRequested()
     signal describeRequested()
-    signal removeRequested()
 
     // Through root rather than inline, and not only to avoid saying it twice: a
     // `property var` whose binding opens with a brace is read as an object
@@ -4348,54 +3700,31 @@ Panel {
             }
 
 
-          // Everything this card can do to the skill it is about, in its bottom
-          // corner. None of it goes on the row line: that line carries six
+          // What this card can do about the skill it is about, in its bottom
+          // corner. It does not go on the row line: that line carries six
           // columns the row, the group header and the legend all have to agree
           // on, and a control there would be a seventh that only some rows could
           // fill.
           //
-          // `edit` opens the window that owns the description -- the note you
-          // have written instead of it, what each of them costs, and the two acts
-          // that change a file. `delete` opens the question ^Del asks, so a
-          // pointer reaches what the keyboard already could. Where the helper
-          // says this row is not the panel's to remove, its own answer stands in
-          // the control's place, because this file does not draw a control it
-          // cannot honour.
-          //
-          // The alarm colour is not spent here. It belongs to the answer that
-          // cannot be taken back, one card further on; a chip that opens a
-          // question is not that answer.
+          // `note` opens the window that owns your own words about this skill,
+          // so a pointer reaches what ^D already could. Nothing here writes the
+          // description below it: that is the file's own, and this panel reports
+          // it.
           Column {
             id: cardActions
             width: parent.width
             spacing: Style.spacing.xs
 
-            readonly property var removal: er.view.removal
-            readonly property string mode: cardActions.removal && cardActions.removal.mode
-              ? String(cardActions.removal.mode) : ""
-            // Deliberately not Array.isArray, for the reason pickerOptions gives:
-            // a nested array that has been through a `var` property and a
-            // ListView model is a QVariantList, which still has a length and
-            // still answers false to Array.isArray.
-            readonly property bool removable:
-              (cardActions.mode === "trash" || cardActions.mode === "unlink")
-              && !!cardActions.removal.targets
-              && typeof cardActions.removal.targets.length === "number"
-              && cardActions.removal.targets.length > 0
-            readonly property bool refused:
-              cardActions.mode === "refuse" || cardActions.mode === "delegate"
-            // Whether the last fact row has anything to carry. Asked there rather
+            // Whether the last fact row has anything to carry. Asked here rather
             // than answered twice.
-            readonly property bool anythingToDo:
-              descBlock.known || cardActions.removable
+            readonly property bool anythingToDo: descBlock.known
 
-            // Nothing to say on a row with no description of its own, no removal
-            // plan and nothing to copy -- an MCP server is all three -- so the
-            // block is absent rather than an empty band. Tested on what the row
-            // is rather than on what has just happened to it, so the card cannot
-            // change height because something was copied.
-            visible: descBlock.known || cardActions.mode !== ""
-              || er.view.invocations.length > 0
+            // Nothing to say on a row with no description of its own and nothing
+            // to copy -- an MCP server is both -- so the block is absent rather
+            // than an empty band. Tested on what the row is rather than on what
+            // has just happened to it, so the card cannot change height because
+            // something was copied.
+            visible: descBlock.known || er.view.invocations.length > 0
 
             // The copy tick for a row that has no controls to sit after: a
             // skill whose SKILL.md could not be read and which nothing here may
@@ -4433,29 +3762,12 @@ Panel {
               }
             }
 
-            // The helper's verdict where the chip would be. `refuse` is a
-            // directory this user does not own or one an agent rewrites on every
-            // launch; `delegate` is a skill a plugin brought in, and the tool that
-            // installed it is the one that can take it away. The chips themselves
-            // rest on the last fact's line and travel up the card from there, so
-            // this sentence has the corner to itself either way.
-            Text {
-              anchors.right: parent.right
-              visible: cardActions.refused
-              textFormat: Text.PlainText
-              text: cardActions.mode === "delegate"
-                ? "removed by the tool that installed it"
-                : "not this panel's to remove"
-              color: root.soft
-              font.family: root.face
-              font.pixelSize: Style.font.caption
-            }
           }
           }
         }
 
-        // The two things this card can do to the thing it is about. Their place
-        // is the last fact row and that is still where they come to rest -- but
+        // The one thing this card can do to the thing it is about. Its place is
+        // the last fact row and that is still where it comes to rest -- but
         // a card can be taller than the list is, and a control you have to
         // scroll to the end of a long card to reach is one you have to go
         // looking for. So they ride the bottom edge of the viewport between two
@@ -4529,14 +3841,8 @@ Panel {
 
             CardChip {
               visible: descBlock.known
-              label: "edit"
+              label: "note"
               onPicked: er.describeRequested()
-            }
-
-            CardChip {
-              visible: cardActions.removable
-              label: "delete"
-              onPicked: er.removeRequested()
             }
 
             // After the last chip, whichever chip that turns out to be, and in
@@ -4633,24 +3939,6 @@ Panel {
             // this branch, and the panel switch it drives outside the overlay
             // runs after the overlay has returned.
             if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
-              root.describeToggleFocus(); return
-            }
-            // Returning to default, on the letter the list gives it, taken
-            // before anything can read it as text. Guarded rather than answered:
-            // a refusal here would be flashed to the message strip, which this
-            // overlay is drawn over, so the key does nothing wherever the control
-            // beside it is not drawn and the sentence in its place is what says
-            // why.
-            if (ctrl && event.key === Qt.Key_Z) { root.describeReset(); return }
-            if (root.describeFocus === "description") {
-              if (Util.editsFilter(event, root.describeText)) {
-                root.describeText = Util.editedFilter(event, root.describeText)
-                return
-              }
-              if (!ctrl && event.text && event.text.length === 1
-                  && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127)
-                root.describeText = root.typable(root.describeText + event.text,
-                                                 root.describeLimit)
               return
             }
             if (Util.editsFilter(event, root.describeNote)) {
@@ -4801,14 +4089,6 @@ Panel {
         // marketplace scanner's literal-launcher rule, which does not read
         // comments as comments.)
         if (ctrl) {
-          // Not a letter, and the only command here that is not: every printable
-          // key belongs to the search field, the five letters below are one slip
-          // from each other, and this is the one command in the panel that
-          // touches a file. Delete is what this means on every other keyboard,
-          // and it is a hand's width from all of them.
-          if (event.key === Qt.Key_Delete) {
-            root.removeCurrent(); event.accepted = true; return
-          }
           var letter = String.fromCharCode(event.key).toLowerCase()
           if (letter === "c") { root.copyCurrent(); event.accepted = true; return }
           if (letter === "r") { root.startScan(); event.accepted = true; return }
@@ -4819,14 +4099,9 @@ Panel {
           // driven entirely by keys is most of them.
           if (letter === "e") { root.openShelvesPicker(); event.accepted = true; return }
           if (letter === "o") { root.revealCurrent(); event.accepted = true; return }
-          // Two letters nothing here was using: d for the note and description,
-          // z for going back to what the author wrote. Each opens a screen
-          // rather than doing anything, which is what lets ^Z sit among the
-          // letters at all -- it is the one that ends in a write to a file this
-          // panel did not create, and the question it opens has the cursor on
-          // the answer that leaves the file alone.
+          // One letter nothing here was using, for the note this panel keeps in
+          // its own file. It opens a screen rather than doing anything.
           if (letter === "d") { root.describeCurrent(); event.accepted = true; return }
-          if (letter === "z") { root.resetCurrent(); event.accepted = true; return }
           return
         }
 
@@ -5890,15 +5165,6 @@ Panel {
                 root.selectedIndex = rowHost.index
                 root.openDescribePicker(rowHost.modelData)
               }
-              // The card only draws this where the helper said a removal is
-              // this panel's to make, so it opens the question directly rather
-              // than through removeCurrent, whose guards exist to answer a
-              // keystroke that can land on any row at all.
-              onRemoveRequested: {
-                root.cursorActive = true
-                root.selectedIndex = rowHost.index
-                root.openRemovePicker(rowHost.modelData)
-              }
               onCopyRequested: function (text) {
                 root.cursorActive = true
                 root.selectedIndex = rowHost.index
@@ -5938,21 +5204,12 @@ Panel {
             // The promise changes with the row, because on a row that documents
             // actions Ctrl+C does not copy: it asks which one.
             parts.push(picks ? "^C to pick an action" : "^C to copy")
-            // Each of the two only where it has something to do, the same rule
-            // the removal key follows. Returning to default is offered only
-            // where this file carries a description the panel wrote and the
-            // helper would let it be put back.
+            // Only where there is something to open. Named for the control it
+            // opens rather than for what you do in there: the card's chip says
+            // note, this key opens the same window, and one act with two names
+            // is one the reader has to map.
             var dsc = cur && cur.rowType !== "header" ? root.describeOf(cur) : null
-            // Named for the control it opens rather than for what you do in
-            // there. The card's chip says edit, this key opens the same window,
-            // and one act with two names is one the reader has to map.
-            if (dsc) parts.push("^D to edit")
-            if (root.describeResettableFor(dsc)) parts.push("^Z to default")
-            // Only on a row that has an answer to the question. A destructive
-            // key nobody has been told about is either never used or used by
-            // accident, and this one is only ever offered where the helper has
-            // already said what pressing it would mean.
-            if (root.removalOf(cur)) parts.push("^Del to remove")
+            if (dsc) parts.push("^D for a note")
             parts.push("^G to regroup")
             parts.push("^R to rescan")
             parts.push(root.expandedKey !== "" || typing || root.anyChipFilter
@@ -6008,18 +5265,10 @@ Panel {
         readonly property bool shelving: root.pickerMode === "category"
         readonly property bool managing: root.pickerMode === "shelves"
         readonly property bool removing: root.pickerMode === "remove"
-        // The two description screens. `describing` is the pair of fields typed
-        // into; `restoring` is a question with two answers, laid out exactly as
-        // the removal question is, because it is the same shape.
+        // The note editor: one field typed into, with the file it is about stated
+        // under it in the label-and-value grid the expanded row already uses.
         readonly property bool describing: root.pickerMode === "describe"
-        readonly property bool restoring: root.pickerMode === "reset"
-        // Everything that draws the label-and-value grid under its question.
-        // The editor is one of them: which copy of a name it is about, and the
-        // caveats on writing it, are facts rather than fields, and the grid the
-        // other cards state theirs in is the one place in this panel a reader
-        // has already learned to read them.
-        readonly property bool detailed: picker.removing || picker.restoring
-          || picker.describing
+        readonly property bool detailed: picker.describing
         // Both of these draw a shelf: a colour, a name and how much is on it.
         // One of them files a skill and the other opens the shelf for editing,
         // which is a difference in what Enter does, not in what a shelf is.
@@ -6093,26 +5342,7 @@ Panel {
                 if (!root.pickerOpen || !root.pickerRow) return ""
                 var n = root.clean(root.pickerRow.view.name, 60)
                 if (root.describeAsking) return n + "  ·  unsaved changes"
-                // The two fields, named, because the window is the only place
-                // both of them exist and the heading is where the reader learns
-                // there are two.
-                if (picker.describing) return n + "  ·  note and description"
-                // The same two-way shape the removal heading has, and for the
-                // same reason: some of the answers the helper can give are not a
-                // write at all, and this is where that is said first.
-                if (picker.restoring) return root.describeResettable()
-                  ? n + "  ·  return to default"
-                  : n + "  ·  nothing to put back"
-                if (picker.removing) {
-                  // Three of them, because the helper has three answers and two
-                  // of them are not a removal at all. The heading is where that
-                  // is said first, so nobody reads the rest of the card as a
-                  // question they are about to answer.
-                  var mode = root.removeMode()
-                  if (mode === "refuse") return n + "  \u00b7  not this panel's to remove"
-                  if (mode === "delegate") return n + "  \u00b7  another tool owns it"
-                  return n + "  \u00b7  remove"
-                }
+                if (picker.describing) return n + "  ·  your note"
                 return picker.shelving ? n + "  \u00b7  move to a category"
                                        : n + "  \u00b7  pick an action"
               }
@@ -6124,16 +5354,13 @@ Panel {
 
           }
 
-          // The two fields, when this is the editor. They replace the preview box
-          // below rather than sitting inside it, because that box is a picture of
-          // what Enter will do and these are the thing itself: what is in them is
-          // what gets written, and a field that looks like a preview is a field
-          // nobody tries to type in.
-          //
-          // Same width, same radius, same rhythm, so they read as a pair -- and
-          // the one holding the keys is unmistakable, because that was the whole
-          // complaint: it carries the caret, the I-beam and a lit border, and the
-          // other goes quiet.
+          // The field, when this is the editor. It replaces the preview box below
+          // rather than sitting inside it, because that box is a picture of what
+          // Enter will do and this is the thing itself: what is in it is what
+          // gets written, and a field that looks like a preview is a field
+          // nobody tries to type in. It carries the caret, the I-beam and a lit
+          // border, because this panel has no focused QML editor to inherit any
+          // of that from.
           Column {
             width: parent.width
             spacing: Style.spacing.xl
@@ -6148,53 +5375,14 @@ Panel {
               body: root.describeNote
               // Nothing is lit while the unsaved question is up: the keys have
               // gone to the two chips, and a caret still blinking in a field
-              // would be the panel offering a third place to type.
+              // would be the panel offering a second place to type.
               active: picker.describing && !root.describeAsking
-                && root.describeFocus === "note"
-              // The one field on this screen that is always writable: it goes to
-              // a file this plugin owns, so nothing about somebody else's tree
-              // can take it away.
+              // Always writable: it goes to a file this plugin owns, so nothing
+              // about somebody else's tree can take it away. The description
+              // below the note on the card is reported and never written -- this
+              // panel opens no SKILL.md for writing at all.
               editable: true
               bodyMax: picker.height * 0.16
-              onFocusRequested: root.describeFocus = "note"
-            }
-
-            DescribeField {
-              id: descriptionField
-              width: parent.width
-              label: "Description"
-              // The figure the whole feature exists for, on the one field that
-              // moves it, and only while it is moving: the row's own measurement
-              // now, and what that measurement becomes once this text is in the
-              // file. Never on the note, under any circumstance.
-              tag: {
-                if (!root.showTokens || !root.pickerRow || !root.pickerRow.view) return ""
-                var counted = root.pickerRow.view.tokens
-                if (counted === null || counted === undefined) return ""
-                var now = Number(counted)
-                var chars = root.pickerRow.view.tokenChars
-                var live = root.describeText.trim()
-                if (live === "" || live === root.describeBase)
-                  return root.tokenText(now) + " on every turn"
-                return root.tokenText(now) + " on every turn, "
-                     + root.tokenText(root.describeProjected(now, chars)) + " once saved"
-              }
-              // Where writing is refused the helper's own sentence takes the
-              // caption, because it is the sentence that stands in for the
-              // control this field would otherwise be. A build that refuses
-              // without saying why still gets a caption, because the pair reads
-              // as a pair only while both of them have one.
-              caption: descriptionField.editable
-                ? "SKILL.md itself, which every agent loads."
-                : (root.detailWhy() !== "" ? root.detailWhy()
-                   : "SKILL.md itself, and not this panel's to write.")
-              placeholder: "The description an agent matches on"
-              body: root.describeText
-              active: picker.describing && !root.describeAsking
-                && root.describeFocus === "description"
-              editable: root.describeWritable(root.pickerRow)
-              bodyMax: picker.height * 0.16
-              onFocusRequested: root.describeFocus = "description"
             }
           }
 
@@ -6304,42 +5492,13 @@ Panel {
                 return "Save the new " + (both ? "name and colour" : renamed ? "name" : "colour")
                      + ", or discard " + (both ? "them" : "it") + " and keep what was there?"
               }
-              // Name only what actually changed here too. The two fields go to
-              // two different files, and a prompt that offered to save "your
-              // changes" over one edited field is a prompt about work nobody did.
-              if (root.describeAsking) {
-                var noted = root.describeNoteDirty
-                var wrote = root.describeTextDirty
-                var pair = noted && wrote
-                return "Save the " + (pair ? "note and the description"
-                                           : noted ? "note" : "description")
-                     + ", or discard " + (pair ? "them" : "it")
-                     + " and keep what was there?"
-              }
-              // Two states, and each is only said where it is true: a field left
-              // empty is not a rewrite and is not sent, and a field at the cap
-              // has stopped taking what is typed at it.
-              if (picker.describing && root.describeText.trim() === "")
-                return "The description is empty, so saving leaves SKILL.md as it is."
+              if (root.describeAsking)
+                return "Save the note, or discard it and keep what was there?"
+              // Said only where it is true: a field at the cap has stopped
+              // taking what is typed at it.
               if (picker.describing)
-                return root.describeText.length >= root.describeLimit
-                  || root.describeNote.length >= root.describeLimit
+                return root.describeNote.length >= root.describeLimit
                   ? "Full at " + String(root.describeLimit) + " characters." : ""
-              if (picker.restoring)
-                return root.describeResettable()
-                  ? "This writes a file this panel did not create. Only the value of the description changes; every other byte comes through untouched."
-                  : ""
-              if (picker.removing) {
-                // What the run will actually do, and only what it will do. The
-                // helper trashes one path per invocation and answers for each
-                // separately, so a refusal in the middle is not an abandoned
-                // job -- and on a skill root that is a different filesystem,
-                // being refused is the likely outcome rather than the rare one.
-                if (root.removeMode() === "delegate")
-                  return "This panel runs the helper and nothing else, so the command below is for you to run."
-                if (!root.removeAnswerable()) return ""
-                return "Each path is moved to the desktop trash on its own, and one that is refused does not stop the others."
-              }
               if (root.pickerNaming) return "Lower case letters, digits and dashes. The new category starts empty \u2014 put something on it with ^M from any row."
               if (picker.managing) return "Pick one to rename it or change its colour. Type a name no category has yet to make a new one."
               if (picker.styling) return "Type to rename it. Pick a colour, or choose theme default to let the theme decide."
@@ -6404,86 +5563,16 @@ Panel {
                 wrapMode: Text.WordWrap
               }
 
-              // One chip per path, in the order they will be sent: every
-              // symlink first and the directory itself last. Each says which of
-              // the two it is and which agents reach the skill through it,
-              // because "two of these three are links" is the fact that decides
-              // whether this is a removal or a tidy-up.
-              Column {
-                width: parent.width
-                spacing: Style.spacing.xs
-                visible: picker.removing
-
-                Repeater {
-                  model: picker.removing ? root.removeTargetRows() : []
-
-                  delegate: Rectangle {
-                    id: targetChip
-                    required property var modelData
-                    readonly property bool link: String(targetChip.modelData.link) === "symlink"
-
-                    width: parent.width
-                    height: Style.space(24)
-                    radius: Style.cornerRadius
-                    color: Util.alpha(root.fg, 0.07)
-
-                    Text {
-                      id: targetKind
-                      anchors.left: parent.left
-                      anchors.leftMargin: Style.space(9)
-                      anchors.verticalCenter: parent.verticalCenter
-                      width: Style.space(56)
-                      textFormat: Text.PlainText
-                      text: targetChip.link ? "link" : "directory"
-                      color: targetChip.link ? root.hue : root.readable
-                      font.family: root.face
-                      font.pixelSize: Style.font.caption
-                    }
-
-                    Text {
-                      id: targetTools
-                      anchors.right: parent.right
-                      anchors.rightMargin: Style.space(9)
-                      anchors.verticalCenter: parent.verticalCenter
-                      textFormat: Text.PlainText
-                      text: String(targetChip.modelData.tools)
-                      color: root.soft
-                      font.family: root.face
-                      font.pixelSize: Style.font.caption
-                    }
-
-                    // The path as the rest of the panel writes it. What travels
-                    // to the helper is the absolute one held beside it, which is
-                    // never drawn and never rebuilt from this string.
-                    Text {
-                      anchors.left: targetKind.right
-                      anchors.leftMargin: Style.spacing.sm
-                      anchors.right: targetTools.left
-                      anchors.rightMargin: Style.spacing.md
-                      anchors.verticalCenter: parent.verticalCenter
-                      textFormat: Text.PlainText
-                      text: String(targetChip.modelData.path)
-                      color: root.readable
-                      font.family: root.face
-                      font.pixelSize: Style.font.caption
-                      elide: Text.ElideMiddle
-                    }
-                  }
-                }
-              }
-
-              // Who is left with what, and whether it can be put back. The same
-              // label column the expanded row lays its facts out in, so the card
-              // and the row have one grid between them -- and the same grid the
-              // two description questions state their file, their text and their
-              // token figure in, so all three cards read the same way.
+              // What this screen is about, in the same label column the expanded
+              // row lays its facts out in, so the card and the row have one grid
+              // between them.
               Column {
                 width: parent.width
                 spacing: Style.spacing.xs
 
                 Repeater {
                   model: !picker.detailed ? []
-                    : (picker.removing ? root.removeFacts() : root.describeFacts())
+                    : root.describeFacts()
 
                   delegate: Item {
                     id: removeFact
@@ -6519,67 +5608,6 @@ Panel {
                     }
                   }
                 }
-              }
-            }
-          }
-
-          // The one answer this window holds besides saving: giving the row back
-          // to whoever wrote it. It is drawn as a control rather than as a chip
-          // in the grid below, because this mode is two fields -- every printable
-          // key belongs to one of the texts, so the grid the arrows step through
-          // is empty here and an answer has to be something that can be pointed
-          // at. ^Z reaches it from the keyboard, on the letter the list uses.
-          //
-          // It is not drawn where the helper has said it cannot be honoured,
-          // which is this file's rule everywhere else; the sentence above it is
-          // what stands in the missing control's place.
-          Column {
-            id: describeAnswers
-            width: parent.width
-            spacing: Style.spacing.sm
-
-            // A draft nobody has saved is not offering this yet: returning to
-            // default replaces the description in the file, and the field is
-            // showing a different one that would be dropped without being asked
-            // about.
-            readonly property bool resettable: root.describeResettable()
-              && !root.describeDirty
-            readonly property string caveat: {
-              var d = root.describeOf(root.pickerRow)
-              if (!d || d.edited !== true) return ""
-              // Which of them it is: a control one press away, or one that was
-              // never going to be offered on this row.
-              if (root.describeResettable() && root.describeDirty)
-                return "Save or discard first, then return to default."
-              if (String(d.otherCopy || "") !== "")
-                return "The edit under this name is in another copy, so there is nothing here to put back."
-              if (d.handEdited === true)
-                return "SKILL.md has changed since this panel wrote its description, and the helper refuses rather than overwrite what it did not write."
-              return ""
-            }
-
-            visible: picker.describing && !root.describeAsking
-              && (describeAnswers.caveat !== "" || describeAnswers.resettable)
-
-            Text {
-              width: parent.width
-              visible: text !== ""
-              textFormat: Text.PlainText
-              text: describeAnswers.caveat
-              color: root.soft
-              font.family: root.face
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-
-            Flow {
-              width: parent.width
-              spacing: Style.spacing.sm
-              visible: describeAnswers.resettable
-
-              CardChip {
-                label: "return to default"
-                onPicked: root.describeReset()
               }
             }
           }
@@ -6637,14 +5665,6 @@ Panel {
                   readonly property bool isPlacedBy: String(chip.modelData) === "\u0000placedby"
                   readonly property bool isAnswer: String(chip.modelData) === "\u0000save"
                     || String(chip.modelData) === "\u0000discard"
-                  // The one chip in this panel whose answer cannot be taken back
-                  // from inside it, and it does not look like the one beside it.
-                  // Writing a description into SKILL.md is a write too, but the
-                  // author's own text is kept and a control puts it back; a
-                  // trashed directory is only recoverable somewhere else. The
-                  // alarm colour is the same one a flagged row is drawn in, so
-                  // it is a colour this list has already taught the reader.
-                  readonly property bool isDanger: String(chip.modelData) === "\u0000remove"
 
                   // A shelf chip carries its own colour and its size, so the
                   // index reads as an inventory rather than as a word list.
@@ -6658,8 +5678,6 @@ Panel {
                   color: {
                     if (chip.isSwatch && !chip.isClear)
                       return Util.alpha(String(chip.modelData), chip.current ? 1.0 : 0.72)
-                    if (chip.isDanger)
-                      return Util.alpha(Color.urgent, chip.current ? 0.34 : 0.14)
                     if (chip.current) return Util.alpha(root.hue, 0.26)
                     return Util.alpha(root.fg, 0.07)
                   }
@@ -6689,15 +5707,6 @@ Panel {
                       text: {
                         if (String(chip.modelData) === "\u0000save") return "Save"
                         if (String(chip.modelData) === "\u0000discard") return "Discard"
-                        if (String(chip.modelData) === "\u0000keep") return "Keep it"
-                        // Each of these names the act rather than agreeing with
-                        // the question, so the chip and the line above it are
-                        // one sentence and neither has to be read twice.
-                        if (String(chip.modelData) === "\u0000keepmine") return "Keep what is there"
-                        if (String(chip.modelData) === "\u0000restore") return "Put the author's back"
-                        // Named by the mode the helper chose, so the chip and
-                        // the line above it are one sentence rather than two.
-                        if (chip.isDanger) return root.removeVerb()
                         if (chip.isClear) return "theme default"
                         if (chip.isAddNew) return "+ new category"
                         if (chip.isPlacedBy) return "show placed by"
@@ -6705,8 +5714,7 @@ Panel {
                         if (picker.shelfList) return root.categoryLabelFor(String(chip.modelData))
                         return String(chip.modelData) === "" ? "no argument" : String(chip.modelData)
                       }
-                      color: chip.isDanger ? Color.urgent
-                        : (chip.current ? root.fg : root.readable)
+                      color: chip.current ? root.fg : root.readable
                       font.family: root.face
                       font.pixelSize: Style.font.bodySmall
                       // Italic for the chips that do something rather than name
@@ -6758,27 +5766,10 @@ Panel {
             text: {
               if (root.styleAsking) return "Enter to save  \u00b7  Esc to discard"
               if (root.describeAsking) return "Enter to save  \u00b7  Esc to discard"
-              if (picker.describing) {
-                // Swapped by state rather than grown, the same rule the panel's
-                // own footer follows: a key is named here only where the control
-                // beside it is on screen to be pointed at instead. Tab leads,
-                // because with two fields on screen it is the first thing a
-                // reader needs and the only gesture this window added.
-                var keys = [root.describeWritable(root.pickerRow)
-                  ? "Tab between the fields" : "Type the note", "Enter to save"]
-                if (root.describeResettable() && !root.describeDirty)
-                  keys.push("^Z to default")
-                keys.push("Esc to go back")
-                return keys.join("  \u00b7  ")
-              }
+              if (picker.describing)
+                return "Type the note  \u00b7  Enter to save  \u00b7  Esc to go back"
               // Escape says what it leaves behind rather than where it goes,
               // because on these overlays leaving is itself an answer.
-              if (picker.restoring) return root.describeResettable()
-                ? "Arrows to choose  \u00b7  Enter to answer  \u00b7  Esc to keep what is there"
-                : "Nothing to answer here  \u00b7  Esc to go back"
-              if (picker.removing) return root.removeAnswerable()
-                ? "Arrows to choose  \u00b7  Enter to answer  \u00b7  Esc to keep it"
-                : "Nothing to answer here  \u00b7  Esc to go back"
               if (root.pickerNaming) return "Type the name  \u00b7  Enter to create it  \u00b7  Esc to go back"
               if (picker.managing) return "Type to filter or name a new one  \u00b7  Enter to edit it  \u00b7  Esc to go back"
               if (picker.styling) return "Type to rename  \u00b7  arrows to try a colour  \u00b7  Enter to save  \u00b7  Esc to go back"

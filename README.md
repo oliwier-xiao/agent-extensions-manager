@@ -48,19 +48,17 @@ It reads the five directories the three agents keep skills in — `~/.claude/ski
 skills inside installed Claude Code plugins, the settings files that say which agent has what turned on, the
 MCP server configuration, and `/proc/<pid>/comm` to see which agent is running.
 
-It writes three things of its own, all under your home directory:
+It writes two files, both its own and both under `~/.config/agent-skills`:
 
 | Path | What is in it |
 |---|---|
-| `~/.config/agent-skills/categories.json` | the categories you filed things under, and whether the **placed by** line is on |
-| `~/.config/agent-skills/descriptions.json` | your notes, and any description you rewrote — including the author's original |
-| `~/.cache/agent-skills/` | one cached answer from pacman, worth a tenth of a second |
+| `categories.json` | the categories you filed things under, and whether the **placed by** line is on |
+| `descriptions.json` | your notes — your own words about a skill, which no agent ever reads |
 
-No agent's configuration file is written at any point: nothing here turns a skill on or off, and every row
-says so where you would expect a switch. Two things in an agent's own tree can change, each confirmed on
-the skill's own card first — the `description:` value of one `SKILL.md`, with the author's own words kept
-so you can go back, and a skill directory you have named, which is moved to your desktop trash under
-`~/.local/share/Trash` rather than deleted.
+**Nothing else is written at all.** No `SKILL.md` is opened for writing, no agent's configuration file is
+touched, nothing is deleted or moved, and no other program is started — the helper contains no subprocess.
+What an agent loads on its next turn is not this widget's to change, and the test suite asserts that rather
+than promising it.
 
 ---
 
@@ -71,7 +69,7 @@ The coloured bar down the left is its category.
 
 ### Inside a row
 
-![A skill opened](docs/card.png)
+![The top of an opened skill](docs/card.png)
 
 Open a row and it stops summarising. The description is the one the agents actually read — the text costing
 you the tokens in the corner. Under it, the state each agent has this skill in and **the file that state is
@@ -80,7 +78,7 @@ written in**, so a claim on this panel is one you can go and check.
 Then every path it is reachable from, marked `real` or `symlink`; its category, as a control you can click;
 the invocation for each agent; how the category was chosen and how confident that guess was; the version
 its author declared, where one is declared at all; the content hash the drift check compares; and the token
-figure with the divisor that produced it. **edit** and **delete** sit in the corner.
+figure with the divisor that produced it. **note** sits in the corner.
 
 Nothing here is checked against anywhere upstream. A skill directory is not a checkout — it has no remote,
 no recorded commit and usually no version — so there is no honest way to say whether a newer one exists,
@@ -179,66 +177,21 @@ way of knowing was still a draft.
 
 ---
 
-## Notes and descriptions
+## Your own notes
 
-![Editing a skill's note and its description](docs/describe.png)
+![The note field, in the editor `^D` opens](docs/describe.png)
 
-`^D` on an open row, or **edit** in the corner of its card. Two fields, and they have nothing to do with
-each other.
+`^D` on an open row, or **note** in the corner of its card. It starts empty, it is drawn above the
+description in that skill's card, no agent ever sees it, and it is in no figure anywhere. Write what the
+skill is for in your own words, or in your own language — the search reads it too.
 
-**The note** is yours and starts empty. It is drawn above the description in this skill's card, no agent
-ever sees it, and it is in no figure anywhere. Write what the skill is for in your own words, or in your
-own language — the search reads it too.
+It is kept in this widget's own file and filed under the skill's name, so every copy of a name shows the
+same note. Leaving the field empty clears it; that is the only way one goes.
 
-**The description** is the one in `SKILL.md`, and saving it writes that file. This is the text every agent
-copies into its system prompt on every turn, so it is the whole of what the skill costs you, and the
-editor shows the figure moving as you cut. Eight wordy skills on the machine these screenshots come from
-are a third of the bill.
-
-Only the `description:` value changes. Everything else in the file comes through byte for byte, and the
-file is read back afterwards through the same parser the agents use — if the result does not read as
-exactly what you typed, the original goes back and nothing is saved. **Return to default** restores the
-author's own words, kept from the moment you first wrote over them.
-
-Where a file cannot be written the editor says so instead of offering the control: the two skills Omarchy
-ships under pacman, and the six Codex rewrites from an embedded copy on every launch. Where it can be
-written but will not last it says that too — a plugin update replaces its own checkout, and OpenCode
-re-fetches what it caches. A skill installed twice is two files, and the copy that did not get the rewrite
-says where it went.
-
----
-
-## Removing a skill
-
-![The question before anything is trashed](docs/remove.png)
-
-`^Del` asks whether to get rid of the skill under the cursor — or **delete**, beside **edit** in the corner
-of its card. It changes something outside this widget's own files, so it asks first, the question names
-what will actually happen rather than the name of the row, and it opens on the answer that changes nothing.
-
-Which is not one question, because a skill is not one thing on disk. Four answers, and the helper decides
-which before the panel draws anything:
-
-**It is yours, so it goes to the trash.** Every path that reaches it, listed by name — links first, then
-the directory itself — with which agents stop seeing it and which, if any, still will. Nothing is
-deleted: each path is handed to `gio trash`, so it lands in the same desktop trash as everything else and
-comes back the same way.
-
-**A package owns it, so only your links can go.** `omarchy` and `diagnose-crash` live in
-`/usr/share/omarchy`, owned by pacman and reached from your directories by symlink. The directory itself
-is not yours to remove and is never offered; the links are, and the panel says that Omarchy re-creates
-them when it next provisions your user, so removing them may not be final.
-
-**A plugin brought it, so the plugin is where it goes.** A skill that arrives inside a Claude Code plugin
-is not a thing you can remove on its own without breaking the plugin around it. The row says so and shows
-the command that would do it properly.
-
-**Nothing would happen, so nothing is offered.** Codex rewrites the six skills under its `.system`
-directory from an embedded copy every time it launches. Removing one is undone before you next look at it,
-and a panel that offered the button anyway would be lying about what it can do.
-
-If a link cannot be moved, the directory it points at is left where it is too, because a trashed skill with
-a live link still pointing at it is worse than either.
+The description underneath it is the file's own, shown as it stands. This widget reports it and does not
+write it: what an agent loads on its next turn is not a bar widget's to change, however good the
+confirmation. If a description is costing you more than it earns, the file is `SKILL.md` in the path the
+card names, and your editor is the right tool for it.
 
 ---
 
@@ -307,9 +260,7 @@ and therefore closer to what you are really paying; the default matches the brow
 | `^M` | move the row to another category, or restyle the category under a group header |
 | `^E` | open the categories: rename one, recolour it, or add one |
 | `^O` | open where the skill is installed, in your file manager |
-| `^D` | open the note and the description for editing |
-| `^Z` | put the author's description back, from the row or from inside the editor |
-| `^Del` | ask whether to move the skill under the cursor to the trash |
+| `^D` | write your own note about the row |
 | `^G` | regroup by category, tool, kind or nothing |
 | `^R` | read everything again |
 | `!` | show only what needs attention, while the search is empty |
@@ -334,9 +285,6 @@ Omarchy 4 with its Quickshell bar, and `python3` at `/usr/bin/python3` — the s
 Python package to install. The panel spawns that path outright rather than letting a shebang search `PATH`;
 if yours is elsewhere, the panel opens empty while the helper still works in a terminal.
 
-Removal needs `/usr/bin/gio`, from `glib2`, which a stock Omarchy install already has because most of the
-desktop depends on it. Without it the panel still reads everything and only the removal is refused.
-
 Whichever of the three agents you actually use is the one you get rows for. An agent that is not installed
 is one quiet line saying so, not an error.
 
@@ -358,16 +306,14 @@ number. It is a known Quickshell component-cache limitation, reported upstream s
 omarchy plugin remove oliwier.agent-skills-manager
 ```
 
-Your own files outlive it, so reinstalling later finds your filing, your notes and your rewritten
-descriptions again. To clear them:
+Your own files outlive it, so reinstalling later finds your filing and your notes again. To clear them:
 
 ```
-rm -rf ~/.config/agent-skills ~/.cache/agent-skills
+rm -rf ~/.config/agent-skills
 ```
 
-The first holds the two files named at the top of this README. Deleting it takes your notes with it, and
-takes the author's original along with any description you rewrote — so a skill still carrying your text is
-left with nothing to put back. The second is one cached answer from pacman.
+That is the two files named at the top of this README, and nothing else — every skill on the machine is
+exactly where it was.
 
 ## The command line
 
@@ -406,34 +352,16 @@ bin/agent-skills category style ui --reset
 bin/agent-skills category placed-by hide
 ```
 
-`bin/agent-skills describe` is one of the two verbs that touch a file this plugin did not write. `note` is
-yours alone and goes in the widget's own store, where no agent reads it. `write` replaces the
-`description:` value of one `SKILL.md` and passes every other byte through, keeping the author's line so
-`reset` is exact. Both name the file as well as the skill, because one name reaches more than one
-`SKILL.md`, and the path is refused unless the name given actually reaches it:
+`bin/agent-skills describe note` is the other write, and it goes to the widget's own store where no agent
+reads it. Leave the text off to clear the note that is there:
 
 ```
 bin/agent-skills describe note nextjs 'why I keep this'
-bin/agent-skills describe write nextjs /home/you/.claude/skills/nextjs/SKILL.md 'A shorter description.'
-bin/agent-skills describe reset nextjs /home/you/.claude/skills/nextjs/SKILL.md
+bin/agent-skills describe note nextjs
 ```
 
-`--expect` on `write` carries the description the row was drawn from and refuses if the file no longer says
-it. Leave the text off `note` to clear the one that is there.
-
-`bin/agent-skills remove` is the other. Paths must be absolute, and they are meant to come from a scan's
-`removal.targets` rather than be typed:
-
-```
-bin/agent-skills remove --dry-run -- /home/you/.claude/skills/nextjs
-bin/agent-skills remove -- /home/you/.claude/skills/nextjs
-```
-
-`--dry-run` runs every check and prints JSON saying what would go without touching anything, which is the
-form worth reaching for first. Neither form deletes: each path is handed to `gio trash` on its own, and the
-answer says which ones moved and, for each one that did not, why. Every path is re-examined at the moment
-it is acted on rather than trusted from the row that asked — if the skill moved, changed owner or stopped
-being a skill since the panel drew it, that path is refused and the others carry on.
+Those two verbs are the whole of what this program writes. There is no third, and there is no subprocess:
+`scan` and `doctor` read, and everything they report about a skill is reported as it stands.
 
 Every file read under a scanned root is opened once with `O_NOFOLLOW` and `O_NONBLOCK` and judged on that
 descriptor rather than on its name, because `omarchy-shell` is one process for the whole desktop and

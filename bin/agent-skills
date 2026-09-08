@@ -5,12 +5,16 @@ One line of JSON on stdout, diagnostics on stderr. The QML reads and draws; it d
 no I/O of its own beyond spawning this. Every subcommand is runnable by hand, which
 is the point: an action you cannot reproduce in a terminal is one you cannot debug.
 
+READ-ONLY over everything that is not this program's own. It reports what Claude
+Code, OpenCode and Codex load and what that costs, and it writes exactly two files,
+both under ~/.config/agent-skills: the categories you filed things under, and the
+notes you wrote for yourself. No skill's SKILL.md is ever opened for writing, no
+agent's configuration file is touched, nothing is deleted or moved, and no other
+program is started -- this file spawns nothing at all.
+
 Exit codes: 0 done · 1 usage error · 2 refused, nothing written. There is no partial-write
 code because there is no partial write: the store is built whole, fsynced, and renamed over
-the old one, so a failed write leaves the previous file exactly as it was. `remove` is the
-one verb that acts on several things at once, and it acts on them one at a time on purpose:
-it exits 0 when anything went and names every path that did not, because abandoning the rest
-of a batch over one path leaves the user with half a removal and no account of which half.
+the old one, so a failed write leaves the previous file exactly as it was.
 """
 
 from __future__ import annotations
@@ -691,14 +695,11 @@ def _write_json_store(path: str, payload: dict) -> None:
     _commit_directory(os.path.dirname(path) or ".")
 
 
-# ------------------------------------------------------- description store
+# ------------------------------------------------------- note store
 #
-# The second file this program owns. It holds two things that have nothing to do
-# with each other, and keeping them apart is the whole of its design:
+# The second file this program owns, and everything in it is the reader's own:
 #
-#   {"notes":  {"nextjs": "Mine: only the App Router rewrite, nothing else."},
-#    "edited": {"nextjs": {"original": "...", "wrote": "...", "at": 1757000000,
-#                          "file": "/home/you/.claude/skills/nextjs/SKILL.md"}}}
+#   {"notes": {"nextjs": "Mine: only the App Router rewrite, nothing else."}}
 #
 # A note is somebody's own words about a skill, in their own language, for
 # themselves. It is kept here and drawn above the description on the card, and no
@@ -706,36 +707,20 @@ def _write_json_store(path: str, payload: dict) -> None:
 # `tokens.alwaysOn` is computed from SKILL.md and never from here, and why
 # nothing in this program may suggest that writing one saves anybody a token.
 #
-# An `edited` entry is the other thing entirely: this widget has written a
-# description into somebody else's SKILL.md. `original` is the author's own
-# words, which is what makes reset exact, `wrote` is what we put there, which is
-# how a hand edit made afterwards is told from our own text, and `file` is the
-# one it went into. Neither half feeds the other: clearing a note opens no file,
-# and resetting a description leaves the note where it is.
+# It is per name, because a name is what a person means by a skill and this
+# program has nothing else to file it under. Every copy of a name shows the same
+# note, which is right: the note is about the skill, not about one checkout of it.
 #
-# That last key is why the two halves are keyed differently. A note is per name,
-# because a name is what a person means by a skill and the panel has nothing
-# else to file it under. An edit is not: it happens to one SKILL.md, and a name
-# reaches more than one -- impeccable ships one build for OpenCode and another
-# inside a Claude Code plugin. Keyed by name alone, the copy nobody wrote to
-# inherited the entry and its row claimed an edit that had happened to another
-# file, offering to put back a description its author never wrote.
+# Nothing else lives here. An earlier version also held the author's own
+# description, kept so that a rewrite of somebody else's SKILL.md could be put
+# back; this program no longer writes anybody's SKILL.md, so there is nothing to
+# put back and nothing to keep.
 DESCRIBE_PATH = os.path.join(STORE_DIR, "descriptions.json")
 
-# One line of prose, for a note and for a description alike. Longer than every
-# description on this machine and the same bound the scanner already calls
-# `long-description`, so a text that reaches it has stopped being the one-line
-# summary either field is read as.
-MAX_DESCRIPTION = 1024
-# What an author's own description may be and still be recorded for an undo. It
-# is deliberately not the bound above: their text is theirs, one description here
-# is already over a thousand characters, and an `original` clipped to fit would
-# make reset put back something quietly shorter than what it took away.
-MAX_ORIGINAL = 8192
-# A path off a store this program wrote, bounded like every other string it reads
-# back. Linux stops a path at 4096 bytes, so anything longer named no file when
-# it was written either.
-MAX_PATH = 4096
+# One line of prose. Longer than every description on this machine and the same
+# bound the scanner already calls `long-description`, so a note that reaches it
+# has stopped being the one-line summary the card draws it as.
+MAX_NOTE = 1024
 MAX_NOTES = MAX_ASSIGNMENTS
 
 
@@ -743,75 +728,28 @@ def read_describe_store(findings: list | None = None) -> dict:
     value, err = read_json(DESCRIBE_PATH)
     if err or not isinstance(value, dict):
         # Said out loud for the same reason a lost categories.json is: a store
-        # that cannot be read looks exactly like a machine nobody has edited
-        # anything on, and one of the two is worth knowing about. The same rule
-        # about which silence is honest: no file is no store, anything else is a
-        # store we could not read.
+        # that cannot be read looks exactly like a machine nobody has written a
+        # note on, and one of the two is worth knowing about. No file is no
+        # store; anything else is a store we could not read.
         detail = err or (None if value is None else "not an object")
         if detail and findings is not None:
             findings.append({"what": "descriptions.json", "detail": detail})
-        return {"notes": {}, "edited": {}}
+        return {"notes": {}}
     notes = {}
     for k, v in list(as_dict(value.get("notes")).items())[:MAX_NOTES]:
         if isinstance(k, str) and isinstance(v, str) and SKILL_NAME.match(k) and v.strip():
-            notes[k] = clip(v, MAX_DESCRIPTION)
-    # `applied` is what this key was called while a note was a thing you applied.
-    # Nothing is applied any more -- something was edited -- but a store written
-    # by the shipped code holds real author text under the old name, and dropping
-    # it would leave those files carrying our words with nothing to put back.
-    written = as_dict(value.get("edited")) or as_dict(value.get("applied"))
-    edited = {}
-    for k, v in list(written.items())[:MAX_NOTES]:
-        entry = as_dict(v)
-        if not (isinstance(k, str) and SKILL_NAME.match(k)):
-            continue
-        # Both halves or neither. An entry missing `original` cannot be undone
-        # and an entry missing `wrote` cannot tell a hand edit from our own text,
-        # and either one would have reset overwriting a file on a guess.
-        if not (isinstance(entry.get("original"), str) and isinstance(entry.get("wrote"), str)):
-            continue
-        at = entry.get("at")
-        # An absolute path or nothing. A store written before this key existed
-        # names no file, and a relative one could only have come from somewhere
-        # this program never chose a working directory for; either way it is
-        # left empty, and an empty one matches no copy rather than every copy.
-        # An old store therefore understates -- a row reads as its author's --
-        # which is the direction to be wrong in.
-        wrote_to = entry.get("file")
-        edited[k] = {"original": clip(entry["original"], MAX_ORIGINAL),
-                     "wrote": clip(entry["wrote"], MAX_DESCRIPTION),
-                     "file": (clip(wrote_to, MAX_PATH)
-                              if isinstance(wrote_to, str) and os.path.isabs(wrote_to) else ""),
-                     "at": int(at) if isinstance(at, (int, float)) else 0}
-    return {"notes": notes, "edited": edited}
+            notes[k] = clip(v, MAX_NOTE)
+    return {"notes": notes}
 
 
 def write_describe_store(store: dict) -> None:
-    _write_json_store(DESCRIBE_PATH, {"version": 1,
-                                      "notes": store.get("notes", {}),
-                                      "edited": store.get("edited", {})})
-
-
-def same_file(one: str, other: str) -> bool:
-    """Two paths naming one file, matched the way the verbs match a target: by
-    realpath, because a root holds links as often as directories and the store
-    has the path we wrote while the walk has the name it was found under."""
-    return bool(one) and os.path.realpath(one) == os.path.realpath(other)
-
-
-def edited_entry(store: dict, dir_name: str, skill_md: str | None = None) -> dict | None:
-    """The edit filed under this name, where it is this file's.
-
-    An edit happens to one SKILL.md and a name reaches more than one, so the
-    entry names the file it went into and a copy that is not that file was not
-    edited, whatever the name over it says. Asked without a file the question is
-    the name's own, which is what the verbs ask before the caller has told them
-    which copy they mean.
-    """
-    entry = store["edited"].get(dir_name)
-    if entry is None or skill_md is None:
-        return entry
-    return entry if same_file(entry["file"], skill_md) else None
+    """Only what this program owns. An earlier version of this file also kept an
+    `edited` block -- the author's own description, held so a rewrite of somebody
+    else's SKILL.md could be undone. Nothing rewrites a SKILL.md any more, so
+    there is nothing to undo and nothing to hold: a store still carrying that
+    block from an older install is read past and written without it, which is how
+    it goes away on the first note anybody writes."""
+    _write_json_store(DESCRIBE_PATH, {"version": 1, "notes": store.get("notes", {})})
 
 
 def known_categories(store: dict) -> list:
@@ -1052,8 +990,8 @@ def scan(divisor: int = 4) -> dict:
     store = read_store(findings)
     descriptions = read_describe_store(findings)
 
-    # Held rather than re-derived: the removal pass below needs the same list the
-    # walk used, and building it a second time re-reads installed_plugins.json.
+    # Held rather than re-derived: building it a second time re-reads
+    # installed_plugins.json, and this walk is the only reader of either.
     roots = skill_roots()
     for root in roots:
         base = root["path"]
@@ -1120,7 +1058,6 @@ def scan(divisor: int = 4) -> dict:
 
     items = list(by_real.values())
     _mark_drift(items)
-    _mark_removal(items, roots)
     items.sort(key=lambda r: (r["taxonomy"]["category"], r["dirName"].lower()))
     return {
         "version": VERSION,
@@ -1263,30 +1200,7 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
     # note is an annotation drawn above the description; the description is the
     # text that is charged for, and it is charged for at whatever it says now.
     note = descriptions["notes"].get(dir_name)
-    # Asked with this row's own SKILL.md. A note is per name and every copy of
-    # the name shows it, but an edit happened to one file: the copy it happened
-    # to says so and offers the author's text back, and the copy it did not is
-    # the author's own already.
-    edited = edited_entry(descriptions, dir_name, skill_md)
     file_text = clip(description, 1024)
-    can_write, why_not, write_note = _describe_gate(
-        skill_md, "bundled" if bundled else root["scope"], root.get("plugin"))
-    # One entry per name holds one author's text, so only one copy at a time can
-    # be put back. When the entry belongs to a different copy, this row can be
-    # neither written nor reset -- and it has to say so on the card rather than
-    # let the panel draw the control and the helper refuse it after the window
-    # has already closed. The path is what the panel needs, because the answer is
-    # always "go and do it on that one".
-    named = edited_entry(descriptions, dir_name)
-    other_copy = None
-    if named and named.get("file") and not same_file(named["file"], skill_md):
-        other_copy = named["file"]
-        can_write = False
-        # Capitalised like the sentences `_describe_gate` returns, because the
-        # card draws whichever of them it is given and one of two grammars in the
-        # same slot reads as a bug in the panel.
-        why_not = ("Your description is already in %s, which is another copy of this name; "
-                   "reset that one first." % tilde(other_copy))
 
     u = usage.get(dir_name) or usage.get(display) or {}
     last = u.get("lastUsedAt")
@@ -1328,22 +1242,10 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
                    "method": f"chars/{divisor}"},
         "describe": {
             # The reader's own words about this skill, drawn above the
-            # description on the card. No agent reads it and no figure counts it.
+            # description on the card. No agent reads it and no figure counts it,
+            # and it is the only thing under this key: the description below is
+            # reported as it stands and is never written from here.
             "noteText": note,
-            # The description as it stands in SKILL.md: what the agent reads, and
-            # what the token figure above was taken from.
-            "fileText": file_text,
-            # What its author wrote, which is what reset puts back. The same text
-            # as `fileText` until this widget has written the file.
-            "authorText": clip(edited["original"], 1024) if edited else file_text,
-            "edited": edited is not None,
-            "canWrite": can_write,
-            "whyNot": why_not,
-            "writeNote": write_note,
-            "handEdited": bool(edited) and file_text != edited["wrote"],
-            # The copy that holds this name's edit, when it is not this one. Null
-            # the rest of the time, which is nearly always.
-            "otherCopy": tilde(other_copy) if other_copy else None,
         },
         "usage": {"count": u.get("usageCount", 0), "lastUsedAt": last,
                   "daysSinceUse": (int((time.time() * 1000 - last) / 86400000) if last else None),
@@ -1407,381 +1309,6 @@ def _mark_drift(items: list[dict]) -> None:
             if "drift" not in it["attention"]:
                 it["attention"].append("drift")
             it["driftPeers"] = peers
-
-
-# ----------------------------------------------------------------- removal
-#
-# Nothing here ever deletes. Every path that goes, goes through gio, which moves
-# it into the freedesktop trash and writes a .trashinfo recording the absolute
-# path it came from, so `gio trash --restore` can put it back with its contents
-# intact. gio is /usr/bin/gio, shipped by glib2, which is a hard dependency of
-# packages in the Omarchy base set, so it is present wherever this panel is.
-GIO = "/usr/bin/gio"
-PACMAN = "/usr/bin/pacman"
-# Every pacman transaction rewrites this directory, and nothing else can change
-# which package owns a path, so its mtime is the whole of what an answer from an
-# earlier scan has to be checked against.
-PACMAN_DB = "/var/lib/pacman/local"
-
-# The sentence `pacman -Qo` answers with, under LC_ALL=C. A directory is reported
-# with a trailing slash it was not given, so both sides are trimmed before they
-# are matched up.
-PACMAN_OWNED = re.compile(r"^(?P<path>.+?)/? is owned by (?P<name>\S+) \S+$")
-
-
-def owning_packages(paths: list[str]) -> dict[str, str]:
-    """Which distro package installed each of these paths, for the ones one did.
-
-    Only ever asked about paths this user does not own, which on this machine is
-    the pair of skills Omarchy ships under /usr/share and symlinks into every
-    agent's root. Naming the package is the whole difference between "this cannot
-    be removed" and "this belongs to omarchy-settings-dev", and only the second
-    sends the user to their package manager instead of back to this panel.
-
-    Answered from a cache first, because on a stock Omarchy install that pair is
-    linked into every user root by omarchy-provision-user, so every scan on every
-    such machine has something foreign to ask about -- and pacman costs about a
-    tenth of a second to load its database, six times what the rest of the scan
-    costs, on the path the panel takes each time it opens. Deferring the question
-    to the moment a removal is drawn would not help: the plan the panel draws its
-    row from is built by the scan itself, and a row that said "uid 0" until the
-    user clicked it would be the panel telling them nothing when it knows better.
-    So the answer is kept beside the question instead, keyed on the pacman
-    database, and pacman runs again only once that database has moved.
-    """
-    if not paths or not os.path.exists(PACMAN):
-        return {}
-    stamp = _pacman_stamp()
-    answers = _read_package_cache(stamp, paths)
-    if answers is None:
-        answers = _ask_pacman(paths)
-        _write_package_cache(stamp, paths, answers)
-    return answers
-
-
-def _pacman_stamp() -> str:
-    """What a cached answer is checked against, or "" for never trust one."""
-    try:
-        st = os.stat(PACMAN_DB)
-    except OSError:
-        return ""
-    return str(st.st_mtime_ns)
-
-
-def _package_cache_path() -> str:
-    # Under ~/.cache rather than beside categories.json, which is the one file
-    # this program owns. Nothing here is a setting: it is an answer pacman can
-    # give again, and deleting it costs a tenth of a second on the next scan.
-    return os.path.join(HOME, ".cache", "agent-skills", "packages.json")
-
-
-def _read_package_cache(stamp: str, paths: list[str]) -> dict | None:
-    """The previous scan's answers, or None when they cannot stand in for this one.
-
-    A hit has to cover every path being asked about. A partial one would name the
-    package for one skill and bare uid for the next, which reads as though the
-    second belonged to nobody rather than to the same package as the first.
-    """
-    if not stamp:
-        return None
-    value, _ = read_json(_package_cache_path())
-    value = as_dict(value)
-    if value.get("stamp") != stamp:
-        return None
-    owned = as_dict(value.get("owned"))
-    if not all(isinstance(owned.get(p), str) for p in paths):
-        return None
-    return {p: clip(owned[p], 64) for p in paths if owned[p]}
-
-
-def _write_package_cache(stamp: str, paths: list[str], answers: dict) -> None:
-    """Keep the answer beside the question so the next scan spawns nothing.
-
-    Best effort from end to end: a cache that cannot be written costs a tenth of
-    a second on the next scan and nothing else, which is never worth failing a
-    scan for, and a half-written one fails to parse and reads as a miss. A path
-    no package owns is recorded as the empty string rather than left out, so a
-    negative answer is not re-asked on every scan either.
-    """
-    if not stamp:
-        return
-    path = _package_cache_path()
-    # Same refusal as the two stores, without the noise: a cache reached through
-    # a link is a link somebody made, and losing this file costs a tenth of a
-    # second on the next scan.
-    if os.path.islink(path):
-        return
-    payload = json.dumps({"version": 1, "stamp": stamp,
-                          "owned": {p: answers.get(p, "") for p in paths}},
-                         sort_keys=True) + "\n"
-    tmp = path + ".tmp.%d" % os.getpid()
-    try:
-        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(payload)
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-
-
-def _ask_pacman(paths: list[str]) -> dict[str, str]:
-    """One pacman for the whole set rather than one per path.
-
-    The talkative form is used rather than `-Qoq` because a path no package owns
-    is reported on stderr and simply drops out of the quiet output, which would
-    shift every remaining answer silently onto the wrong path.
-    """
-    # Imported here rather than at the top for the reason urllib is: it costs 12 ms
-    # of a scan that is otherwise over in 22, and a scan that the cache answered
-    # never reaches this function at all.
-    import subprocess
-    try:
-        done = subprocess.run([PACMAN, "-Qo", "--"] + paths, timeout=10,
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                              env={**os.environ, "LC_ALL": "C"})
-    except Exception:  # noqa: BLE001 - a package name is a nicety, never a reason to fail a scan
-        return {}
-    out: dict[str, str] = {}
-    for line in done.stdout.decode("utf-8", "replace").split("\n"):
-        m = PACMAN_OWNED.match(line.strip())
-        if m:
-            out[m.group("path")] = clip(m.group("name"), 64)
-    return out
-
-
-def _under_system(path: str) -> bool:
-    """True for anything inside a `.system` directory.
-
-    ~/.codex/skills/.system is rewritten by Codex from an embedded copy on every
-    launch, so a skill removed from it is back before the user has read the
-    confirmation. Matched on the path rather than on `flags.readOnly`, which
-    tracks something else entirely.
-    """
-    return path.endswith("/.system") or "/.system/" in path
-
-
-def _removal_targets(mounts: list[dict]) -> list[dict]:
-    """One entry per distinct path, every link before the directory they point at.
-
-    Two things go wrong without this. Mounts are keyed on (tool, path), so the
-    single symlink that Claude Code and OpenCode both read appears twice, and
-    acting on the list as it stands would trash it once and then be handed a path
-    that is no longer there. And removing a real directory while a link from
-    another root survives takes the row off the next scan entirely, leaving a
-    dangling link and no row to act on -- so the links go first and the directory
-    goes last, and a failure part way through leaves something still standing.
-    """
-    by_abs: dict[str, dict] = {}
-    for m in mounts:
-        entry = by_abs.get(m["abs"])
-        if entry is None:
-            entry = {"abs": m["abs"], "path": m["path"], "link": m["link"], "tools": []}
-            by_abs[m["abs"]] = entry
-        if m["tool"] not in entry["tools"]:
-            entry["tools"].append(m["tool"])
-    # Stable, so paths keep the order the roots were walked in within each half.
-    return sorted(by_abs.values(), key=lambda t: t["link"] != "symlink")
-
-
-def _off_home(targets: list[dict], home_dev) -> list[dict]:
-    """The targets the trash is likely to refuse outright.
-
-    gio will not trash across a filesystem boundary -- "Trashing on system
-    internal mounts is not supported" is what it says, and it says it about /tmp
-    on this machine. The README tells users they may keep their skills on a
-    network mount, so this is a refusal somebody will actually meet, and it is
-    worth saying before the click rather than after it.
-    """
-    if home_dev is None:
-        return []
-    out = []
-    for t in targets:
-        try:
-            if os.lstat(t["abs"]).st_dev != home_dev:
-                out.append(t)
-        except OSError:
-            continue
-    return out
-
-
-def _plan(mode, why, targets, record, *, restorable=False, note=None, command=None) -> dict:
-    """The removal object itself, with the two agent lists worked out from the
-    targets rather than restated by each branch. A tool that reaches the skill
-    through a path we are not touching keeps it, even if another of its paths
-    goes, which is the only reason `keeps` and `loses` are not complements of
-    each other over `tools`."""
-    going = {t["abs"] for t in targets}
-    kept = {m["tool"] for m in record["mounts"] if m["abs"] not in going}
-    return {
-        "mode": mode,
-        "why": why,
-        "targets": targets,
-        "loses": [t for t in record["tools"] if t not in kept],
-        "keeps": [t for t in record["tools"] if t in kept],
-        "restorable": restorable,
-        "restoreNote": note,
-        "command": command,
-    }
-
-
-def _removal_plan(record: dict, roots: list[dict], uid: int, home_dev,
-                  packages: dict | None = None) -> dict:
-    """What removing one skill would take, and which paths it would take it from.
-
-    Every decision is a fresh os.stat of the real directory plus the mount list.
-    None of it comes from `flags.readOnly`, which knows only about bundling and
-    reads False for the two skills a package owns; from `scope`, which says where
-    a skill was found rather than who may move it; or from `linkage`, which reads
-    "real" for a directory that three other roots link to.
-    """
-    real = record["realPath"]
-    targets = _removal_targets(record["mounts"])
-
-    if _under_system(real) or any(_under_system(t["abs"]) for t in targets):
-        return _plan("refuse",
-                     "It sits under .system, which the agent rewrites from an embedded "
-                     "copy on every launch, so removing it would change nothing.",
-                     [], record)
-
-    # Decided from where the real directory sits, not from which root reached it
-    # first. `flags.pluginProvided` is set by the latter, and the user roots are
-    # walked before the plugin caches, so a plugin skill the user has also
-    # symlinked into ~/.claude/skills records False -- and would be trashed out
-    # of the plugin's own checkout. The boundary is matched rather than a bare
-    # prefix, so a sibling cache directory whose name merely starts the same is
-    # not swept in. The flag stays as the fallback for a record the roots cannot
-    # place, and only then is the name taken from the invocation, which on the
-    # record this exists to catch reads `/skill` and names no plugin at all.
-    owner = next((r for r in roots if r.get("plugin") and
-                  (real == r["path"] or real.startswith(r["path"] + "/"))), None)
-    if owner or record["flags"]["pluginProvided"]:
-        # The plugin is what was installed, and its skills came along with it.
-        # `/plugin:skill` is how Claude Code addresses one, so the half before
-        # the colon is the plugin whose row on the panel owns this directory.
-        plugin = (owner["plugin"] if owner else
-                  str(record["invocation"].get("claude", "/")).lstrip("/").split(":")[0])
-        return _plan("delegate",
-                     f"This skill comes with the {plugin} plugin rather than on its own, "
-                     f"so it goes when the plugin does; remove it from the plugin row.",
-                     [], record,
-                     command=["claude", "plugin", "uninstall", plugin] if plugin else None)
-
-    try:
-        st = os.stat(real)
-    except OSError as exc:
-        return _plan("refuse",
-                     f"The directory it points at cannot be read: "
-                     f"{clip(exc.strerror or exc, 96).lower()}.",
-                     [], record)
-
-    # The roots arrive already resolved, because the act side resolves them too
-    # and the two halves have to mean the same thing by "inside a root". Tested
-    # against the literal paths, a dotfiles-managed ~/.claude -- a symlink into a
-    # checkout, which is what chezmoi and stow both produce -- puts every skill
-    # the user owns outside every root, and an ordinary skill is refused.
-    inside = any(real == r["path"] or real.startswith(r["path"] + "/") for r in roots)
-    if st.st_uid != uid or not inside:
-        links = [t for t in targets if t["link"] == "symlink"]
-        if not links:
-            # Two different facts, so two different sentences. Substituting a
-            # place into the ownership clause said a directory "belongs to
-            # somewhere the agents do not scan", which is not a thing anything
-            # can belong to and told the user nothing about what to do next.
-            if st.st_uid != uid:
-                return _plan("refuse",
-                             f"The directory at {tilde(real)} belongs to another user and "
-                             f"nothing you own points at it, so there is nothing here to remove.",
-                             [], record)
-            return _plan("refuse",
-                         f"The directory at {tilde(real)} sits outside every directory the "
-                         f"agents scan and nothing you own points at it, so there is nothing "
-                         f"here to remove.",
-                         [], record)
-        if st.st_uid != uid:
-            package = (packages or {}).get(real.rstrip("/") or real)
-            where = f"the package {package}" if package else f"uid {st.st_uid}"
-            why = (f"The skill itself belongs to {where}, so only the {len(links)} "
-                   f"link{'' if len(links) == 1 else 's'} in your own directories can go.")
-            # What re-makes the link is omarchy-provision-user, which loops the
-            # packaged skills and runs `ln -sfn` for each one when Omarchy
-            # provisions the user on an update. It is a different package from
-            # the one that owns the directory, so the sentence names the
-            # mechanism; the package that owns the directory only tells us the
-            # mechanism is the one at work here.
-            note = ("Omarchy re-creates this link when it provisions your user on an "
-                    "update, so removing it is not necessarily final."
-                    if (package or "").startswith("omarchy") else None)
-        else:
-            why = (f"The skill really lives at {tilde(real)}, outside every directory the "
-                   f"agents scan, so only the {len(links)} link"
-                   f"{'' if len(links) == 1 else 's'} to it can go.")
-            note = None
-        stranded = _off_home(links, home_dev)
-        if stranded:
-            return _plan("unlink", why, links, record, restorable=False,
-                         note=_stranded_note(stranded))
-        return _plan("unlink", why, links, record, restorable=True, note=note)
-
-    parent = os.path.dirname(real)
-    if not os.access(real, os.W_OK) or not os.access(parent, os.W_OK | os.X_OK):
-        return _plan("refuse",
-                     f"You cannot write to {tilde(real)} or to the directory holding it, "
-                     f"so nothing here could move it to the trash.",
-                     [], record)
-
-    if len(targets) == 1:
-        why = ("Nothing but this one directory reaches the skill and it is yours, "
-               "so it goes to the trash whole.")
-    else:
-        why = (f"The skill is yours and {len(targets)} paths reach it, so every link goes "
-               f"to the trash before the directory itself.")
-    stranded = _off_home(targets, home_dev)
-    if stranded:
-        return _plan("trash", why, targets, record, restorable=False,
-                     note=_stranded_note(stranded))
-    return _plan("trash", why, targets, record, restorable=True)
-
-
-def _stranded_note(stranded: list[dict]) -> str:
-    return (f"{stranded[0]['path']} is on another filesystem, and the trash refuses those, "
-            f"so this may not move at all.")
-
-
-def _mark_removal(items: list[dict], roots: list[dict], uid: int | None = None) -> None:
-    """Plan every skill's removal once the walk is over, not while it is running.
-
-    It cannot be decided as a record is assembled. A skill reached from four roots
-    collects its mounts across four passes -- omarchy is reached through three
-    paths by three agents -- and a plan drawn while the first root was being read
-    would name one path and one agent and be wrong about both.
-    """
-    uid = os.getuid() if uid is None else uid
-    try:
-        home_dev = os.stat(HOME).st_dev
-    except OSError:
-        home_dev = None
-    # Resolved once, here, exactly as remove_command resolves them: a plan that
-    # decided "inside a root" against the literal path and an act that decided it
-    # against the realpath disagree on every machine whose ~/.claude is a symlink
-    # into a dotfiles checkout. The rest of each root dict is carried through
-    # because the plan needs `plugin` as well as the path.
-    roots = [{**r, "path": os.path.realpath(r["path"])} for r in roots]
-    # Gathered before anything is planned, so the one directory a package owns is
-    # asked about in the same breath as every other.
-    foreign = set()
-    for it in items:
-        try:
-            if os.stat(it["realPath"]).st_uid != uid:
-                foreign.add(it["realPath"])
-        except OSError:
-            continue
-    packages = owning_packages(sorted(foreign))
-    for it in items:
-        it["removal"] = _removal_plan(it, roots, uid, home_dev, packages)
 
 
 def _claude_override(overrides, dir_name, declared_name):
@@ -2052,20 +1579,15 @@ def category_command(args) -> int:
 
 
 def describe_command(args) -> int:
-    """Three verbs over one skill, and the first has nothing to do with the other two.
+    """One verb over one skill: the reader's own words about it, kept here.
 
-    `note` keeps the reader's own words in this plugin's file, where the panel
-    draws them above the description and no agent ever looks; it opens no
-    SKILL.md and moves no figure. `write` puts a description into the skill's own
-    SKILL.md, where every agent reads it on every turn, so that one moves the
-    figure the moment the file changes. `reset` puts the author's description
-    back and leaves the note alone. Every path prints one line of JSON and either
-    makes the one change it was asked for or changes nothing at all.
+    A note opens no SKILL.md, moves no figure and is read by no agent. It is
+    drawn above the description on the card and the search reads it, and that is
+    the whole of what it does. Named by the directory alone, because a note is
+    per name and every copy of the name shows it.
 
-    A note is per name, so `note` is named by the directory alone. The two verbs
-    that write somebody else's file are named by the file as well, because one
-    name reaches more than one of them and the row the user clicked is one file's
-    row.
+    One line of JSON either way, and either the one change it was asked for or
+    nothing at all.
     """
     skill = args.skill
     # Matched before anything is read or written, and matched rather than
@@ -2074,30 +1596,19 @@ def describe_command(args) -> int:
     if not SKILL_NAME.match(skill):
         return _describe_says(False, "a skill is named by its directory: anything but a "
                                      "slash, and not . or ..")
-    # Every verb here decides what to do from what the store says, and an
-    # unreadable store says nothing in exactly the way an untouched machine does.
-    # That is the difference between "this file already carries its author's
-    # description" and "we cannot tell", and answering the first when the second
-    # is true is how reset reports success over our own text and write records
-    # our own earlier words as the author's. So none of the three runs blind.
+    # An unreadable store says nothing in exactly the way an untouched machine
+    # does, and writing a note over one would take every other note with it.
     unread: list = []
     store = read_describe_store(unread)
     if unread:
-        return _describe_says(False, "%s could not be read (%s), so this cannot say what is "
-                                     "in the file or what to put back"
+        return _describe_says(False, "%s could not be read (%s), so nothing was written"
                                      % (tilde(DESCRIBE_PATH), unread[0]["detail"]))
     try:
-        if args.action == "note":
-            return _describe_note(store, skill, args.text)
-        if args.action == "write":
-            return _describe_write(store, skill, args.file, args.text, args.expect)
-        return _describe_reset(store, skill, args.file)
+        return _describe_note(store, skill, args.text)
     except Exception as exc:  # noqa: BLE001 - the caller is owed one line of JSON, always
         # The panel reads one line and nothing else, so a traceback on stderr and
         # an empty stdout reads to it as a failure it cannot name -- which is what
-        # a full disk, a quota or a read-only $HOME produced here, sometimes with
-        # the SKILL.md already rewritten. Every verb below leaves the file the way
-        # it found it before it gets this far, so the sentence can say so.
+        # a full disk, a quota or a read-only $HOME produced here.
         detail = clip(getattr(exc, "strerror", None) or str(exc) or type(exc).__name__, 160)
         return _describe_says(False, f"the change could not be finished: {detail}")
 
@@ -2108,17 +1619,6 @@ def _describe_says(ok: bool, detail: str) -> int:
     an argument this program cannot use is a refusal like any other."""
     sys.stdout.write(json.dumps({"ok": ok, "detail": detail}, ensure_ascii=False) + "\n")
     return 0 if ok else 2
-
-
-def _not_absolute(path: str) -> str:
-    """Asked at the top of both writing verbs and again inside `_describe_target`.
-
-    The first is so that a path this program could not act on is refused before
-    the filesystem is touched at all; the second is so that the function that
-    picks the target is right on its own, wherever it is called from.
-    """
-    return (f"{clip(path, 240)} is not an absolute path; the file to write is the "
-            f"`realPath` a scan gave, never a display string re-expanded")
 
 
 def _describe_note(store: dict, skill: str, text: str) -> int:
@@ -2132,7 +1632,7 @@ def _describe_note(store: dict, skill: str, text: str) -> int:
     # Collapsed to one line before anything else, because a card draws it on one:
     # a note that kept its line breaks would be one text in this file and another
     # on the screen.
-    note = clip(" ".join(str(text or "").split()), MAX_DESCRIPTION)
+    note = clip(" ".join(str(text or "").split()), MAX_NOTE)
     if not note:
         if store["notes"].pop(skill, None) is None:
             return _describe_says(True, f"{skill} had no note, so there was none to clear")
@@ -2145,213 +1645,6 @@ def _describe_note(store: dict, skill: str, text: str) -> int:
     return _describe_says(True, f"{skill} has a note of {len(note)} "
                                 f"character{'' if len(note) == 1 else 's'}, which is yours to "
                                 f"read and costs the agents nothing")
-
-
-def _describe_write(store: dict, skill: str, path: str, text: str, expect: str | None) -> int:
-    """Put this text in as the description of the file the agent actually reads.
-
-    The text arrives on the command line, because this is the field somebody typed
-    into and saved: there is no staging area between the two and nothing here to
-    look up. What the file said a moment ago becomes `original` the first time,
-    and only the first time, so reset restores the author rather than our own
-    earlier wording.
-
-    The file is named by the caller rather than chosen here. A name reaches more
-    than one SKILL.md -- impeccable ships one build for OpenCode and another
-    inside a Claude Code plugin -- and the panel draws a row per file whose card
-    names that file, its caveat and its figure; picking the first writable copy
-    instead wrote whichever root happened to come first and made every one of
-    those three a lie.
-
-    Every other fact is taken again here, from the path itself, exactly as
-    `remove` takes its own: the row the user clicked was drawn by a scan that may
-    be minutes old, and in between the skill can have moved, lost its write
-    permission, or been edited by hand. The one thing this side cannot know on
-    its own is what the row said, so `--expect` is there for a caller that wants
-    to be sure it is overwriting the text it was showing.
-    """
-    if not os.path.isabs(path):
-        return _describe_says(False, _not_absolute(path))
-    # One line, for the reason a note is one: the frontmatter has no paragraph
-    # break every reader agrees on, so the collapse happens here rather than at
-    # write time, where it would silently change the text that was asked for.
-    value = clip(" ".join(str(text or "").split()), MAX_DESCRIPTION)
-    if not value:
-        return _describe_says(False, "a description of nothing is not a description; "
-                                     "`describe reset` is how you go back to the author's")
-    candidates = _describe_candidates(skill)
-    if not candidates:
-        return _describe_says(False, f"no directory named {skill} with a SKILL.md in it sits "
-                                     f"in any root the agents scan")
-    target, wrong = _describe_target(candidates, path)
-    if target is None:
-        return _describe_says(False, wrong)
-    can_write, why, caveat = _describe_gate(target["skillMd"], target["scope"], target["plugin"])
-    if not can_write:
-        return _describe_says(False, why)
-
-    text_now = read_text(target["skillMd"])
-    if text_now is None:
-        return _describe_says(False, f"{tilde(target['skillMd'])} could not be read a second "
-                                     f"time, so nothing was written")
-    current = _description_in(text_now)
-    edited = store["edited"].get(skill)
-    # What this write is allowed to inherit. Normally the entry itself: a second
-    # write over our own text keeps the first `original`, so reset still puts the
-    # author's words back rather than our earlier ones.
-    inherit = edited
-    if edited and not edited["file"]:
-        # A store written before entries named a file names no copy, and one name
-        # reaches more than one SKILL.md. The only proof this side has that the
-        # entry belongs to THIS copy is the one reset already demands: the file
-        # still carries what we wrote. Inherited without it, one author's words
-        # are rebound to another author's file, and the reset that follows writes
-        # them over that author's description while reporting that the file reads
-        # as its author wrote it.
-        if clip(current, MAX_DESCRIPTION) != edited["wrote"]:
-            elsewhere = next((c for c in candidates
-                              if not same_file(c["skillMd"], target["skillMd"])
-                              and clip(_description_in(read_text(c["skillMd"]) or ""),
-                                       MAX_DESCRIPTION) == edited["wrote"]), None)
-            if elsewhere:
-                return _describe_says(False, f"your description is already in "
-                                             f"{tilde(elsewhere['skillMd'])}, which is another "
-                                             f"copy of this name; only one copy at a time can "
-                                             f"be put back, so reset that one before writing "
-                                             f"this one")
-            # No copy of this name still carries it, so nothing here can say whose
-            # words the entry holds. This file's own text is the honest original.
-            inherit = None
-    if edited and edited["file"] and not same_file(edited["file"], target["skillMd"]):
-        # One entry per name holds one author's text, so writing a second copy
-        # would drop the first file's, leaving that file carrying our words with
-        # nothing left to put back. The copy that already has them is named,
-        # because it is the one to reset.
-        return _describe_says(False, f"your description is already in "
-                                     f"{tilde(edited['file'])}, which is another copy of this "
-                                     f"name; only one copy at a time can be put back, so reset "
-                                     f"that one before writing this one")
-    if expect is not None and clip(current, MAX_DESCRIPTION) != clip(expect, MAX_DESCRIPTION):
-        return _describe_says(False, f"{tilde(target['skillMd'])} no longer says what the row "
-                                     f"was drawn from, so it changed since the scan; run "
-                                     f"another one")
-    if len(current) > MAX_ORIGINAL:
-        return _describe_says(False, f"the description in {tilde(target['skillMd'])} is longer "
-                                     f"than this program can record for an undo, so it is "
-                                     f"left alone")
-    if skill not in store["edited"] and len(store["edited"]) >= MAX_NOTES:
-        return _describe_says(False, f"there is room for {MAX_NOTES} edited descriptions")
-
-    # The author's words are recorded before the file is touched, never after.
-    # Recorded after, a store that could not be written -- a full disk, a quota,
-    # a read-only $HOME -- left the SKILL.md already rewritten with the only copy
-    # of the original held nowhere, which is a description nothing can put back.
-    # They are recorded once and never again: a second write over our own text
-    # keeps the first `original`, so reset still restores what the author wrote
-    # rather than what we did on the way here.
-    #
-    # The file is recorded by its real path, which is the name it keeps: a root
-    # holds links as often as directories, and the link can be remade tomorrow
-    # while the file under it stays where it is.
-    store["edited"][skill] = {"original": inherit["original"] if inherit else current,
-                              "wrote": value, "at": int(time.time()),
-                              "file": os.path.realpath(target["skillMd"])}
-    write_describe_store(store)
-
-    failed = _write_description(target["skillMd"], value, expect)
-    if failed:
-        # An entry is only true while the file carries it, so one recorded for a
-        # write that did not happen goes back the way it was. Best effort, and
-        # the refusal the caller reads is the write's rather than this one's: a
-        # store that will not take the undo has already taken the entry, and the
-        # row that results reads as hand edited, which is a state this feature
-        # describes rather than acts on.
-        if edited is None:
-            store["edited"].pop(skill, None)
-        else:
-            store["edited"][skill] = edited
-        try:
-            write_describe_store(store)
-        except OSError:
-            pass
-        return _describe_says(False, failed)
-    said = [f"{tilde(target['skillMd'])} now carries your description, and the author's is "
-            f"kept, so reset puts it back."]
-    if caveat:
-        said.append(caveat)
-    others = len(candidates) - 1
-    if others:
-        said.append(f"{others} other cop{'y' if others == 1 else 'ies'} of this name "
-                    f"{'was' if others == 1 else 'were'} left alone.")
-    return _describe_says(True, " ".join(said))
-
-
-def _describe_reset(store: dict, skill: str, path: str) -> int:
-    """Back to the author's description, in the file the caller names, and only
-    where that can be done exactly.
-
-    The description is put back from `original`, which is the author's own text:
-    what reset restores is what the skill said, to the character, and it is
-    written the way this program writes any description. Where the author wrote
-    one plain line the file comes back byte for byte; where they folded it over
-    several lines, or quoted a sentence that needs no quoting, the text is theirs
-    again and the layout is ours.
-
-    The note is not touched, on any path through this. The two fields are
-    independent -- one is the reader's own words about the skill, the other is
-    the skill's own -- and putting a description back is no reason to throw away
-    what somebody wrote about it. `describe note` with no text is how a note goes.
-
-    The file is named for the same reason `write` names one: the row the user
-    clicked is one file's row, and a name can reach several. A file that does not
-    carry what we wrote is left exactly as it is -- it is either another copy of
-    the name or somebody's hand edit, and there is no version of overwriting the
-    second that the person who typed it would thank us for.
-    """
-    if not os.path.isabs(path):
-        return _describe_says(False, _not_absolute(path))
-    edited = store["edited"].get(skill)
-    if edited is None:
-        return _describe_says(True, f"{skill} already carries the description its author wrote")
-    candidates = _describe_candidates(skill)
-    if not candidates:
-        return _describe_says(False, f"no directory named {skill} with a SKILL.md in it is "
-                                     f"there to put anything back into")
-    target, wrong = _describe_target(candidates, path)
-    if target is None:
-        return _describe_says(False, wrong)
-    if edited["file"] and not same_file(edited["file"], target["skillMd"]):
-        # Nothing was ever written here, so there is nothing here to put back,
-        # and forgetting the entry would leave the copy that does carry our words
-        # with no author's text behind it. Both files are left as they are and
-        # the name is told where its edit actually is.
-        return _describe_says(False, f"what was written under this name is in "
-                                     f"{tilde(edited['file'])}, not in "
-                                     f"{tilde(target['skillMd'])}, which nothing here ever "
-                                     f"wrote to; both are left exactly as they are, and it is "
-                                     f"the other copy to reset")
-    current = clip(_current_description(target["skillMd"]), MAX_DESCRIPTION)
-    # A file that already reads as its author wrote it has nothing left to put
-    # back, and forgetting the entry that says otherwise is the whole of what
-    # remains. That is the state left behind when the file was restored and the
-    # store could not then be written -- an unwritable ~/.config, a full disk --
-    # and without this there is no way out of it: the file no longer says what we
-    # wrote, so every later reset would refuse.
-    if current != clip(edited["original"], MAX_DESCRIPTION):
-        if current != edited["wrote"]:
-            return _describe_says(False, f"{tilde(target['skillMd'])} does not carry the "
-                                         f"description written under this name, so either "
-                                         f"another copy of it does or this file was changed by "
-                                         f"hand; it is left exactly as it is")
-        can_write, why, _ = _describe_gate(target["skillMd"], target["scope"], target["plugin"])
-        if not can_write:
-            return _describe_says(False, why)
-        failed = _write_description(target["skillMd"], edited["original"])
-        if failed:
-            return _describe_says(False, failed)
-    store["edited"].pop(skill, None)
-    write_describe_store(store)
-    return _describe_says(True, f"{skill} reads as its author wrote it")
 
 
 def _description_in(text: str) -> str:
@@ -2371,86 +1664,6 @@ def _current_description(skill_md: str) -> str:
     return "" if text is None else _description_in(text)
 
 
-def remove_command(args) -> int:
-    """Move skill directories to the trash, deciding again at the moment of the act.
-
-    The row the user clicked was drawn by a scan that may be minutes old, and in
-    between the skill can have been moved, replaced by a link to somewhere else,
-    rewritten by Codex on its next launch, or taken over by a package update. So
-    none of the row is believed here: every fact is taken again, from the path
-    itself, and a path that fails one of them is refused by name while the others
-    carry on. The alternative -- one bad path abandoning the batch -- leaves the
-    user with half a removal and no account of which half.
-
-    The one path that does depend on another is the directory a refused link
-    points at, which is held back below: that pair is one removal rather than two
-    independent ones, and finishing half of it is the half that cannot be undone
-    from the panel.
-    """
-    paths = list(args.paths)
-    removed: list[dict] = []
-    refused: list[dict] = []
-
-    # Before anything is stat'ed, let alone moved. A relative path is resolved
-    # against a working directory this program never chose, and the panel has
-    # `abs` on every mount precisely so that it never has to send one.
-    if not all(os.path.isabs(p) for p in paths):
-        for p in paths:
-            refused.append({"path": clip(p, 512), "reason": "a path to remove must be absolute"})
-        _emit_removal(removed, refused)
-        return 2
-
-    roots = skill_roots()
-    root_reals = {os.path.realpath(r["path"]) for r in roots}
-    # A plugin's own checkout is a skill root, so every other test here passes on
-    # a path inside one: it is a directory, it is ours, its parent is a root, and
-    # it holds a SKILL.md. Refusing it has to be its own rule. The plan already
-    # answers `delegate` for these, but the plan is advisory by design and this
-    # side is the one that decides -- a guard that lives only in the plan is a
-    # guard the command line walks straight past.
-    plugin_reals = {os.path.realpath(r["path"]) for r in roots if r.get("plugin")}
-    uid = os.getuid()
-    # A link that will not go and the directory it points at are one removal, not
-    # two. Trashing the directory after the trash refused the link leaves the
-    # skill in the trash, a live dangling link in a root Codex and OpenCode still
-    # walk, and no row on the panel to finish the job with, because a skill whose
-    # realpath is gone stops being an item. So a refused link holds back the one
-    # path it named -- keyed on the realpath, so refusals from unrelated skills
-    # stay independent and every other link to the same directory still goes.
-    held: dict[str, str] = {}
-    for path in _links_first(paths):
-        # Asked before anything moves the path, because after gio has taken it
-        # there is nothing left to ask.
-        is_link = os.path.islink(path)
-        reason = _removable(path, root_reals, plugin_reals, uid)
-        if not reason and not is_link:
-            reason = held.get(os.path.realpath(path))
-        if not reason and args.dry_run:
-            removed.append({"path": path, "trashed": False})
-            continue
-        if not reason:
-            ok, err = _gio_trash(path)
-            if ok:
-                removed.append({"path": path, "trashed": True})
-                continue
-            reason = err
-        # Whichever of the two refused it -- our own checks or the trash itself
-        # -- the link is still on disk and the directory under it must stay.
-        if is_link:
-            held.setdefault(
-                os.path.realpath(path),
-                f"the link at {tilde(path)} did not go, and trashing the directory it "
-                f"points at would leave it dangling in a root the agents still walk")
-        refused.append({"path": path, "reason": reason})
-    _emit_removal(removed, refused)
-    return 0 if removed else 2
-
-
-def _emit_removal(removed: list[dict], refused: list[dict]) -> None:
-    sys.stdout.write(json.dumps({"removed": removed, "refused": refused},
-                                ensure_ascii=False) + "\n")
-
-
 def _links_first(paths: list[str]) -> list[str]:
     """Links before the directories they point at, whatever order they arrived in.
 
@@ -2461,68 +1674,6 @@ def _links_first(paths: list[str]) -> list[str]:
     that sort the same keep the order the caller chose.
     """
     return sorted(paths, key=lambda p: not os.path.islink(p))
-
-
-def _removable(path: str, root_reals: set, plugin_reals: set, uid: int) -> str | None:
-    """Everything that has to be true of a path before gio is handed it.
-
-    Ordered so the answer names the most specific thing wrong: what it is before
-    who owns it, and where it sits before what it holds. lstat, not stat, because
-    the path may legitimately be a symlink whose target belongs to a package --
-    the link is ours to move even when what it points at is not.
-    """
-    if _under_system(path) or _under_system(os.path.realpath(path)):
-        return "under .system, which the agent rewrites on every launch"
-    real = os.path.realpath(path)
-    if any(real == p or real.startswith(p + "/") for p in plugin_reals):
-        return "part of an installed plugin, which owns it and should remove it"
-    try:
-        st = os.lstat(path)
-    except OSError as exc:
-        return f"cannot be read, {clip(exc.strerror or exc, 96).lower()}"
-    if not (stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode)):
-        return "not a directory or a symlink"
-    if st.st_uid != uid:
-        return "owned by another user"
-    parent = os.path.dirname(path)
-    if os.path.realpath(parent) not in root_reals:
-        return "no longer inside a directory any agent scans for skills"
-    if not os.path.isfile(os.path.join(path, "SKILL.md")):
-        return "holds no SKILL.md, so it is not a skill directory"
-    if not os.access(parent, os.W_OK | os.X_OK):
-        return f"{tilde(parent)} is not writable by you"
-    return None
-
-
-def _gio_trash(path: str) -> tuple[bool, str]:
-    """Move one path into the trash, and repeat what gio said if it will not.
-
-    One invocation per path and an argv list rather than a command line: a skill
-    is named by whoever wrote it, `$(id)` is a legal directory name, and nothing
-    here may ever reach a shell. gio's own refusals are worth passing on word for
-    word -- "Trashing on system internal mounts is not supported" is what a user
-    who keeps their skills on a network mount gets, and paraphrasing it would
-    leave them with no idea what to do about it.
-
-    The exit code is checked and then not trusted on its own. gio prints "Unable
-    to move file to its original location" on a restore and still exits 0, so the
-    only proof that a path went is that the path is gone.
-    """
-    # Lazily, like every other import that costs more than the work it does.
-    import subprocess
-    try:
-        done = subprocess.run([GIO, "trash", "--", path], timeout=30,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    except OSError as exc:
-        return False, clip(f"{GIO} could not be run: {exc.strerror or exc}", 240)
-    except Exception:  # noqa: BLE001 - a timeout is one refused path, not a dead command
-        return False, f"{GIO} did not finish within 30 seconds"
-    if done.returncode == 0 and not os.path.lexists(path):
-        return True, ""
-    if done.returncode == 0:
-        return False, "gio reported success and the path is still there"
-    err = " ".join(done.stderr.decode("utf-8", "replace").split())
-    return False, clip(err or f"gio trash exited {done.returncode}", 240)
 
 
 # ------------------------------------------------------ writing a description
@@ -2543,157 +1694,6 @@ def _gio_trash(path: str) -> tuple[bool, str]:
 # about.
 YAML_INDICATORS = "-?:,[]{}#&*!|>'\"%@`"
 YAML_KEYWORDS = {"true", "false", "yes", "no", "on", "off", "null", "~"}
-
-
-def _plain_is_safe(value: str) -> bool:
-    if not value or value != value.strip() or "\t" in value:
-        return False
-    if value[0] in YAML_INDICATORS:
-        return False
-    if ": " in value or value.endswith(":") or " #" in value:
-        return False
-    if value.lower() in YAML_KEYWORDS:
-        return False
-    try:
-        float(value)
-    except ValueError:
-        return True
-    return False
-
-
-def _yaml_scalar(value: str) -> str | None:
-    """The text as a one-line scalar, or None when no quoting can carry it.
-
-    Nothing here is escaped, and that is the point. The read-back below goes
-    through parse_frontmatter_block, which strips one matching pair of quotes and
-    does not undo escapes, so a `\\"` written inside a double-quoted scalar would
-    come back with its backslash still attached and the write would be refused.
-    Single quotes carry a text with double quotes in it, double quotes carry one
-    with single quotes, and a text holding both goes into the folded block below,
-    where neither is special to anyone.
-    """
-    if _plain_is_safe(value):
-        return value
-    if "'" not in value:
-        return f"'{value}'"
-    if '"' not in value and "\\" not in value:
-        return f'"{value}"'
-    return None
-
-
-def _render_description(value: str) -> list[str]:
-    """The replacement lines: one where a scalar will do, two where it will not."""
-    scalar = _yaml_scalar(value)
-    if scalar is not None:
-        return [f"description: {scalar}"]
-    return ["description: >-", f"  {value}"]
-
-
-def _replace_description(text: str, value: str) -> tuple[str | None, str]:
-    """The file back with only the description's value changed, or why it is not.
-
-    The frontmatter is walked exactly the way parse_frontmatter_block walks it,
-    key by key, so the lines this replaces are the lines that parser reads as the
-    description and no others. Anything it would read differently -- a second
-    description key, a mapping where prose belongs, line endings we would end up
-    mixing -- is refused rather than guessed at.
-    """
-    if not text.startswith("---"):
-        return None, "it has no frontmatter for a description to sit in"
-    first = text.find("\n")
-    if first == -1 or text[:first].strip() != "---":
-        return None, "its first line is not the `---` that opens frontmatter"
-    end = text.find("\n---", 3)
-    if end == -1:
-        return None, "its frontmatter is never closed"
-    block = text[first + 1:end]
-    if len(block) > FRONTMATTER_LIMIT:
-        return None, "its frontmatter is larger than this program reads"
-    if "\r" in block:
-        return None, ("its frontmatter uses carriage returns, and replacing one line of it "
-                      "would leave the file with two kinds of line ending")
-
-    lines = block.split("\n")
-    spans: list[tuple[int, int, str, bool]] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if (not line.strip() or line.lstrip().startswith("#")
-                or line[:1].isspace() or ":" not in line):
-            i += 1
-            continue
-        key, _, rest = line.partition(":")
-        body, j = _consume_indented(lines, i + 1)
-        # _consume_indented reports where the next key begins, which is past any
-        # blank lines it walked over on the way, and it drops those from the body
-        # it returns. The span ends on the last line that carries value, so a
-        # blank line an author left between two keys stays exactly where it is.
-        if key.strip() == "description":
-            spans.append((i, i + len(body), rest.strip(), bool(body)))
-        i = j if body else i + 1
-
-    if len(spans) != 1:
-        return None, ("it has no description for us to replace" if not spans else
-                      "its frontmatter declares a description more than once")
-    start, last, rest, indented = spans[0]
-    # A block scalar whose header this program cannot read whole is one whose
-    # text it would record wrongly, and an `original` that is not the author's
-    # words is a reset that cannot put them back. So the round trip is refused
-    # before it starts rather than abandoned half way through it.
-    if rest[:1] in ("|", ">") and not BLOCK_SCALAR.match(rest):
-        return None, ("its description opens a block scalar this program does not read the "
-                      "same way every agent does, so putting the author's text back "
-                      "afterwards could not be exact")
-    # An empty value with lines under it is the shape `metadata:` is written in,
-    # and a mapping is not a description. An empty value with nothing under it is
-    # a description the author left blank, which is the one row on the panel most
-    # worth filling in, so it is replaced like any other.
-    if rest == "" and indented:
-        return None, "its description is written as a mapping rather than as text"
-    # A trailing comment on a plain scalar, for the same reason as the block
-    # scalar above. Every YAML reader stops a plain scalar at ` #`; the reader in
-    # this file takes the whole of what follows the colon, so `description: hello
-    # # a note` is recorded as the author having written "hello # a note". Reset
-    # then writes that back quoted, and the comment becomes part of the
-    # description every agent loads on every turn -- permanently, and invisibly,
-    # because the read-back that checks a write uses the same parser that made
-    # the mistake. Quoted scalars are unaffected: the ` #` is inside the quotes
-    # and is text, which is why the shape rather than the substring is tested.
-    if rest[:1] not in ("|", ">", '"', "'") and " #" in rest:
-        return None, ("its description carries a trailing comment this program cannot tell "
-                      "from the text, so putting the author's words back afterwards could "
-                      "not be exact")
-    return text[:first + 1] + "\n".join(
-        lines[:start] + _render_description(value) + lines[last + 1:]) + text[end:], ""
-
-
-def _replace_file(path: str, data: bytes, mode: int) -> str:
-    """One file, replaced whole: temp beside it, fsync, rename over the target.
-
-    The same shape the stores are written in, and for the same reason -- there is
-    no half-written state to recover from because there is no partial write. The
-    mode is carried across rather than left to the umask, so a SKILL.md somebody
-    made group-readable is still group-readable afterwards.
-    """
-    tmp = path + ".tmp.%d" % os.getpid()
-    try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, mode)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except OSError as exc:
-        _unlink_quietly(tmp)
-        return f"{tilde(path)} could not be replaced, {clip(exc.strerror or exc, 96).lower()}"
-    except BaseException:
-        _unlink_quietly(tmp)
-        raise
-    stuck = _commit_directory(os.path.dirname(path) or ".")
-    if stuck:
-        return f"{tilde(path)} was written but the rename was not committed to disk, {stuck}"
-    return ""
 
 
 def _commit_directory(directory: str) -> str:
@@ -2720,161 +1720,8 @@ def _commit_directory(directory: str) -> str:
     return ""
 
 
-def _unlink_quietly(path: str) -> None:
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
-
-
 def _frontmatter_besides_description(text: str) -> dict:
     return {k: v for k, v in parse_frontmatter(text).items() if k != "description"}
-
-
-def _write_description(skill_md: str, value: str, expect: str | None = None) -> str:
-    """Put `value` in as the description, or say what stopped it and change nothing.
-
-    Nothing here trusts the write. The file is read again afterwards and parsed
-    with parse_frontmatter, which is what the panel and the three agents will
-    read it with, and unless the description now comes back as exactly the text
-    asked for -- with every other key still saying what it said -- the original
-    bytes go back before this returns.
-
-    `expect` is re-checked here, against the read this function rewrites from,
-    and not only by the caller. The caller reads the file to decide whether to
-    write at all, records the author's words, and fsyncs a store before getting
-    this far; that is around a tenth of a second in which an editor save, a
-    checkout being updated underneath, or an agent rewriting a skill on launch
-    lands between the guard and the thing it guards. A guard that protects a revision other than the one being
-    replaced is not a guard, so the same sentence is asked again about the bytes
-    that are actually going.
-    """
-    why: list[str] = []
-    raw = safe_read(skill_md, why=why)
-    if raw is None:
-        return f"{tilde(skill_md)} could not be read{', ' + why[0] if why else ''}"
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        # Decoding with "replace" the way the scan does would hand back a string
-        # that no longer encodes to the bytes it came from, and writing it would
-        # quietly rewrite parts of the file nobody asked us to touch.
-        return f"{tilde(skill_md)} is not valid UTF-8, so it is not a file we can rewrite safely"
-    if expect is not None and clip(_description_in(text), MAX_DESCRIPTION) != clip(expect, MAX_DESCRIPTION):
-        return (f"{tilde(skill_md)} changed while this was being written, so it was left "
-                f"alone; run another scan")
-    new_text, refusal = _replace_description(text, value)
-    if new_text is None:
-        return f"{tilde(skill_md)} was left alone: {refusal}"
-    try:
-        mode = stat.S_IMODE(os.stat(skill_md).st_mode)
-    except OSError as exc:
-        return f"{tilde(skill_md)} could not be examined, {clip(exc.strerror or exc, 96).lower()}"
-
-    failed = _replace_file(skill_md, new_text.encode("utf-8"), mode)
-    if failed:
-        return failed
-    back = read_text(skill_md) or ""
-    kept_its_keys = (_frontmatter_besides_description(back)
-                     == _frontmatter_besides_description(text))
-    if _description_in(back) != value or not kept_its_keys:
-        undone = _replace_file(skill_md, raw, mode)
-        if undone:
-            return (f"{tilde(skill_md)} did not read back as the text given, and the original "
-                    f"could not be put back: {undone}")
-        return f"{tilde(skill_md)} did not read back as the text given, so the original went back"
-    return ""
-
-
-def _describe_candidates(dir_name: str) -> list[dict]:
-    """Every directory of this name holding a SKILL.md, in the order roots are
-    walked in, one entry per distinct real path.
-
-    The store is keyed by directory name because that is what a person means by a
-    skill and what the panel has to hand. A name can still reach two different
-    files -- impeccable ships one build for OpenCode and another inside a Claude
-    Code plugin -- so the name is resolved again at the moment of acting rather
-    than remembered from a scan, and the verbs below name the file they wrote.
-    """
-    out: list[dict] = []
-    seen: set[str] = set()
-    for root in skill_roots():
-        for directory in (os.path.join(root["path"], dir_name),
-                          os.path.join(root["path"], ".system", dir_name)):
-            skill_md = os.path.join(directory, "SKILL.md")
-            if not os.path.isfile(skill_md):
-                continue
-            real = os.path.realpath(directory)
-            if real in seen:
-                continue
-            seen.add(real)
-            out.append({"dir": directory, "skillMd": skill_md, "real": real,
-                        "scope": root["scope"], "plugin": root.get("plugin")})
-    return out
-
-
-def _describe_target(candidates: list[dict], path: str) -> tuple[dict | None, str]:
-    """Which of this name's files the caller named, or why it is not one of them.
-
-    The path is checked rather than believed, exactly as `remove` checks the ones
-    it is handed: the only files this verb may open are the ones the name already
-    resolves to, so anything else is refused by name and nothing is written. It
-    is compared through realpath because a root holds links as often as
-    directories -- ~/.claude/skills/omarchy is a link into /usr/share -- and the
-    caller has the real path while the walk has the name it was found under.
-    """
-    if not os.path.isabs(path):
-        return None, _not_absolute(path)
-    real = os.path.realpath(path)
-    for c in candidates:
-        if real == os.path.realpath(c["skillMd"]):
-            return c, ""
-    # Both halves clipped, like every other third-party string that crosses into
-    # the shell process: the path came off a command line and the list grows with
-    # however many roots hold this name.
-    reached = clip(", ".join(tilde(c["skillMd"]) for c in candidates[:4]), 400)
-    return None, (f"{clip(tilde(path), 240)} is not one of the {len(candidates)} files this "
-                  f"name reaches ({reached}), so it is not one this verb may write")
-
-
-def _describe_gate(skill_md: str, scope: str,
-                   plugin: str | None) -> tuple[bool, str | None, str | None]:
-    """Whether this SKILL.md can be written, why not, and what to warn about.
-
-    Asked in the same words by the scan, which draws the answer on the row, and
-    by `write`, which acts on it minutes later, so the two cannot end up
-    disagreeing about what is writable. The caveats are the other half: an edit
-    that lands and then disappears on the next plugin update or the next fetch is
-    worth saying before the click rather than explaining afterwards.
-    """
-    directory = os.path.dirname(skill_md)
-    if _under_system(skill_md):
-        return False, ("It sits under .system, which the agent rewrites from an embedded copy "
-                       "on every launch, so a description written there would be gone by the "
-                       "next start."), None
-    # Writability is asked first and existence only when that fails, because the
-    # scan asks this of every skill on the machine and the file it is asking
-    # about is one it has just read. A missing SKILL.md still gets its own
-    # sentence: the row may be minutes old by the time `write` asks the same
-    # question, and by then the skill may have gone.
-    if not os.access(skill_md, os.W_OK):
-        if not os.path.isfile(skill_md):
-            return False, f"There is no SKILL.md at {tilde(skill_md)} to write into.", None
-        # Named by where the file really is, which for a packaged skill is not
-        # where the agent found it: ~/.claude/skills/omarchy is a link Omarchy
-        # makes into /usr/share when it provisions the user, and saying that the
-        # link in your own directory is not writable explains nothing.
-        return False, f"{tilde(os.path.realpath(skill_md))} is not writable by you.", None
-    if not os.access(directory, os.W_OK | os.X_OK):
-        return False, (f"{tilde(directory)} is not writable by you, so the replacement could "
-                       f"not be written beside the file it replaces."), None
-    if plugin:
-        return True, None, (f"This skill comes with the {plugin} plugin, and a plugin update "
-                            f"replaces its checkout, so the edit goes when that happens.")
-    if scope == "fetched":
-        return True, None, ("OpenCode fetches this skill from skills.urls into its cache, so "
-                            "the edit lasts until it fetches it again.")
-    return True, None, None
 
 
 def _apply_style(store: dict, name: str, label, color) -> bool:
@@ -2952,54 +1799,19 @@ def main(argv: list[str]) -> int:
 
     cat_sub.add_parser("list", help="print the store as JSON")
 
-    # Two unrelated fields and the way back from one of them. `note` is the
-    # reader's own words, kept in this plugin's file, read by nobody else and
-    # counted in no figure. `write` is the only verb here that changes a file
-    # this program did not create, and the only one that moves what the agents
-    # pay -- it moves it at the moment it writes, because the file now says
-    # something different.
-    p_desc = sub.add_parser("describe", help="annotate a skill for yourself, or rewrite the "
-                                             "description every agent reads")
+    # The reader's own words about a skill, kept in this plugin's own file, read
+    # by nobody else and counted in no figure. It is the only thing this program
+    # writes outside the category store, and it is not anybody's SKILL.md: the
+    # description an agent reads is reported here and never rewritten.
+    p_desc = sub.add_parser("describe", help="keep your own note about a skill")
     desc_sub = p_desc.add_subparsers(dest="action", required=True)
 
     p_note = desc_sub.add_parser("note", help="your own words about a skill, shown above its "
                                               "description and read by no agent")
     p_note.add_argument("skill", help="the skill's directory name")
     p_note.add_argument("text", nargs="?", default="",
-                        help=f"the note, up to {MAX_DESCRIPTION} characters; leave it out to "
+                        help=f"the note, up to {MAX_NOTE} characters; leave it out to "
                              f"clear the one that is there")
-
-    # Both of these name the file as well as the skill, because a name reaches
-    # more than one SKILL.md and the panel draws a row per file. The path is the
-    # `realPath` of the row's own skill with SKILL.md on the end -- never the `~`
-    # display string beside it, and never whichever copy this side would have
-    # picked, which is the one that made the card promise one file and the write
-    # land in another.
-    p_write = desc_sub.add_parser("write", help="write this text as the skill's description, "
-                                                "which every agent then reads")
-    p_write.add_argument("skill")
-    p_write.add_argument("file", metavar="SKILL_MD",
-                         help="absolute path to the SKILL.md the row names, from a scan's "
-                              "realPath; refused unless this name reaches it")
-    p_write.add_argument("text", help=f"the description, up to {MAX_DESCRIPTION} characters")
-    p_write.add_argument("--expect", default=None,
-                         help="the description the row was drawn from; refuse if the file "
-                              "no longer says it")
-
-    p_reset = desc_sub.add_parser("reset", help="put the author's description back, keeping "
-                                                "the note")
-    p_reset.add_argument("skill")
-    p_reset.add_argument("file", metavar="SKILL_MD",
-                         help="absolute path to the SKILL.md the row names, as for write")
-
-    # The one verb that takes something away. It is given absolute paths -- the `abs` field of a
-    # scan's `removal.targets`, never the `~` display string beside it -- and it
-    # re-checks every one of them itself before gio is handed anything.
-    p_remove = sub.add_parser("remove", help="move skill directories to the trash")
-    p_remove.add_argument("--dry-run", action="store_true",
-                          help="run every check and print what would go, touching nothing")
-    p_remove.add_argument("paths", nargs="+", metavar="PATH",
-                          help="absolute paths, from a scan's removal.targets")
 
     args = ap.parse_args(argv)
 
@@ -3008,9 +1820,6 @@ def main(argv: list[str]) -> int:
 
     if args.cmd == "describe":
         return describe_command(args)
-
-    if args.cmd == "remove":
-        return remove_command(args)
 
     if args.cmd == "scan":
         result = scan(divisor=args.divisor)
