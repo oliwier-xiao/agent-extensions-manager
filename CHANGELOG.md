@@ -14,6 +14,11 @@ already gave. Two things it can change in an agent's own tree, each confirmed on
 skill directory you named, moved to the desktop trash rather than deleted, and the `description:`
 value of one `SKILL.md`, with the author's own text kept so it can be put back.
 
+Both stores refuse to be written through a symlink rather than renaming over one, so a store kept in a
+dotfiles checkout is left alone instead of being orphaned; every rename is committed to disk, not only the
+bytes it renamed; and a store that cannot be read stops every `describe` verb rather than reading as a
+machine nobody has edited anything on.
+
 ### What it does
 
 - **One list across three agents**, deduplicated by where the file really is rather than by name or
