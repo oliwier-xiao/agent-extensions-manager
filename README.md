@@ -60,8 +60,18 @@ One file of yours outlives it, so reinstalling later finds your categories again
 rm -f ~/.config/agent-skills/categories.json
 ```
 
-Beyond those two paths the footprint is nothing — no cache, no state under `~/.local`, and no file
-belonging to Claude Code, OpenCode or Codex touched at any point.
+One more file of its own is worth knowing about but not worth keeping:
+
+```
+rm -rf ~/.cache/agent-skills
+```
+
+That holds one answer pacman already gave — which packages own the skills you did not install — so a scan
+does not have to ask again. Deleting it costs a tenth of a second on the next scan and nothing else.
+
+Beyond those three paths the footprint is nothing, and no agent's configuration file is written at any
+point. The one other thing the widget can move is a skill you asked it to remove, and that goes to your
+desktop trash under `~/.local/share/Trash`, where it stays until you empty it.
 
 ---
 
@@ -184,7 +194,7 @@ and **Save** commits.
 Backing out with something unsaved asks first, on the same surface, rather than dropping work you had no
 way of knowing was still a draft.
 
-This is the only thing the widget writes, and it writes it to one file of its own:
+This is the only configuration the widget writes, and it writes it to one file of its own:
 
 ```
 ~/.config/agent-skills/categories.json
@@ -193,6 +203,41 @@ This is the only thing the widget writes, and it writes it to one file of its ow
 It names directories and categories, nothing else. Delete it and every classifier guess comes back; you
 lose only your own filing. No file belonging to Claude Code, OpenCode or Codex is written to make a
 category or to move a skill between them.
+
+---
+
+## Removing a skill
+
+`^Del` asks whether to get rid of the skill under the cursor. It is the one key here that changes
+something outside this widget's own file, so it asks first and the question names what will actually
+happen rather than the name of the row.
+
+Which is not one question, because a skill is not one thing on disk. Four answers, and the helper decides
+which before the panel draws anything:
+
+**It is yours, so it goes to the trash.** Every path that reaches it, listed by name — links first, then
+the directory itself — with which agents stop seeing it and which, if any, still will. Nothing is
+deleted: each path is handed to `gio trash`, so it lands in the same desktop trash as everything else and
+comes back the same way.
+
+**A package owns it, so only your links can go.** `omarchy` and `diagnose-crash` live in
+`/usr/share/omarchy`, owned by pacman and reached from your directories by symlink. The directory itself
+is not yours to remove and is never offered; the links are, and the panel says that Omarchy re-creates
+them when it next provisions your user, so removing them may not be final.
+
+**A plugin brought it, so the plugin is where it goes.** A skill that arrives inside a Claude Code plugin
+is not a thing you can remove on its own without breaking the plugin around it. The row says so and shows
+the command that would do it properly.
+
+**Nothing would happen, so nothing is offered.** Codex rewrites the six skills under its `.system`
+directory from an embedded copy every time it launches. Removing one is undone before you next look at it,
+and a panel that offered the button anyway would be lying about what it can do.
+
+The row is advisory and the helper knows it. Every path is re-examined at the moment it is acted on — if
+the skill moved, changed hands or stopped being a skill between the panel drawing the row and you
+answering the question, that path is refused with a reason and the rest carry on. If a link cannot be
+moved, the directory it points at is left where it is too, because a trashed skill with a live link still
+pointing at it is worse than either.
 
 ---
 
@@ -262,6 +307,7 @@ Every printable key goes to the search. Commands take Ctrl.
 | `^M` | move the row to another category, or restyle the category under a group header |
 | `^E` | open the categories: rename one, recolour it, or add one |
 | `^O` | open where the skill is installed, in your file manager |
+| `^Del` | ask whether to move the skill under the cursor to the trash |
 | `^G` | regroup by category, agent, kind or nothing |
 | `^R` | read everything again |
 | `!` | show only what needs attention |
@@ -291,13 +337,19 @@ letting the helper's shebang search a `PATH`. Stock Omarchy puts it there; if yo
 opens empty while the helper still works in a terminal.
 
 Whichever of the three agents you actually use is the one you get rows for. An agent that is not installed
-is one quiet line saying so, not an error. The widget reads your agent configuration and never writes to
-it.
+is one quiet line saying so, not an error.
+
+The widget never writes an agent's configuration file — nothing here turns a skill on or off, and every row
+says so where you would expect a switch. What it can change in an agent's tree is one thing: a skill
+directory you have confirmed by name, and it changes it by moving it to the trash.
+
+Removal needs `/usr/bin/gio`, from `glib2`, which a stock Omarchy install already has because most of the
+desktop depends on it. Without it the panel still reads everything and only the removal is refused.
 
 ## The command line behind it
 
-The panel draws; `bin/agent-skills` does every byte of the reading and the one write. It is worth running on
-its own.
+The panel draws; `bin/agent-skills` does every byte of the reading and both of the writes — the category
+store, and the removal. It is worth running on its own.
 
 ```
 bin/agent-skills doctor
@@ -316,8 +368,8 @@ categories        automation 16, agents 5, code 4, design 3, security 3, content
 ```
 
 `bin/agent-skills scan` prints the same inventory as one line of JSON, which is what the panel reads.
-`bin/agent-skills category` is the write side, and every verb is a single named change to the one file
-above:
+`bin/agent-skills category` is one of the two write sides, and every verb is a single named change to the
+one file above:
 
 ```
 bin/agent-skills category list
@@ -326,6 +378,21 @@ bin/agent-skills category assign nextjs ui
 bin/agent-skills category unassign nextjs
 bin/agent-skills category style ui --reset
 ```
+
+`bin/agent-skills remove` is the other, and it is the only thing here that touches a file this plugin did
+not write. Paths must be absolute, and they are meant to come from a scan's `removal.targets` rather than
+be typed:
+
+```
+bin/agent-skills remove --dry-run -- /home/you/.claude/skills/nextjs
+bin/agent-skills remove -- /home/you/.claude/skills/nextjs
+```
+
+`--dry-run` runs every check and prints what would go without touching anything, which is the form worth
+reaching for first. Neither form deletes: each path is handed to `gio trash` on its own, and the answer
+says which ones moved and, for each one that did not, why. Every path is re-examined at the moment it is
+acted on rather than trusted from the row that asked — if the skill moved, changed owner or stopped being
+a skill since the panel drew it, that path is refused and the others carry on.
 
 Every file read under a scanned root is opened once with `O_NOFOLLOW` and `O_NONBLOCK`, judged on that
 descriptor rather than on its name, and read back only to the size that descriptor vouched for.

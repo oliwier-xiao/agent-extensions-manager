@@ -12,17 +12,23 @@ import qs.Ui
 // wl-copy and xdg-open are the other two, and neither is handed anything but a
 // string the user has just asked to have put somewhere.
 //
-// The helper registers three subcommands. `scan` and `doctor` only read;
-// `category` is the whole write path, and it writes one file this plugin owns,
-// ~/.config/agent-skills/categories.json, which records nothing but which shelf a
-// skill was filed on and what that shelf is called. Nothing here ever opens a
-// file for writing -- a shelf change is a helper run with the change in argv --
-// so what a reviewer has to read to believe that is the helper's argument
-// handling rather than the whole of this file. And the claim that matters, the
-// one the README leads with: no file belonging to Claude Code, OpenCode or Codex
-// is written at any point. Every row still says where its own state is written
-// and what it currently is, because that state is theirs and this panel only
-// reads it.
+// The helper registers four subcommands. `scan` and `doctor` only read.
+// `category` writes one file this plugin owns, ~/.config/agent-skills/
+// categories.json, which records nothing but which shelf a skill was filed on and
+// what that shelf is called. `remove` is the only one that touches anything this
+// plugin did not write: it moves a skill directory to the desktop trash, never
+// deletes, and re-stats every path at the moment it acts rather than trusting the
+// row that asked. Nothing here ever opens a file for writing -- both of those are
+// a helper run with the change in argv -- so what a reviewer has to read to
+// believe it is the helper's argument handling rather than the whole of this file.
+//
+// The claim that matters, stated at the width it is actually true: no agent's
+// configuration file is written at any point. The one thing this panel can change
+// in an agent's tree is a skill directory the user has confirmed by name, and it
+// changes it by moving it somewhere they can get it back from. Every row still
+// says where its own state is written and what it currently is, because that
+// state is theirs and this panel never writes it -- removing a skill and
+// switching one off are different acts, and only the first is here.
 Panel {
   id: root
   moduleName: "oliwier.agent-skills-manager"
@@ -198,23 +204,34 @@ Panel {
     return env
   }
 
-  // The one thing this panel changes, and it changes it through the same helper
-  // the reading goes through rather than by writing a file from QML. Arguments
-  // land in argv, never in a script, so nothing here can be re-tokenized by a
-  // shell -- there is no shell.
+  // The two things this panel changes, and it changes both through the same
+  // helper the reading goes through rather than by writing anything from QML.
+  // Arguments land in argv, never in a script, so nothing here can be
+  // re-tokenized by a shell -- there is no shell.
   //
   // Every caller puts its options first and ends them with a `--`, so the
   // arguments after it are positional whatever they look like. A skill directory
   // is named by whoever wrote the skill and can be called `-h`; the helper's
   // parser would read that as a request for help, print it and exit 0, and an
   // exit 0 is what this panel reports back as a change that has been saved.
+  //
+  // The spawn itself lives here rather than in each caller, because all of it
+  // has to be true of every run: an argv list rather than a script, the
+  // interpreter named absolutely, and the cleared environment with the three
+  // variables the helper needs put back. What differs between the two writers is
+  // what they do with the answer, which is why the guard and the reporting stay
+  // with them.
+  function startHelper(proc, argv) {
+    proc.clearEnvironment = true
+    proc.environment = root.scanEnvironment()
+    proc.command = [root.pythonPath, root.helperPath].concat(argv)
+    proc.running = true
+  }
+
   function runCategory(argv, done) {
     if (catProc.running) { root.flashResult("One at a time", "error"); return }
     catProc.pending = done || ""
-    catProc.clearEnvironment = true
-    catProc.environment = root.scanEnvironment()
-    catProc.command = [root.pythonPath, root.helperPath, "category"].concat(argv)
-    catProc.running = true
+    root.startHelper(catProc, ["category"].concat(argv))
   }
 
   // ---- State --------------------------------------------------------------
@@ -605,6 +622,108 @@ Panel {
     }
   }
 
+  // ---- Removal ------------------------------------------------------------
+  //
+  // The other thing the panel changes, and the only one that touches anything
+  // outside this plugin's own config file. It goes through the same spawn as a
+  // shelf change and through the helper's own `remove`, which moves a path to
+  // the desktop trash rather than deleting it and re-checks every path at the
+  // moment it acts. That re-check is the important half: the row this was
+  // started from was drawn by a scan that has already finished, so what it says
+  // is advisory, and what the helper stats is what is there now.
+  //
+  // One at a time and refused rather than queued, the same rule a shelf change
+  // follows. It matters more here: two removals started from two keystrokes are
+  // two changes to a filesystem that nothing in this panel could put back in
+  // order if the second one went wrong half way.
+  function runRemove(paths, label) {
+    if (removeProc.running) { root.flashResult("One at a time", "error"); return }
+    removeProc.label = String(label || "")
+    removeProc.reported = false
+    removeProc.inflight = true
+    root.startHelper(removeProc, ["remove", "--"].concat(paths))
+  }
+
+  // Report what the helper said it did, and nothing else. A count worked out
+  // here from what was asked for would be a claim about a filesystem this panel
+  // never looked at, and the one case that matters is exactly the case where the
+  // two disagree: a skill root on a network mount, where the trash is refused
+  // and the path is still there afterwards.
+  //
+  // `removed` is what gio confirmed. The helper lists a path there without
+  // moving it only under --dry-run, which nothing in this panel asks for.
+  function consumeRemoval(raw) {
+    var parsed = null
+    try { parsed = JSON.parse(String(raw || "")) } catch (e) { parsed = null }
+    if (!parsed || typeof parsed !== "object") return
+    removeProc.reported = true
+
+    var gone = parsed.removed && typeof parsed.removed.length === "number" ? parsed.removed : []
+    var kept = parsed.refused && typeof parsed.refused.length === "number" ? parsed.refused : []
+    var named = removeProc.label !== "" ? "  " + removeProc.label : ""
+    var paths = String(gone.length) + (gone.length === 1 ? " path" : " paths")
+
+    if (kept.length === 0 && gone.length > 0) {
+      root.flashResult("Moved to the trash" + named + "  ·  " + paths, "ok")
+      return
+    }
+    // A refusal is repeated in the helper's own words. It names the path and the
+    // reason, and the panel has nothing truer to say about either -- least of
+    // all about "Trashing on system internal mounts is not supported", which is
+    // the sentence a user whose skills live on another filesystem has to read.
+    var first = kept.length > 0 ? root.clean(kept[0].reason, 150) : "no reason given"
+    if (gone.length === 0) {
+      root.flashResult("Nothing was removed  ·  " + first, "error")
+      return
+    }
+    root.flashResult(paths + " removed, " + String(kept.length) + " refused  ·  " + first,
+                     "error")
+  }
+
+  // exited and streamFinished have no guaranteed order, so the verdict is taken
+  // one turn later, when both have certainly landed. Silence is never read as a
+  // success: a run whose report could not be parsed is reported as a run nobody
+  // can vouch for, and the exit code is not consulted, because the helper exits
+  // 0 for a run that removed one path and refused three.
+  function settleRemoval() {
+    if (removeProc.reported || removeProc.inflight) return
+    removeProc.reported = true
+    root.flashResult("bin/agent-skills did not say what it removed. Run it in a terminal: "
+      + root.helperPath + " remove --dry-run", "error")
+  }
+
+  Process {
+    id: removeProc
+    // What was under the cursor when this was sent, so the answer can still name
+    // it after the rescan has taken the row away.
+    property string label: ""
+    // Whether the helper's own report has been read, and whether the run is
+    // still going. Both are the panel's own, rather than the process's, for the
+    // reason the scan keeps `scanning`: they have to be true at the moment the
+    // verdict is taken rather than at the moment the process object noticed.
+    property bool reported: false
+    property bool inflight: false
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.consumeRemoval(text)
+        Qt.callLater(root.settleRemoval)
+      }
+    }
+
+    onExited: function (exitCode, exitStatus) {
+      removeProc.inflight = false
+      // Re-read whatever happened, a run that removed nothing included. More
+      // rows than this one can be stale by the end: a skill reached through a
+      // symlink from another agent's root leaves the scan the moment its target
+      // does, and one that was only unlinked is still on disk under the agent
+      // that owns it.
+      root.startScan()
+      Qt.callLater(root.settleRemoval)
+    }
+  }
+
   // ---- View model ---------------------------------------------------------
   //
   // Two stages on purpose. `catalogue` cleans and flattens the report and is
@@ -622,6 +741,28 @@ Panel {
 
   function fold(s) {
     return String(s || "").toLowerCase().replace(/[-_\s]+/g, " ")
+  }
+
+  // Agent ids as the names this panel calls them by, in one string. The helper
+  // writes claude, opencode and codex; every other row here has already been
+  // through the same translation, and a list of agents is read rather than
+  // matched on, so it is joined once at the boundary.
+  function toolNames(list) {
+    if (!list || typeof list.length !== "number") return ""
+    var out = []
+    for (var i = 0; i < list.length && i < 8; i++)
+      out.push(root.toolLabel[list[i]] || root.clean(list[i], 24))
+    return out.join(", ")
+  }
+
+  // A command line the panel shows and does not run. Joined for reading only:
+  // what would run it is the tool that owns the skill, in a terminal, and this
+  // panel spawns one program and it is not another agent's CLI.
+  function argvText(argv) {
+    if (!argv || typeof argv.length !== "number") return ""
+    var out = []
+    for (var i = 0; i < argv.length && i < 12; i++) out.push(String(argv[i]))
+    return out.join(" ")
   }
 
   function skillView(item) {
@@ -705,6 +846,47 @@ Panel {
     else if (by === "path") placedBy = "where it is installed"
     else if (by === "none") placedBy = "nothing matched, so it is waiting to be filed"
 
+    // What removing this skill would mean, decided by the helper because the
+    // helper is the half that can stat a path and this one cannot. Nothing here
+    // is re-derived: not the mode, not the paths, not which agents lose it. A
+    // second opinion computed in QML is how the two halves come to disagree
+    // about which directory is about to move, and `linkage` reads "real" for a
+    // skill that other roots reach by symlink, so the mounts are the only honest
+    // source for a target and the helper has already reduced them to one.
+    //
+    // Every string that will be drawn goes through clean() like the rest of the
+    // record. `abs` deliberately does not: it is never drawn, it is what names
+    // the directory to `agent-skills remove`, and clean() collapses runs of
+    // whitespace and truncates -- on a path neither of those is cosmetic, and
+    // either one names something else or nothing. Absolute is the only thing
+    // checked here, because the helper re-stats every path before it acts.
+    var removal = null
+    var rem = item.removal
+    if (rem && typeof rem === "object") {
+      var targets = []
+      var srcRem = Array.isArray(rem.targets) ? rem.targets : []
+      for (var ri = 0; ri < srcRem.length && ri < 12; ri++) {
+        var tgt = srcRem[ri]
+        if (!tgt) continue
+        var abs = String(tgt.abs || "")
+        if (abs.charAt(0) !== "/" || abs.length > 4096) continue
+        targets.push({ abs: abs,
+                       path: root.clean(tgt.path, 200),
+                       link: root.clean(tgt.link, 16),
+                       tools: root.toolNames(tgt.tools) })
+      }
+      removal = {
+        mode: root.clean(rem.mode, 16),
+        why: root.clean(rem.why, 300),
+        targets: targets,
+        loses: root.toolNames(rem.loses),
+        keeps: root.toolNames(rem.keeps),
+        restorable: rem.restorable === true,
+        restoreNote: root.clean(rem.restoreNote, 200),
+        command: root.clean(root.argvText(rem.command), 200)
+      }
+    }
+
     var name = root.clean(item.displayName, 120)
     var desc = root.clean(item.description, 600)
     var tax = item.taxonomy || ({})
@@ -735,6 +917,7 @@ Panel {
       description: desc,
       switches: switches,
       mounts: mounts,
+      removal: removal,
       peers: peers,
       variants: variants,
       declaredVersion: root.clean(item.declaredVersion, 32),
@@ -1340,6 +1523,11 @@ Panel {
       if (root.styleAsking) return ["\u0000save", "\u0000discard"]
       return root.swatches.concat(["\u0000clear"])
     }
+    // Two answers to one question, in the shape the unsaved-category prompt
+    // already uses, and the first of them is the one that changes nothing. A
+    // mode with nothing to answer draws no chips at all.
+    if (root.pickerMode === "remove")
+      return root.removeAnswerable() ? ["\u0000keep", "\u0000remove"] : []
     return []
   }
 
@@ -1395,6 +1583,142 @@ Panel {
     root.pickerMode = "category"
     root.pickerText = ""
     root.pickerIndex = 0
+  }
+
+  // One row at a time, and deliberately no multi-select. Three reasons, decided
+  // rather than missed: the set you can point at and the set that can actually
+  // be removed are not the same set -- a plugin's skill is its plugin's to
+  // remove and one under a .system directory is written back on the next launch
+  // -- so a checkbox column would offer a choice the panel would then have to
+  // take back one row at a time; the rows are independent, so removing four is
+  // four small decisions rather than one big one; and a confirmation covering a
+  // list is the confirmation least likely to be read, which is the worst place
+  // to put the one action here that cannot be undone from inside the panel.
+  //
+  // Row before mode, for the reason openPicker states: the overlay's model and
+  // its command line are bound to the mode and would otherwise re-evaluate
+  // against the previous pick's null row.
+  function openRemovePicker(row) {
+    root.pickerRow = row
+    root.pickerMode = "remove"
+    root.pickerReturn = ""
+    root.pickerCategory = ""
+    root.pickerNaming = false
+    root.pickerText = ""
+    // On the answer that changes nothing. A confirmation for something
+    // irreversible that opens with the irreversible answer under the cursor is
+    // a confirmation in name only.
+    root.pickerIndex = 0
+  }
+
+  // The removal the scan attached to a row, or null. Everything the
+  // confirmation says is read from here, which is what keeps the panel from
+  // deciding for itself what removing a skill would mean.
+  function removalOf(row) {
+    if (!row || row.rowType === "header" || !row.view) return null
+    var rem = row.view.removal
+    if (!rem || typeof rem !== "object" || !rem.mode) return null
+    return rem
+  }
+
+  function removeMode() {
+    var rem = root.removalOf(root.pickerRow)
+    return rem ? String(rem.mode) : ""
+  }
+
+  // Whether there is anything to answer. `refuse` and `delegate` are the
+  // helper's way of saying that this skill is not the panel's to move -- a
+  // directory another user owns, one Codex rewrites on every launch, one a
+  // plugin brought in -- and neither draws an answer chip, because a control
+  // the panel could not honour is a control that lies about what it does.
+  function removeAnswerable() {
+    var mode = root.removeMode()
+    if (mode !== "trash" && mode !== "unlink") return false
+    return root.removeTargets().length > 0
+  }
+
+  // The paths, in the order the helper put them: every symlink first and the
+  // real directory last, so a run that is refused half way cannot leave a link
+  // pointing at a directory that has already gone. Each path travels once --
+  // a second invocation on a path already trashed could only fail, and would be
+  // reported as a failure that never happened.
+  function removeTargets() {
+    var rem = root.removalOf(root.pickerRow)
+    var src = rem && rem.targets && typeof rem.targets.length === "number" ? rem.targets : []
+    var out = []
+    for (var i = 0; i < src.length; i++) {
+      var abs = String(src[i].abs || "")
+      if (abs.charAt(0) !== "/") continue
+      if (out.indexOf(abs) < 0) out.push(abs)
+    }
+    return out
+  }
+
+  // The same targets as the confirmation draws them. The display path and the
+  // absolute path are two different strings on purpose: the one on screen is
+  // the one the rest of the panel shows, and the one that travels is never
+  // rebuilt from it, because a path re-expanded from `~` is a guess about where
+  // home was when the scan ran.
+  function removeTargetRows() {
+    var rem = root.removalOf(root.pickerRow)
+    var src = rem && rem.targets && typeof rem.targets.length === "number" ? rem.targets : []
+    var out = []
+    var seen = []
+    for (var i = 0; i < src.length; i++) {
+      // Dropped on the same rule and in the same order as the list that
+      // travels, so the card cannot draw a chip for a path nothing will be done
+      // to, or leave one out.
+      var abs = String(src[i].abs || "")
+      if (abs.charAt(0) !== "/" || seen.indexOf(abs) >= 0) continue
+      seen.push(abs)
+      out.push({ path: String(src[i].path || ""),
+                 link: String(src[i].link || ""),
+                 tools: String(src[i].tools || "") })
+    }
+    return out
+  }
+
+  // What the second chip does, in the words of the mode the helper chose.
+  // `unlink` trashes the links and leaves what they point at, because what they
+  // point at is not this user's to move.
+  function removeVerb() {
+    if (root.removeMode() === "unlink")
+      return root.removeTargets().length === 1 ? "Trash the link" : "Trash the links"
+    return "Move to the trash"
+  }
+
+  function removeSentence() {
+    var named = root.pickerRow && root.pickerRow.view
+      ? root.clean(root.pickerRow.view.name, 60) : ""
+    if (root.removeMode() === "unlink")
+      return root.removeTargets().length === 1
+        ? "Trash the link to " + named + ", and leave what it points at"
+        : "Trash the links to " + named + ", and leave what they point at"
+    return "Move " + named + " to the trash"
+  }
+
+  // The rest of the removal object, as the label-and-value grid the expanded row
+  // already uses for its facts. Only what the helper filled in: an empty value
+  // draws no row, so a removal that leaves no agent behind prints no "kept by"
+  // line rather than an empty one.
+  function removeFacts() {
+    var rem = root.removalOf(root.pickerRow)
+    if (!rem) return []
+    var out = []
+    out.push({ label: "loses it", value: String(rem.loses || "") })
+    out.push({ label: "kept by", value: String(rem.keeps || "") })
+    // What `restorable` false means is that the helper will not vouch for the
+    // way back, not that the skill is about to be destroyed -- it says so of a
+    // path on another filesystem, where the likeliest outcome is that the trash
+    // refuses it and nothing moves at all. So the line promises or declines to
+    // promise, and the note underneath is where the reason is.
+    if (root.removeAnswerable())
+      out.push({ label: "afterwards", value: rem.restorable === true
+        ? "you can put it back from the trash"
+        : "no promise you can put this one back" })
+    out.push({ label: "note", value: String(rem.restoreNote || "") })
+    out.push({ label: "removed by", value: String(rem.command || "") })
+    return out
   }
 
   // The index of shelves: everything you can rename, recolour or add to, in one
@@ -1547,6 +1871,14 @@ Panel {
     }
     if (root.pickerMode === "style")
       return root.pickerText.trim() === "" ? root.pickerCategory : root.pickerText.trim()
+    if (root.pickerMode === "remove") {
+      // The same rule as everywhere else on this line: what Enter does from
+      // where the cursor is. With nothing to answer, Enter can only close, and
+      // saying so is better than a line that promises a removal the helper has
+      // already refused.
+      if (!root.removeAnswerable()) return "Close"
+      return root.pickerIndex === 1 ? root.removeSentence() : "Keep it"
+    }
     return ""
   }
 
@@ -1628,6 +1960,27 @@ Panel {
       root.styleSave()
       return
     }
+
+    if (root.pickerMode === "remove") {
+      // Anything that is not the second chip is the first one. A mode with
+      // nothing to answer draws no chips, so Enter there can only close, which
+      // is what the line above the chips says it will do.
+      if (!root.removeAnswerable() || root.pickerIndex !== 1) { root.closePicker(); return }
+      var paths = root.removeTargets()
+      var what = root.pickerRow && root.pickerRow.view
+        ? root.clean(root.pickerRow.view.name, 60) : ""
+      if (paths.length === 0) {
+        root.flashResult("The helper named no path to remove on that row", "error")
+        root.closePicker()
+        return
+      }
+      // Both read before the overlay closes, because closePicker drops the row
+      // the question was about; sent after, so the question is off the screen
+      // by the time the answer is on its way.
+      root.closePicker()
+      root.runRemove(paths, what)
+      return
+    }
   }
 
   // The file manager, at the directory the skill is actually installed in.
@@ -1665,6 +2018,37 @@ Panel {
     }
     if (r.view.kind !== "skill") { root.flash("Only skills are shelved"); return }
     root.openCategoryPicker(r)
+  }
+
+  // Ctrl+Delete asks whether to remove the row under the cursor. A command has
+  // to take Ctrl here, because the panel promises "Type to search" and every
+  // printable key keeps that promise; of what is left, Delete is the one key
+  // that already means this everywhere else, and it is the length of a keyboard
+  // away from ^C, ^R, ^G, ^M and ^E, which are five letters one slip from each
+  // other. This is the only command in the panel that touches a file, so being
+  // hard to reach by accident is the point rather than a cost.
+  //
+  // It opens a question and never removes anything by itself.
+  function removeCurrent() {
+    var r = root.currentRow()
+    if (!r) return
+    if (r.rowType === "header") { root.flash("A group header is not a skill"); return }
+    if (r.view.kind === "mcp") { root.flash("MCP servers are read-only in this version"); return }
+    if (r.view.kind !== "skill") {
+      // Where the delegate trail ends. A skill a plugin brought in is sent to
+      // its plugin's row, and that row has to say something true when it gets
+      // there rather than repeat the refusal it was sent to escape.
+      root.flash("A plugin is removed by the tool that installed it, not from here")
+      return
+    }
+    if (!root.removalOf(r)) {
+      // Said rather than guessed. An older helper prints a scan with no removal
+      // in it, and working one out here from the mounts is exactly the second
+      // opinion this panel refuses to have.
+      root.flash("This build of bin/agent-skills does not say how to remove a skill")
+      return
+    }
+    root.openRemovePicker(r)
   }
 
   function revealCurrent() {
@@ -2691,6 +3075,12 @@ Panel {
           if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             root.pickerConfirm(); return
           }
+          // Nothing to step through when the mode draws no chips -- a removal
+          // the helper has already refused, or a category filter that matches
+          // nothing and is not a name anything could be called. Without this
+          // the modulo below is a division by zero, the cursor becomes NaN, and
+          // the overlay stops answering keys until it is closed.
+          if (count === 0) return
           if (event.key === Qt.Key_Right || event.key === Qt.Key_Tab
               || (ctrl && event.key === Qt.Key_N)) {
             root.pickerIndex = (root.pickerIndex + 1) % count; return
@@ -2709,6 +3099,11 @@ Panel {
           }
           if (event.key === Qt.Key_Home) { root.pickerIndex = 0; return }
           if (event.key === Qt.Key_End) { root.pickerIndex = count - 1; return }
+
+          // A removal is answered, not typed at: the two chips are the whole
+          // vocabulary, and a letter that quietly filled a field nothing draws
+          // would be a keystroke with no effect anybody can see.
+          if (root.pickerMode === "remove") return
 
           // Typing means different things in the three modes, and each is the
           // obvious one. Filtering a category list, naming the category being
@@ -2815,6 +3210,14 @@ Panel {
         // marketplace scanner's literal-launcher rule, which does not read
         // comments as comments.)
         if (ctrl) {
+          // Not a letter, and the only command here that is not: every printable
+          // key belongs to the search field, the five letters below are one slip
+          // from each other, and this is the one command in the panel that
+          // touches a file. Delete is what this means on every other keyboard,
+          // and it is a hand's width from all of them.
+          if (event.key === Qt.Key_Delete) {
+            root.removeCurrent(); event.accepted = true; return
+          }
           var letter = String.fromCharCode(event.key).toLowerCase()
           if (letter === "c") { root.copyCurrent(); event.accepted = true; return }
           if (letter === "r") { root.startScan(); event.accepted = true; return }
@@ -3906,6 +4309,11 @@ Panel {
             // The promise changes with the row, because on a row that documents
             // actions Ctrl+C does not copy: it asks which one.
             parts.push(picks ? "^C to pick an action" : "^C to copy")
+            // Only on a row that has an answer to the question. A destructive
+            // key nobody has been told about is either never used or used by
+            // accident, and this one is only ever offered where the helper has
+            // already said what pressing it would mean.
+            if (root.removalOf(cur)) parts.push("^Del to remove")
             parts.push("^G to regroup")
             parts.push("^R to rescan")
             parts.push(root.expandedKey !== "" || typing || root.anyChipFilter
@@ -3954,6 +4362,7 @@ Panel {
         readonly property bool styling: root.pickerMode === "style"
         readonly property bool shelving: root.pickerMode === "category"
         readonly property bool managing: root.pickerMode === "shelves"
+        readonly property bool removing: root.pickerMode === "remove"
         // Both of these draw a shelf: a colour, a name and how much is on it.
         // One of them files a skill and the other opens the shelf for editing,
         // which is a difference in what Enter does, not in what a shelf is.
@@ -4022,6 +4431,16 @@ Panel {
                 if (picker.styling) return cat + "  \u00b7  rename or recolour"
                 if (!root.pickerOpen || !root.pickerRow) return ""
                 var n = root.clean(root.pickerRow.view.name, 60)
+                if (picker.removing) {
+                  // Three of them, because the helper has three answers and two
+                  // of them are not a removal at all. The heading is where that
+                  // is said first, so nobody reads the rest of the card as a
+                  // question they are about to answer.
+                  var mode = root.removeMode()
+                  if (mode === "refuse") return n + "  \u00b7  not this panel's to remove"
+                  if (mode === "delegate") return n + "  \u00b7  another tool owns it"
+                  return n + "  \u00b7  remove"
+                }
                 return picker.shelving ? n + "  \u00b7  move to a category"
                                        : n + "  \u00b7  pick an action"
               }
@@ -4137,6 +4556,17 @@ Panel {
                 return "Save the new " + (both ? "name and colour" : renamed ? "name" : "colour")
                      + ", or discard " + (both ? "them" : "it") + " and keep what was there?"
               }
+              if (picker.removing) {
+                // What the run will actually do, and only what it will do. The
+                // helper trashes one path per invocation and answers for each
+                // separately, so a refusal in the middle is not an abandoned
+                // job -- and on a skill root that is a different filesystem,
+                // being refused is the likely outcome rather than the rare one.
+                if (root.removeMode() === "delegate")
+                  return "This panel runs the helper and nothing else, so the command below is for you to run."
+                if (!root.removeAnswerable()) return ""
+                return "Each path is moved to the desktop trash on its own, and one that is refused does not stop the others."
+              }
               if (root.pickerNaming) return "Lower case letters, digits and dashes. The new category starts empty \u2014 put something on it with ^M from any row."
               if (picker.managing) return "Pick one to rename it or change its colour. Type a name no category has yet to make a new one."
               if (picker.styling) return "Type to rename it. Pick a colour, or choose theme default to let the theme decide."
@@ -4152,6 +4582,163 @@ Panel {
             font.family: root.face
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
+          }
+
+          // What removing this would mean, in the helper's words and the
+          // helper's paths: the sentence it gave for the mode it chose, one
+          // chip per path that will be sent, and what the agents on this
+          // machine are left with. Nothing in here is worked out from the
+          // row -- a target computed in QML would be a second opinion about
+          // which directory is about to move, and two opinions eventually
+          // disagree about one.
+          //
+          // Bounded and scrolling past its cap, for the same reason the chip
+          // grid below it is: how many paths there are is somebody else's
+          // answer, and a card that grows with it pushes its own footer off the
+          // bottom of the screen.
+          Flickable {
+            width: parent.width
+            visible: picker.removing
+            height: visible ? Math.min(removeDetail.implicitHeight, picker.height * 0.34) : 0
+            contentHeight: removeDetail.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
+
+            Column {
+              id: removeDetail
+              width: parent.width
+              spacing: Style.spacing.md
+
+              // Why this mode and not another one, which is the whole of what
+              // the panel knows about the decision.
+              Text {
+                width: parent.width
+                visible: text !== ""
+                textFormat: Text.PlainText
+                text: {
+                  var rem = root.removalOf(root.pickerRow)
+                  return rem ? String(rem.why || "") : ""
+                }
+                color: root.readable
+                font.family: root.face
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+
+              // One chip per path, in the order they will be sent: every
+              // symlink first and the directory itself last. Each says which of
+              // the two it is and which agents reach the skill through it,
+              // because "two of these three are links" is the fact that decides
+              // whether this is a removal or a tidy-up.
+              Column {
+                width: parent.width
+                spacing: Style.spacing.xs
+
+                Repeater {
+                  model: root.removeTargetRows()
+
+                  delegate: Rectangle {
+                    id: targetChip
+                    required property var modelData
+                    readonly property bool link: String(targetChip.modelData.link) === "symlink"
+
+                    width: parent.width
+                    height: Style.space(24)
+                    radius: Style.cornerRadius
+                    color: Util.alpha(root.fg, 0.07)
+
+                    Text {
+                      id: targetKind
+                      anchors.left: parent.left
+                      anchors.leftMargin: Style.space(9)
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: Style.space(56)
+                      textFormat: Text.PlainText
+                      text: targetChip.link ? "link" : "directory"
+                      color: targetChip.link ? root.hue : root.readable
+                      font.family: root.face
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    Text {
+                      id: targetTools
+                      anchors.right: parent.right
+                      anchors.rightMargin: Style.space(9)
+                      anchors.verticalCenter: parent.verticalCenter
+                      textFormat: Text.PlainText
+                      text: String(targetChip.modelData.tools)
+                      color: root.soft
+                      font.family: root.face
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    // The path as the rest of the panel writes it. What travels
+                    // to the helper is the absolute one held beside it, which is
+                    // never drawn and never rebuilt from this string.
+                    Text {
+                      anchors.left: targetKind.right
+                      anchors.leftMargin: Style.spacing.sm
+                      anchors.right: targetTools.left
+                      anchors.rightMargin: Style.spacing.md
+                      anchors.verticalCenter: parent.verticalCenter
+                      textFormat: Text.PlainText
+                      text: String(targetChip.modelData.path)
+                      color: root.readable
+                      font.family: root.face
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideMiddle
+                    }
+                  }
+                }
+              }
+
+              // Who is left with what, and whether it can be put back. The same
+              // label column the expanded row lays its facts out in, so the card
+              // and the row have one grid between them.
+              Column {
+                width: parent.width
+                spacing: Style.spacing.xs
+
+                Repeater {
+                  model: root.removeFacts()
+
+                  delegate: Item {
+                    id: removeFact
+                    required property var modelData
+
+                    width: parent.width
+                    visible: String(removeFact.modelData.value) !== ""
+                    height: visible ? Math.max(Style.space(15), factValue.implicitHeight) : 0
+
+                    Text {
+                      anchors.left: parent.left
+                      anchors.top: parent.top
+                      width: Style.space(86)
+                      textFormat: Text.PlainText
+                      text: String(removeFact.modelData.label)
+                      color: root.soft
+                      font.family: root.face
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    Text {
+                      id: factValue
+                      anchors.left: parent.left
+                      anchors.leftMargin: Style.space(90)
+                      anchors.right: parent.right
+                      anchors.top: parent.top
+                      textFormat: Text.PlainText
+                      text: String(removeFact.modelData.value)
+                      color: root.readable
+                      font.family: root.face
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.WordWrap
+                    }
+                  }
+                }
+              }
+            }
           }
 
           // Bounded, and scrolling once it would not fit. Twenty-three short
@@ -4206,6 +4793,11 @@ Panel {
                   readonly property bool isAddNew: String(chip.modelData) === "\u0000addnew"
                   readonly property bool isAnswer: String(chip.modelData) === "\u0000save"
                     || String(chip.modelData) === "\u0000discard"
+                  // The one chip in this panel that changes a file rather than a
+                  // preference, and it does not look like the one beside it. The
+                  // alarm colour is the same one a flagged row is drawn in, so
+                  // it is a colour this list has already taught the reader.
+                  readonly property bool isDanger: String(chip.modelData) === "\u0000remove"
 
                   // A shelf chip carries its own colour and its size, so the
                   // index reads as an inventory rather than as a word list.
@@ -4218,6 +4810,8 @@ Panel {
                   color: {
                     if (chip.isSwatch && !chip.isClear)
                       return Util.alpha(String(chip.modelData), chip.current ? 1.0 : 0.72)
+                    if (chip.isDanger)
+                      return Util.alpha(Color.urgent, chip.current ? 0.34 : 0.14)
                     if (chip.current) return Util.alpha(root.hue, 0.26)
                     return Util.alpha(root.fg, 0.07)
                   }
@@ -4247,13 +4841,18 @@ Panel {
                       text: {
                         if (String(chip.modelData) === "\u0000save") return "Save"
                         if (String(chip.modelData) === "\u0000discard") return "Discard"
+                        if (String(chip.modelData) === "\u0000keep") return "Keep it"
+                        // Named by the mode the helper chose, so the chip and
+                        // the line above it are one sentence rather than two.
+                        if (chip.isDanger) return root.removeVerb()
                         if (chip.isClear) return "theme default"
                         if (chip.isAddNew) return "+ new category"
                         if (chip.isNew) return "+ new  \u201c" + root.newCategoryName() + "\u201d"
                         if (picker.shelfList) return root.categoryLabelFor(String(chip.modelData))
                         return String(chip.modelData) === "" ? "no argument" : String(chip.modelData)
                       }
-                      color: chip.current ? root.fg : root.readable
+                      color: chip.isDanger ? Color.urgent
+                        : (chip.current ? root.fg : root.readable)
                       font.family: root.face
                       font.pixelSize: Style.font.bodySmall
                       font.italic: String(chip.modelData) === "" || chip.isNew || chip.isAddNew
@@ -4300,6 +4899,11 @@ Panel {
             textFormat: Text.PlainText
             text: {
               if (root.styleAsking) return "Enter to save  \u00b7  Esc to discard"
+              // Escape says what it leaves behind rather than where it goes,
+              // because on this one overlay leaving is itself an answer.
+              if (picker.removing) return root.removeAnswerable()
+                ? "Arrows to choose  \u00b7  Enter to answer  \u00b7  Esc to keep it"
+                : "Nothing to answer here  \u00b7  Esc to go back"
               if (root.pickerNaming) return "Type the name  \u00b7  Enter to create it  \u00b7  Esc to go back"
               if (picker.managing) return "Type to filter or name a new one  \u00b7  Enter to edit it  \u00b7  Esc to go back"
               if (picker.styling) return "Type to rename  \u00b7  arrows to try a colour  \u00b7  Enter to save  \u00b7  Esc to go back"

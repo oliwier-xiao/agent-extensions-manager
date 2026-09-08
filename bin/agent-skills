@@ -7,7 +7,10 @@ is the point: an action you cannot reproduce in a terminal is one you cannot deb
 
 Exit codes: 0 done · 1 usage error · 2 refused, nothing written. There is no partial-write
 code because there is no partial write: the store is built whole, fsynced, and renamed over
-the old one, so a failed write leaves the previous file exactly as it was.
+the old one, so a failed write leaves the previous file exactly as it was. `remove` is the
+one verb that acts on several things at once, and it acts on them one at a time on purpose:
+it exits 0 when anything went and names every path that did not, because abandoning the rest
+of a batch over one path leaves the user with half a removal and no account of which half.
 """
 
 from __future__ import annotations
@@ -815,7 +818,10 @@ def scan(divisor: int = 4) -> dict:
     catalog_cat = _catalog_categories()
     store = read_store(findings)
 
-    for root in skill_roots():
+    # Held rather than re-derived: the removal pass below needs the same list the
+    # walk used, and building it a second time re-reads installed_plugins.json.
+    roots = skill_roots()
+    for root in roots:
         base = root["path"]
         try:
             # Closed rather than left to the collector: one descriptor per root
@@ -880,6 +886,7 @@ def scan(divisor: int = 4) -> dict:
 
     items = list(by_real.values())
     _mark_drift(items)
+    _mark_removal(items, roots)
     items.sort(key=lambda r: (r["taxonomy"]["category"], r["dirName"].lower()))
     return {
         "version": VERSION,
@@ -1093,6 +1100,376 @@ def _mark_drift(items: list[dict]) -> None:
             if "drift" not in it["attention"]:
                 it["attention"].append("drift")
             it["driftPeers"] = peers
+
+
+# ----------------------------------------------------------------- removal
+#
+# Nothing here ever deletes. Every path that goes, goes through gio, which moves
+# it into the freedesktop trash and writes a .trashinfo recording the absolute
+# path it came from, so `gio trash --restore` can put it back with its contents
+# intact. gio is /usr/bin/gio, shipped by glib2, which is a hard dependency of
+# packages in the Omarchy base set, so it is present wherever this panel is.
+GIO = "/usr/bin/gio"
+PACMAN = "/usr/bin/pacman"
+# Every pacman transaction rewrites this directory, and nothing else can change
+# which package owns a path, so its mtime is the whole of what an answer from an
+# earlier scan has to be checked against.
+PACMAN_DB = "/var/lib/pacman/local"
+
+# The sentence `pacman -Qo` answers with, under LC_ALL=C. A directory is reported
+# with a trailing slash it was not given, so both sides are trimmed before they
+# are matched up.
+PACMAN_OWNED = re.compile(r"^(?P<path>.+?)/? is owned by (?P<name>\S+) \S+$")
+
+
+def owning_packages(paths: list[str]) -> dict[str, str]:
+    """Which distro package installed each of these paths, for the ones one did.
+
+    Only ever asked about paths this user does not own, which on this machine is
+    the pair of skills Omarchy ships under /usr/share and symlinks into every
+    agent's root. Naming the package is the whole difference between "this cannot
+    be removed" and "this belongs to omarchy-settings-dev", and only the second
+    sends the user to their package manager instead of back to this panel.
+
+    Answered from a cache first, because on a stock Omarchy install that pair is
+    linked into every user root by omarchy-provision-user, so every scan on every
+    such machine has something foreign to ask about -- and pacman costs about a
+    tenth of a second to load its database, six times what the rest of the scan
+    costs, on the path the panel takes each time it opens. Deferring the question
+    to the moment a removal is drawn would not help: the plan the panel draws its
+    row from is built by the scan itself, and a row that said "uid 0" until the
+    user clicked it would be the panel telling them nothing when it knows better.
+    So the answer is kept beside the question instead, keyed on the pacman
+    database, and pacman runs again only once that database has moved.
+    """
+    if not paths or not os.path.exists(PACMAN):
+        return {}
+    stamp = _pacman_stamp()
+    answers = _read_package_cache(stamp, paths)
+    if answers is None:
+        answers = _ask_pacman(paths)
+        _write_package_cache(stamp, paths, answers)
+    return answers
+
+
+def _pacman_stamp() -> str:
+    """What a cached answer is checked against, or "" for never trust one."""
+    try:
+        st = os.stat(PACMAN_DB)
+    except OSError:
+        return ""
+    return str(st.st_mtime_ns)
+
+
+def _package_cache_path() -> str:
+    # Under ~/.cache rather than beside categories.json, which is the one file
+    # this program owns. Nothing here is a setting: it is an answer pacman can
+    # give again, and deleting it costs a tenth of a second on the next scan.
+    return os.path.join(HOME, ".cache", "agent-skills", "packages.json")
+
+
+def _read_package_cache(stamp: str, paths: list[str]) -> dict | None:
+    """The previous scan's answers, or None when they cannot stand in for this one.
+
+    A hit has to cover every path being asked about. A partial one would name the
+    package for one skill and bare uid for the next, which reads as though the
+    second belonged to nobody rather than to the same package as the first.
+    """
+    if not stamp:
+        return None
+    value, _ = read_json(_package_cache_path())
+    value = as_dict(value)
+    if value.get("stamp") != stamp:
+        return None
+    owned = as_dict(value.get("owned"))
+    if not all(isinstance(owned.get(p), str) for p in paths):
+        return None
+    return {p: clip(owned[p], 64) for p in paths if owned[p]}
+
+
+def _write_package_cache(stamp: str, paths: list[str], answers: dict) -> None:
+    """Keep the answer beside the question so the next scan spawns nothing.
+
+    Best effort from end to end: a cache that cannot be written costs a tenth of
+    a second on the next scan and nothing else, which is never worth failing a
+    scan for, and a half-written one fails to parse and reads as a miss. A path
+    no package owns is recorded as the empty string rather than left out, so a
+    negative answer is not re-asked on every scan either.
+    """
+    if not stamp:
+        return
+    path = _package_cache_path()
+    payload = json.dumps({"version": 1, "stamp": stamp,
+                          "owned": {p: answers.get(p, "") for p in paths}},
+                         sort_keys=True) + "\n"
+    tmp = path + ".tmp.%d" % os.getpid()
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _ask_pacman(paths: list[str]) -> dict[str, str]:
+    """One pacman for the whole set rather than one per path.
+
+    The talkative form is used rather than `-Qoq` because a path no package owns
+    is reported on stderr and simply drops out of the quiet output, which would
+    shift every remaining answer silently onto the wrong path.
+    """
+    # Imported here rather than at the top for the reason urllib is: it costs 12 ms
+    # of a scan that is otherwise over in 22, and a scan that the cache answered
+    # never reaches this function at all.
+    import subprocess
+    try:
+        done = subprocess.run([PACMAN, "-Qo", "--"] + paths, timeout=10,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              env={**os.environ, "LC_ALL": "C"})
+    except Exception:  # noqa: BLE001 - a package name is a nicety, never a reason to fail a scan
+        return {}
+    out: dict[str, str] = {}
+    for line in done.stdout.decode("utf-8", "replace").split("\n"):
+        m = PACMAN_OWNED.match(line.strip())
+        if m:
+            out[m.group("path")] = clip(m.group("name"), 64)
+    return out
+
+
+def _under_system(path: str) -> bool:
+    """True for anything inside a `.system` directory.
+
+    ~/.codex/skills/.system is rewritten by Codex from an embedded copy on every
+    launch, so a skill removed from it is back before the user has read the
+    confirmation. Matched on the path rather than on `flags.readOnly`, which
+    tracks something else entirely.
+    """
+    return path.endswith("/.system") or "/.system/" in path
+
+
+def _removal_targets(mounts: list[dict]) -> list[dict]:
+    """One entry per distinct path, every link before the directory they point at.
+
+    Two things go wrong without this. Mounts are keyed on (tool, path), so the
+    single symlink that Claude Code and OpenCode both read appears twice, and
+    acting on the list as it stands would trash it once and then be handed a path
+    that is no longer there. And removing a real directory while a link from
+    another root survives takes the row off the next scan entirely, leaving a
+    dangling link and no row to act on -- so the links go first and the directory
+    goes last, and a failure part way through leaves something still standing.
+    """
+    by_abs: dict[str, dict] = {}
+    for m in mounts:
+        entry = by_abs.get(m["abs"])
+        if entry is None:
+            entry = {"abs": m["abs"], "path": m["path"], "link": m["link"], "tools": []}
+            by_abs[m["abs"]] = entry
+        if m["tool"] not in entry["tools"]:
+            entry["tools"].append(m["tool"])
+    # Stable, so paths keep the order the roots were walked in within each half.
+    return sorted(by_abs.values(), key=lambda t: t["link"] != "symlink")
+
+
+def _off_home(targets: list[dict], home_dev) -> list[dict]:
+    """The targets the trash is likely to refuse outright.
+
+    gio will not trash across a filesystem boundary -- "Trashing on system
+    internal mounts is not supported" is what it says, and it says it about /tmp
+    on this machine. The README tells users they may keep their skills on a
+    network mount, so this is a refusal somebody will actually meet, and it is
+    worth saying before the click rather than after it.
+    """
+    if home_dev is None:
+        return []
+    out = []
+    for t in targets:
+        try:
+            if os.lstat(t["abs"]).st_dev != home_dev:
+                out.append(t)
+        except OSError:
+            continue
+    return out
+
+
+def _plan(mode, why, targets, record, *, restorable=False, note=None, command=None) -> dict:
+    """The removal object itself, with the two agent lists worked out from the
+    targets rather than restated by each branch. A tool that reaches the skill
+    through a path we are not touching keeps it, even if another of its paths
+    goes, which is the only reason `keeps` and `loses` are not complements of
+    each other over `tools`."""
+    going = {t["abs"] for t in targets}
+    kept = {m["tool"] for m in record["mounts"] if m["abs"] not in going}
+    return {
+        "mode": mode,
+        "why": why,
+        "targets": targets,
+        "loses": [t for t in record["tools"] if t not in kept],
+        "keeps": [t for t in record["tools"] if t in kept],
+        "restorable": restorable,
+        "restoreNote": note,
+        "command": command,
+    }
+
+
+def _removal_plan(record: dict, roots: list[dict], uid: int, home_dev,
+                  packages: dict | None = None) -> dict:
+    """What removing one skill would take, and which paths it would take it from.
+
+    Every decision is a fresh os.stat of the real directory plus the mount list.
+    None of it comes from `flags.readOnly`, which knows only about bundling and
+    reads False for the two skills a package owns; from `scope`, which says where
+    a skill was found rather than who may move it; or from `linkage`, which reads
+    "real" for a directory that three other roots link to.
+    """
+    real = record["realPath"]
+    targets = _removal_targets(record["mounts"])
+
+    if _under_system(real) or any(_under_system(t["abs"]) for t in targets):
+        return _plan("refuse",
+                     "It sits under .system, which the agent rewrites from an embedded "
+                     "copy on every launch, so removing it would change nothing.",
+                     [], record)
+
+    # Decided from where the real directory sits, not from which root reached it
+    # first. `flags.pluginProvided` is set by the latter, and the user roots are
+    # walked before the plugin caches, so a plugin skill the user has also
+    # symlinked into ~/.claude/skills records False -- and would be trashed out
+    # of the plugin's own checkout. The boundary is matched rather than a bare
+    # prefix, so a sibling cache directory whose name merely starts the same is
+    # not swept in. The flag stays as the fallback for a record the roots cannot
+    # place, and only then is the name taken from the invocation, which on the
+    # record this exists to catch reads `/skill` and names no plugin at all.
+    owner = next((r for r in roots if r.get("plugin") and
+                  (real == r["path"] or real.startswith(r["path"] + "/"))), None)
+    if owner or record["flags"]["pluginProvided"]:
+        # The plugin is what was installed, and its skills came along with it.
+        # `/plugin:skill` is how Claude Code addresses one, so the half before
+        # the colon is the plugin whose row on the panel owns this directory.
+        plugin = (owner["plugin"] if owner else
+                  str(record["invocation"].get("claude", "/")).lstrip("/").split(":")[0])
+        return _plan("delegate",
+                     f"This skill comes with the {plugin} plugin rather than on its own, "
+                     f"so it goes when the plugin does; remove it from the plugin row.",
+                     [], record,
+                     command=["claude", "plugin", "uninstall", plugin] if plugin else None)
+
+    try:
+        st = os.stat(real)
+    except OSError as exc:
+        return _plan("refuse",
+                     f"The directory it points at cannot be read: "
+                     f"{clip(exc.strerror or exc, 96).lower()}.",
+                     [], record)
+
+    # The roots arrive already resolved, because the act side resolves them too
+    # and the two halves have to mean the same thing by "inside a root". Tested
+    # against the literal paths, a dotfiles-managed ~/.claude -- a symlink into a
+    # checkout, which is what chezmoi and stow both produce -- puts every skill
+    # the user owns outside every root, and an ordinary skill is refused.
+    inside = any(real == r["path"] or real.startswith(r["path"] + "/") for r in roots)
+    if st.st_uid != uid or not inside:
+        links = [t for t in targets if t["link"] == "symlink"]
+        if not links:
+            # Two different facts, so two different sentences. Substituting a
+            # place into the ownership clause said a directory "belongs to
+            # somewhere the agents do not scan", which is not a thing anything
+            # can belong to and told the user nothing about what to do next.
+            if st.st_uid != uid:
+                return _plan("refuse",
+                             f"The directory at {tilde(real)} belongs to another user and "
+                             f"nothing you own points at it, so there is nothing here to remove.",
+                             [], record)
+            return _plan("refuse",
+                         f"The directory at {tilde(real)} sits outside every directory the "
+                         f"agents scan and nothing you own points at it, so there is nothing "
+                         f"here to remove.",
+                         [], record)
+        if st.st_uid != uid:
+            package = (packages or {}).get(real.rstrip("/") or real)
+            where = f"the package {package}" if package else f"uid {st.st_uid}"
+            why = (f"The skill itself belongs to {where}, so only the {len(links)} "
+                   f"link{'' if len(links) == 1 else 's'} in your own directories can go.")
+            # What re-makes the link is omarchy-provision-user, which loops the
+            # packaged skills and runs `ln -sfn` for each one when Omarchy
+            # provisions the user on an update. It is a different package from
+            # the one that owns the directory, so the sentence names the
+            # mechanism; the package that owns the directory only tells us the
+            # mechanism is the one at work here.
+            note = ("Omarchy re-creates this link when it provisions your user on an "
+                    "update, so removing it is not necessarily final."
+                    if (package or "").startswith("omarchy") else None)
+        else:
+            why = (f"The skill really lives at {tilde(real)}, outside every directory the "
+                   f"agents scan, so only the {len(links)} link"
+                   f"{'' if len(links) == 1 else 's'} to it can go.")
+            note = None
+        stranded = _off_home(links, home_dev)
+        if stranded:
+            return _plan("unlink", why, links, record, restorable=False,
+                         note=_stranded_note(stranded))
+        return _plan("unlink", why, links, record, restorable=True, note=note)
+
+    parent = os.path.dirname(real)
+    if not os.access(real, os.W_OK) or not os.access(parent, os.W_OK | os.X_OK):
+        return _plan("refuse",
+                     f"You cannot write to {tilde(real)} or to the directory holding it, "
+                     f"so nothing here could move it to the trash.",
+                     [], record)
+
+    if len(targets) == 1:
+        why = ("Nothing but this one directory reaches the skill and it is yours, "
+               "so it goes to the trash whole.")
+    else:
+        why = (f"The skill is yours and {len(targets)} paths reach it, so every link goes "
+               f"to the trash before the directory itself.")
+    stranded = _off_home(targets, home_dev)
+    if stranded:
+        return _plan("trash", why, targets, record, restorable=False,
+                     note=_stranded_note(stranded))
+    return _plan("trash", why, targets, record, restorable=True)
+
+
+def _stranded_note(stranded: list[dict]) -> str:
+    return (f"{stranded[0]['path']} is on another filesystem, and the trash refuses those, "
+            f"so this may not move at all.")
+
+
+def _mark_removal(items: list[dict], roots: list[dict], uid: int | None = None) -> None:
+    """Plan every skill's removal once the walk is over, not while it is running.
+
+    It cannot be decided as a record is assembled. A skill reached from four roots
+    collects its mounts across four passes -- omarchy is reached through three
+    paths by three agents -- and a plan drawn while the first root was being read
+    would name one path and one agent and be wrong about both.
+    """
+    uid = os.getuid() if uid is None else uid
+    try:
+        home_dev = os.stat(HOME).st_dev
+    except OSError:
+        home_dev = None
+    # Resolved once, here, exactly as remove_command resolves them: a plan that
+    # decided "inside a root" against the literal path and an act that decided it
+    # against the realpath disagree on every machine whose ~/.claude is a symlink
+    # into a dotfiles checkout. The rest of each root dict is carried through
+    # because the plan needs `plugin` as well as the path.
+    roots = [{**r, "path": os.path.realpath(r["path"])} for r in roots]
+    # Gathered before anything is planned, so the one directory a package owns is
+    # asked about in the same breath as every other.
+    foreign = set()
+    for it in items:
+        try:
+            if os.stat(it["realPath"]).st_uid != uid:
+                foreign.add(it["realPath"])
+        except OSError:
+            continue
+    packages = owning_packages(sorted(foreign))
+    for it in items:
+        it["removal"] = _removal_plan(it, roots, uid, home_dev, packages)
 
 
 def _claude_override(overrides, dir_name, declared_name):
@@ -1344,6 +1721,160 @@ def category_command(args) -> int:
     return 0
 
 
+def remove_command(args) -> int:
+    """Move skill directories to the trash, deciding again at the moment of the act.
+
+    The row the user clicked was drawn by a scan that may be minutes old, and in
+    between the skill can have been moved, replaced by a link to somewhere else,
+    rewritten by Codex on its next launch, or taken over by a package update. So
+    none of the row is believed here: every fact is taken again, from the path
+    itself, and a path that fails one of them is refused by name while the others
+    carry on. The alternative -- one bad path abandoning the batch -- leaves the
+    user with half a removal and no account of which half.
+
+    The one path that does depend on another is the directory a refused link
+    points at, which is held back below: that pair is one removal rather than two
+    independent ones, and finishing half of it is the half that cannot be undone
+    from the panel.
+    """
+    paths = list(args.paths)
+    removed: list[dict] = []
+    refused: list[dict] = []
+
+    # Before anything is stat'ed, let alone moved. A relative path is resolved
+    # against a working directory this program never chose, and the panel has
+    # `abs` on every mount precisely so that it never has to send one.
+    if not all(os.path.isabs(p) for p in paths):
+        for p in paths:
+            refused.append({"path": clip(p, 512), "reason": "a path to remove must be absolute"})
+        _emit_removal(removed, refused)
+        return 2
+
+    roots = skill_roots()
+    root_reals = {os.path.realpath(r["path"]) for r in roots}
+    # A plugin's own checkout is a skill root, so every other test here passes on
+    # a path inside one: it is a directory, it is ours, its parent is a root, and
+    # it holds a SKILL.md. Refusing it has to be its own rule. The plan already
+    # answers `delegate` for these, but the plan is advisory by design and this
+    # side is the one that decides -- a guard that lives only in the plan is a
+    # guard the command line walks straight past.
+    plugin_reals = {os.path.realpath(r["path"]) for r in roots if r.get("plugin")}
+    uid = os.getuid()
+    # A link that will not go and the directory it points at are one removal, not
+    # two. Trashing the directory after the trash refused the link leaves the
+    # skill in the trash, a live dangling link in a root Codex and OpenCode still
+    # walk, and no row on the panel to finish the job with, because a skill whose
+    # realpath is gone stops being an item. So a refused link holds back the one
+    # path it named -- keyed on the realpath, so refusals from unrelated skills
+    # stay independent and every other link to the same directory still goes.
+    held: dict[str, str] = {}
+    for path in _links_first(paths):
+        # Asked before anything moves the path, because after gio has taken it
+        # there is nothing left to ask.
+        is_link = os.path.islink(path)
+        reason = _removable(path, root_reals, plugin_reals, uid)
+        if not reason and not is_link:
+            reason = held.get(os.path.realpath(path))
+        if not reason and args.dry_run:
+            removed.append({"path": path, "trashed": False})
+            continue
+        if not reason:
+            ok, err = _gio_trash(path)
+            if ok:
+                removed.append({"path": path, "trashed": True})
+                continue
+            reason = err
+        # Whichever of the two refused it -- our own checks or the trash itself
+        # -- the link is still on disk and the directory under it must stay.
+        if is_link:
+            held.setdefault(
+                os.path.realpath(path),
+                f"the link at {tilde(path)} did not go, and trashing the directory it "
+                f"points at would leave it dangling in a root the agents still walk")
+        refused.append({"path": path, "reason": reason})
+    _emit_removal(removed, refused)
+    return 0 if removed else 2
+
+
+def _emit_removal(removed: list[dict], refused: list[dict]) -> None:
+    sys.stdout.write(json.dumps({"removed": removed, "refused": refused},
+                                ensure_ascii=False) + "\n")
+
+
+def _links_first(paths: list[str]) -> list[str]:
+    """Links before the directories they point at, whatever order they arrived in.
+
+    The scan already orders `removal.targets` this way and the panel passes them
+    through, but the guarantee belongs here too: removing a real directory while
+    a link from another root survives takes the row off the next scan entirely,
+    which leaves a dangling link and nothing left to click on. Stable, so paths
+    that sort the same keep the order the caller chose.
+    """
+    return sorted(paths, key=lambda p: not os.path.islink(p))
+
+
+def _removable(path: str, root_reals: set, plugin_reals: set, uid: int) -> str | None:
+    """Everything that has to be true of a path before gio is handed it.
+
+    Ordered so the answer names the most specific thing wrong: what it is before
+    who owns it, and where it sits before what it holds. lstat, not stat, because
+    the path may legitimately be a symlink whose target belongs to a package --
+    the link is ours to move even when what it points at is not.
+    """
+    if _under_system(path) or _under_system(os.path.realpath(path)):
+        return "under .system, which the agent rewrites on every launch"
+    real = os.path.realpath(path)
+    if any(real == p or real.startswith(p + "/") for p in plugin_reals):
+        return "part of an installed plugin, which owns it and should remove it"
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        return f"cannot be read, {clip(exc.strerror or exc, 96).lower()}"
+    if not (stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode)):
+        return "not a directory or a symlink"
+    if st.st_uid != uid:
+        return "owned by another user"
+    parent = os.path.dirname(path)
+    if os.path.realpath(parent) not in root_reals:
+        return "no longer inside a directory any agent scans for skills"
+    if not os.path.isfile(os.path.join(path, "SKILL.md")):
+        return "holds no SKILL.md, so it is not a skill directory"
+    if not os.access(parent, os.W_OK | os.X_OK):
+        return f"{tilde(parent)} is not writable by you"
+    return None
+
+
+def _gio_trash(path: str) -> tuple[bool, str]:
+    """Move one path into the trash, and repeat what gio said if it will not.
+
+    One invocation per path and an argv list rather than a command line: a skill
+    is named by whoever wrote it, `$(id)` is a legal directory name, and nothing
+    here may ever reach a shell. gio's own refusals are worth passing on word for
+    word -- "Trashing on system internal mounts is not supported" is what a user
+    who keeps their skills on a network mount gets, and paraphrasing it would
+    leave them with no idea what to do about it.
+
+    The exit code is checked and then not trusted on its own. gio prints "Unable
+    to move file to its original location" on a restore and still exits 0, so the
+    only proof that a path went is that the path is gone.
+    """
+    # Lazily, like every other import that costs more than the work it does.
+    import subprocess
+    try:
+        done = subprocess.run([GIO, "trash", "--", path], timeout=30,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except OSError as exc:
+        return False, clip(f"{GIO} could not be run: {exc.strerror or exc}", 240)
+    except Exception:  # noqa: BLE001 - a timeout is one refused path, not a dead command
+        return False, f"{GIO} did not finish within 30 seconds"
+    if done.returncode == 0 and not os.path.lexists(path):
+        return True, ""
+    if done.returncode == 0:
+        return False, "gio reported success and the path is still there"
+    err = " ".join(done.stderr.decode("utf-8", "replace").split())
+    return False, clip(err or f"gio trash exited {done.returncode}", 240)
+
+
 def _apply_style(store: dict, name: str, label, color) -> bool:
     """Both fields or neither. A half-applied restyle would leave the store
     saying one thing and the screen another, and the caller has no way to tell
@@ -1410,10 +1941,23 @@ def main(argv: list[str]) -> int:
 
     cat_sub.add_parser("list", help="print the store as JSON")
 
+    # The one verb that takes something away, and the only one that touches a
+    # file it did not write. It is given absolute paths -- the `abs` field of a
+    # scan's `removal.targets`, never the `~` display string beside it -- and it
+    # re-checks every one of them itself before gio is handed anything.
+    p_remove = sub.add_parser("remove", help="move skill directories to the trash")
+    p_remove.add_argument("--dry-run", action="store_true",
+                          help="run every check and print what would go, touching nothing")
+    p_remove.add_argument("paths", nargs="+", metavar="PATH",
+                          help="absolute paths, from a scan's removal.targets")
+
     args = ap.parse_args(argv)
 
     if args.cmd == "category":
         return category_command(args)
+
+    if args.cmd == "remove":
+        return remove_command(args)
 
     if args.cmd == "scan":
         result = scan(divisor=args.divisor)

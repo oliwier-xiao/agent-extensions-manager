@@ -1040,5 +1040,596 @@ class CategoryAssign(unittest.TestCase):
             self.assertNotRegex(bad, ax.SKILL_NAME)
 
 
+class RemovalPlan(unittest.TestCase):
+    """What removing a skill would take, decided from a real stat of the real
+    directory and the finished mount list. Every field here is read by a panel
+    that is about to offer the user a button, so a plan that names the wrong path
+    or the wrong agent is worse than no plan at all."""
+
+    def plan(self, build, dir_name):
+        result = scan_with_home(build)
+        return next(i for i in result["items"] if i["dirName"] == dir_name)["removal"]
+
+    def test_an_ordinary_skill_goes_to_the_trash(self):
+        plan = self.plan(lambda d: write_skill(os.path.join(d, ".claude", "skills"), "plain"),
+                         "plain")
+        self.assertEqual(plan["mode"], "trash")
+        self.assertEqual([t["link"] for t in plan["targets"]], ["real"])
+        self.assertTrue(plan["targets"][0]["abs"].endswith("/.claude/skills/plain"))
+        self.assertEqual(plan["loses"], ["claude", "opencode"])
+        self.assertEqual(plan["keeps"], [])
+        self.assertTrue(plan["restorable"])
+        self.assertIsNone(plan["command"])
+        self.assertTrue(plan["why"])
+
+    def test_a_packaged_codex_skill_is_refused(self):
+        # ~/.codex/skills/.system is rewritten from an embedded copy on every
+        # launch, so a skill removed from it is back before the user has finished
+        # reading the confirmation.
+        plan = self.plan(
+            lambda d: write_skill(os.path.join(d, ".codex", "skills", ".system"), "packaged"),
+            "packaged")
+        self.assertEqual(plan["mode"], "refuse")
+        self.assertEqual(plan["targets"], [])
+        self.assertIn(".system", plan["why"])
+        self.assertEqual(plan["loses"], [])
+        self.assertEqual(plan["keeps"], ["codex"])
+        self.assertFalse(plan["restorable"])
+
+    def test_a_plugin_skill_is_handed_back_to_its_plugin(self):
+        def build(d):
+            install = os.path.join(d, ".claude", "plugins", "cache", "imp", "imp", "4.2.2")
+            write_skill(os.path.join(install, "skills"), "impeccable")
+            os.makedirs(os.path.join(d, ".claude", "plugins"), exist_ok=True)
+            with open(os.path.join(d, ".claude", "plugins", "installed_plugins.json"),
+                      "w", encoding="utf-8") as fh:
+                json.dump({"plugins": {"impeccable@imp": [{"installPath": install}]}}, fh)
+        plan = self.plan(build, "impeccable")
+        self.assertEqual(plan["mode"], "delegate")
+        self.assertEqual(plan["targets"], [])
+        self.assertEqual(plan["command"], ["claude", "plugin", "uninstall", "impeccable"])
+        self.assertIn("impeccable", plan["why"])
+        self.assertEqual(plan["keeps"], ["claude"])
+
+    def test_a_plugin_skill_the_user_also_linked_is_still_the_plugins(self):
+        # The delegate rule used to read `flags.pluginProvided`, which _ingest
+        # sets from whichever root reached the realpath first -- and skill_roots()
+        # returns the five user roots before the plugin caches. A plugin skill the
+        # user had also symlinked into ~/.claude/skills therefore recorded False,
+        # planned as `trash`, and listed the plugin's own checkout among the paths
+        # to move, which is the panel offering to delete an installed plugin.
+        def build(d):
+            install = os.path.join(d, ".claude", "plugins", "cache", "kit", "kit", "4.2.2")
+            write_skill(os.path.join(install, "skills"), "impeccable")
+            os.makedirs(os.path.join(d, ".claude", "plugins"), exist_ok=True)
+            with open(os.path.join(d, ".claude", "plugins", "installed_plugins.json"),
+                      "w", encoding="utf-8") as fh:
+                json.dump({"plugins": {"superkit@kit": [{"installPath": install}]}}, fh)
+            os.makedirs(os.path.join(d, ".claude", "skills"), exist_ok=True)
+            os.symlink(os.path.join(install, "skills", "impeccable"),
+                       os.path.join(d, ".claude", "skills", "impeccable"))
+        result = scan_with_home(build)
+        item = next(i for i in result["items"] if i["dirName"] == "impeccable")
+        self.assertFalse(item["flags"]["pluginProvided"], "the field that cannot be trusted")
+        plan = item["removal"]
+        self.assertEqual(plan["mode"], "delegate")
+        self.assertEqual(plan["targets"], [])
+        # The plugin is named by the root the directory actually sits under. The
+        # invocation reads `/impeccable` on this record, so the half before its
+        # colon is the skill's own name and names no plugin at all.
+        self.assertEqual(item["invocation"]["claude"], "/impeccable")
+        self.assertEqual(plan["command"], ["claude", "plugin", "uninstall", "superkit"])
+        self.assertIn("superkit", plan["why"])
+
+    def test_a_directory_whose_name_merely_starts_the_same_is_not_swept_in(self):
+        # Matched on the path boundary rather than a bare startswith. `skills-extra`
+        # beside the plugin's `skills` starts with every character of it, and a bare
+        # prefix hands the user an uninstall command for a plugin that does not own
+        # the directory -- which is worse than handing them none.
+        with tempfile.TemporaryDirectory() as d:
+            cache = os.path.join(d, "cache", "kit")
+            real = os.path.join(cache, "skills-extra", "impeccable")
+            os.makedirs(real)
+            record = {"realPath": real, "tools": ["claude"], "invocation": {},
+                      "flags": {"pluginProvided": False, "builtin": False, "readOnly": False},
+                      "mounts": [{"tool": "claude", "path": real, "abs": real, "link": "real"}]}
+            roots = [{"path": os.path.join(cache, "skills"), "plugin": "superkit"},
+                     {"path": os.path.join(cache, "skills-extra")}]
+            plan = ax._removal_plan(record, roots, os.getuid(), None, {})
+        self.assertNotEqual(plan["mode"], "delegate")
+        self.assertEqual(plan["mode"], "trash")
+
+    def test_a_skill_that_really_lives_elsewhere_loses_only_its_links(self):
+        # The directory itself is outside every root the agents scan, so it is
+        # not ours to file away on their behalf: only the links to it can go.
+        def build(d):
+            real = os.path.join(d, "projects", "wanderer")
+            write_skill(os.path.join(d, "projects"), "wanderer")
+            for root in (".claude/skills", ".codex/skills"):
+                os.makedirs(os.path.join(d, root), exist_ok=True)
+                os.symlink(real, os.path.join(d, root, "wanderer"))
+        plan = self.plan(build, "wanderer")
+        self.assertEqual(plan["mode"], "unlink")
+        self.assertEqual([t["link"] for t in plan["targets"]], ["symlink", "symlink"])
+        self.assertFalse(any("/projects/" in t["abs"] for t in plan["targets"]), plan["targets"])
+        self.assertEqual(sorted(plan["loses"]), ["claude", "codex", "opencode"])
+
+    def test_a_directory_a_package_owns_is_unlinked_and_names_the_package(self):
+        """The live case: /usr/share/omarchy/default/agents/skills/{omarchy,
+        diagnose-crash} are root-owned and reached from three user roots by
+        symlink. `flags.readOnly` reads False for both -- it tracks bundling and
+        nothing else -- so the mode is taken from a stat of the real directory,
+        and the uid is passed in here for the one branch a test cannot become."""
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, "share", "omarchy")
+            root = os.path.join(d, "skills")
+            os.makedirs(real)
+            os.makedirs(root)
+            link = os.path.join(root, "omarchy")
+            os.symlink(real, link)
+            record = {"realPath": real, "tools": ["claude", "codex"],
+                      "flags": {"pluginProvided": False, "builtin": False, "readOnly": False},
+                      "mounts": [{"tool": "claude", "path": link, "abs": link, "link": "symlink"},
+                                 {"tool": "codex", "path": link, "abs": link, "link": "symlink"}]}
+            plan = ax._removal_plan(record, [{"path": root}], os.getuid() + 1, None,
+                                    {real: "omarchy-settings-dev"})
+        self.assertEqual(plan["mode"], "unlink")
+        self.assertIn("omarchy-settings-dev", plan["why"])
+        self.assertEqual([t["abs"] for t in plan["targets"]], [link])
+        self.assertIn("re-creates", plan["restoreNote"])
+        self.assertEqual(plan["loses"], ["claude", "codex"])
+
+    def test_the_restore_note_names_the_provisioner_not_the_owner_of_the_directory(self):
+        """What re-creates the link is /usr/share/omarchy/bin/omarchy-provision-user,
+        which loops the packaged skills and runs `ln -sfn` for each one; it belongs
+        to omarchy-dev and runs from a migration. The note was built as
+        f"{package} re-creates this link", where `package` is whoever owns the skill
+        DIRECTORY -- omarchy-settings-dev -- so it attributed the action to something
+        that does not perform it and sent anyone chasing it to the wrong package."""
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, "share", "omarchy")
+            root = os.path.join(d, "skills")
+            os.makedirs(real)
+            os.makedirs(root)
+            link = os.path.join(root, "omarchy")
+            os.symlink(real, link)
+            record = {"realPath": real, "tools": ["claude"],
+                      "flags": {"pluginProvided": False, "builtin": False, "readOnly": False},
+                      "mounts": [{"tool": "claude", "path": link, "abs": link, "link": "symlink"}]}
+            plan = ax._removal_plan(record, [{"path": root}], os.getuid() + 1, None,
+                                    {real: "omarchy-settings-dev"})
+        self.assertIn("omarchy-settings-dev", plan["why"])
+        self.assertNotIn("omarchy-settings-dev", plan["restoreNote"])
+        self.assertIn("provisions", plan["restoreNote"])
+
+    def test_an_unowned_directory_with_no_package_still_says_who_has_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, "elsewhere")
+            root = os.path.join(d, "skills")
+            os.makedirs(real)
+            os.makedirs(root)
+            link = os.path.join(root, "x")
+            os.symlink(real, link)
+            record = {"realPath": real, "tools": ["claude"],
+                      "flags": {"pluginProvided": False, "builtin": False, "readOnly": False},
+                      "mounts": [{"tool": "claude", "path": link, "abs": link, "link": "symlink"}]}
+            plan = ax._removal_plan(record, [{"path": root}], os.getuid() + 1, None, {})
+        self.assertEqual(plan["mode"], "unlink")
+        self.assertIn("uid %d" % os.getuid(), plan["why"])
+        self.assertIsNone(plan["restoreNote"])
+
+    def test_a_dotfiles_managed_root_is_resolved_the_way_the_act_side_resolves_it(self):
+        # ~/.claude as a symlink into a checkout is what chezmoi and stow both
+        # produce. The act side has always tested against os.path.realpath of each
+        # root; the plan side tested against the literal paths, so every skill the
+        # user owns had a realpath outside every root and an ordinary one was
+        # refused with nothing the panel could offer to do about it.
+        def build(d):
+            checkout = os.path.join(d, "dotfiles", "claude")
+            write_skill(os.path.join(checkout, "skills"), "plain")
+            os.symlink(checkout, os.path.join(d, ".claude"))
+        plan = self.plan(build, "plain")
+        self.assertEqual(plan["mode"], "trash")
+        self.assertEqual([t["link"] for t in plan["targets"]], ["real"])
+        self.assertTrue(plan["restorable"])
+
+    def test_a_directory_outside_every_root_gets_a_sentence_of_its_own(self):
+        # Substituting a place into the ownership clause produced "belongs to
+        # somewhere the agents do not scan", which is not a thing a directory can
+        # belong to and told the reader nothing about which of the two it was.
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, "elsewhere")
+            os.makedirs(real)
+            record = {"realPath": real, "tools": ["claude"],
+                      "flags": {"pluginProvided": False, "builtin": False, "readOnly": False},
+                      "mounts": [{"tool": "claude", "path": real, "abs": real, "link": "real"}]}
+            plan = ax._removal_plan(record, [{"path": os.path.join(d, "skills")}],
+                                    os.getuid(), None, {})
+        self.assertEqual(plan["mode"], "refuse")
+        self.assertNotIn("belongs to", plan["why"])
+        self.assertIn("outside every directory the agents scan", plan["why"])
+
+    def test_links_are_ordered_before_the_directory_they_point_at(self):
+        # Removing the real directory first takes the row off the next scan
+        # entirely: what is left is a dangling link, one finding, and nothing to
+        # click on to finish the job.
+        def build(d):
+            claude = os.path.join(d, ".claude", "skills")
+            agents = os.path.join(d, ".agents", "skills")
+            write_skill(claude, "shared")
+            os.makedirs(agents, exist_ok=True)
+            os.symlink(os.path.join(claude, "shared"), os.path.join(agents, "shared"))
+        plan = self.plan(build, "shared")
+        self.assertEqual([t["link"] for t in plan["targets"]], ["symlink", "real"])
+        self.assertTrue(plan["targets"][0]["abs"].endswith("/.agents/skills/shared"))
+        self.assertTrue(plan["targets"][-1]["abs"].endswith("/.claude/skills/shared"))
+
+    def test_three_agents_reached_through_two_paths_all_lose_it(self):
+        def build(d):
+            claude = os.path.join(d, ".claude", "skills")
+            agents = os.path.join(d, ".agents", "skills")
+            write_skill(claude, "shared")
+            os.makedirs(agents, exist_ok=True)
+            os.symlink(os.path.join(claude, "shared"), os.path.join(agents, "shared"))
+        plan = self.plan(build, "shared")
+        self.assertEqual(len(plan["targets"]), 2)
+        self.assertEqual(sorted(plan["loses"]), ["claude", "codex", "opencode"])
+        self.assertEqual(plan["keeps"], [])
+
+    def test_two_tools_sharing_one_path_make_one_target(self):
+        # Mounts are keyed on (tool, path), so the single directory Claude Code
+        # and OpenCode both read appears twice in the list. Acting on it as it
+        # stands would trash it once and then be handed a path that is gone.
+        def build(d):
+            write_skill(os.path.join(d, ".claude", "skills"), "twice")
+        result = scan_with_home(build)
+        item = next(i for i in result["items"] if i["dirName"] == "twice")
+        self.assertEqual([m["tool"] for m in item["mounts"]], ["claude", "opencode"])
+        self.assertEqual(len(item["removal"]["targets"]), 1)
+        self.assertEqual(item["removal"]["targets"][0]["tools"], ["claude", "opencode"])
+
+    def test_every_skill_carries_a_plan_the_panel_can_read(self):
+        def build(d):
+            write_skill(os.path.join(d, ".claude", "skills"), "plain")
+            write_skill(os.path.join(d, ".codex", "skills", ".system"), "packaged")
+        for item in scan_with_home(build)["items"]:
+            plan = item["removal"]
+            self.assertIn(plan["mode"], ("trash", "unlink", "delegate", "refuse"))
+            self.assertTrue(plan["why"].endswith("."), plan["why"])
+            for field in ("targets", "loses", "keeps", "restorable", "restoreNote", "command"):
+                self.assertIn(field, plan)
+
+    def test_the_package_query_is_parsed_out_of_the_sentence_pacman_writes(self):
+        # `-Qo` rather than `-Qoq` because a path no package owns goes to stderr
+        # and drops out of the quiet output, which would shift every remaining
+        # answer onto the wrong path. A directory comes back with a trailing
+        # slash it was not given.
+        m = ax.PACMAN_OWNED.match(
+            "/usr/share/omarchy/default/agents/skills/omarchy/ is owned by "
+            "omarchy-settings-dev 4.0.0.r2071.ga703092-1")
+        self.assertEqual(m.group("path"), "/usr/share/omarchy/default/agents/skills/omarchy")
+        self.assertEqual(m.group("name"), "omarchy-settings-dev")
+        self.assertIsNone(ax.PACMAN_OWNED.match("error: No package owns /home/me/skills/x"))
+
+
+class RemoveCommand(unittest.TestCase):
+    """`agent-skills remove`. The row it is acting on was drawn by a scan that may
+    be minutes old, so none of it is believed: every fact is taken again from the
+    path itself, and a path that fails one of them is refused by name while the
+    rest carry on.
+
+    The real gio is never spawned. `_gio_trash` is the only thing in the helper
+    that leaves the process, and it is replaced below by a recorder that moves
+    the fixture path itself, so the suite can never reach this machine's Trash.
+    """
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+        saved = ax.HOME
+        ax.HOME = self.home
+        self.addCleanup(setattr, ax, "HOME", saved)
+        self.trashed = []
+        self.refuse = {}
+        saved_trash = ax._gio_trash
+        ax._gio_trash = self.fake_trash
+        self.addCleanup(setattr, ax, "_gio_trash", saved_trash)
+
+    def fake_trash(self, path):
+        # The guard is the point of the stub as much as the recording is: nothing
+        # in this suite may act on a path outside the fixture it just built.
+        assert path.startswith(self.home + "/"), path
+        if path in self.refuse:
+            return False, self.refuse[path]
+        self.trashed.append(path)
+        if os.path.islink(path):
+            os.unlink(path)
+        else:
+            shutil.rmtree(path)
+        return True, ""
+
+    def skill(self, root, name):
+        write_skill(os.path.join(self.home, root), name)
+        return os.path.join(self.home, root, name)
+
+    def remove(self, *paths, dry_run=False):
+        out, err = io.StringIO(), io.StringIO()
+        argv = ["remove"] + (["--dry-run"] if dry_run else []) + ["--"] + list(paths)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ax.main(argv)
+        return code, json.loads(out.getvalue())
+
+    def test_an_ordinary_skill_goes_and_says_so(self):
+        path = self.skill(".claude/skills", "plain")
+        code, report = self.remove(path)
+        self.assertEqual(code, 0)
+        self.assertEqual(report["removed"], [{"path": path, "trashed": True}])
+        self.assertEqual(report["refused"], [])
+        self.assertEqual(self.trashed, [path])
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_plugin_checkout_is_refused_by_the_side_that_acts(self):
+        # A plugin's own checkout is a skill root, so every other test here passes
+        # on a path inside one -- it is a directory, it is ours, its parent is a
+        # root, and it holds a SKILL.md. The plan answers `delegate` for these, but
+        # the plan is advisory by design; a guard that lives only there is one the
+        # command line walks straight past, and what it would trash is a skill out
+        # of an installed plugin.
+        cache = os.path.join(self.home, ".claude", "plugins", "cache",
+                             "kit", "superkit", "1.0.0", "skills")
+        write_skill(cache, "bundled")
+        path = os.path.join(cache, "bundled")
+        os.makedirs(os.path.join(self.home, ".claude", "plugins"), exist_ok=True)
+        with open(os.path.join(self.home, ".claude", "plugins",
+                               "installed_plugins.json"), "w", encoding="utf-8") as fh:
+            json.dump({"version": 2, "plugins": {"superkit@kit": [
+                {"scope": "user", "installPath": os.path.dirname(cache),
+                 "version": "1.0.0"}]}}, fh)
+        code, report = self.remove(path)
+        self.assertEqual(code, 2)
+        self.assertEqual(report["removed"], [])
+        self.assertIn("installed plugin", report["refused"][0]["reason"])
+        self.assertEqual(self.trashed, [])
+        self.assertTrue(os.path.exists(path))
+
+    def test_a_relative_path_is_refused_before_anything_is_touched(self):
+        path = self.skill(".claude/skills", "plain")
+        code, report = self.remove("skills/plain", path)
+        self.assertEqual(code, 2)
+        self.assertEqual(report["removed"], [])
+        self.assertEqual(len(report["refused"]), 2)
+        self.assertIn("absolute", report["refused"][0]["reason"])
+        self.assertEqual(self.trashed, [])
+        self.assertTrue(os.path.exists(path))
+
+    def test_a_path_that_is_not_a_skill_is_refused(self):
+        os.makedirs(os.path.join(self.home, ".claude", "skills", "empty"))
+        code, report = self.remove(os.path.join(self.home, ".claude", "skills", "empty"))
+        self.assertEqual(code, 2)
+        self.assertIn("SKILL.md", report["refused"][0]["reason"])
+        self.assertEqual(self.trashed, [])
+
+    def test_a_skill_md_that_vanished_since_the_scan_is_refused(self):
+        # The row is advisory. Between the scan that drew it and the click that
+        # acts on it, the directory can have been emptied by anything at all.
+        path = self.skill(".claude/skills", "plain")
+        os.remove(os.path.join(path, "SKILL.md"))
+        code, report = self.remove(path)
+        self.assertEqual(code, 2)
+        self.assertIn("SKILL.md", report["refused"][0]["reason"])
+        self.assertTrue(os.path.isdir(path))
+
+    def test_a_path_under_system_is_refused(self):
+        path = self.skill(".codex/skills/.system", "packaged")
+        code, report = self.remove(path)
+        self.assertEqual(code, 2)
+        self.assertIn(".system", report["refused"][0]["reason"])
+        self.assertTrue(os.path.exists(path))
+
+    def test_a_path_outside_every_root_is_refused(self):
+        write_skill(os.path.join(self.home, "projects"), "wanderer")
+        path = os.path.join(self.home, "projects", "wanderer")
+        code, report = self.remove(path)
+        self.assertEqual(code, 2)
+        self.assertIn("scans for skills", report["refused"][0]["reason"])
+        self.assertTrue(os.path.exists(path))
+
+    def test_a_file_is_not_a_skill_directory(self):
+        os.makedirs(os.path.join(self.home, ".claude", "skills"))
+        path = os.path.join(self.home, ".claude", "skills", "notadir")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        code, report = self.remove(path)
+        self.assertEqual(code, 2)
+        self.assertIn("not a directory", report["refused"][0]["reason"])
+
+    def test_a_dry_run_checks_everything_and_touches_nothing(self):
+        good = self.skill(".claude/skills", "plain")
+        bad = self.skill(".codex/skills/.system", "packaged")
+        code, report = self.remove(good, bad, dry_run=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(report["removed"], [{"path": good, "trashed": False}])
+        self.assertIn(".system", report["refused"][0]["reason"])
+        self.assertEqual(self.trashed, [])
+        self.assertTrue(os.path.exists(good) and os.path.exists(bad))
+
+    def test_one_refusal_does_not_abandon_the_paths_beside_it(self):
+        first = self.skill(".claude/skills", "aaa")
+        second = self.skill(".claude/skills", "bbb")
+        third = self.skill(".claude/skills", "ccc")
+        os.remove(os.path.join(second, "SKILL.md"))
+        code, report = self.remove(first, second, third)
+        self.assertEqual(code, 0)
+        self.assertEqual([r["path"] for r in report["removed"]], [first, third])
+        self.assertEqual([r["path"] for r in report["refused"]], [second])
+        self.assertFalse(os.path.exists(first))
+        self.assertFalse(os.path.exists(third))
+
+    def test_links_are_trashed_before_the_directory_whatever_order_they_arrive_in(self):
+        # Removing the real directory first leaves a dangling link and takes the
+        # row off the next scan, so there is nothing left to finish the job with.
+        real = self.skill(".claude/skills", "shared")
+        os.makedirs(os.path.join(self.home, ".agents", "skills"))
+        link = os.path.join(self.home, ".agents", "skills", "shared")
+        os.symlink(real, link)
+        code, report = self.remove(real, link)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.trashed, [link, real])
+        self.assertEqual([r["path"] for r in report["removed"]], [link, real])
+
+    def test_what_gio_refused_reaches_the_caller_word_for_word(self):
+        # "Trashing on system internal mounts is not supported" is what a user
+        # who keeps their skills on another filesystem gets, and it is the only
+        # sentence that tells them why nothing happened.
+        path = self.skill(".claude/skills", "plain")
+        self.refuse[path] = "Trashing on system internal mounts is not supported"
+        code, report = self.remove(path)
+        self.assertEqual(code, 2)
+        self.assertEqual(report["removed"], [])
+        self.assertIn("system internal mounts", report["refused"][0]["reason"])
+        self.assertTrue(os.path.exists(path))
+
+    def test_a_refusal_from_gio_does_not_stop_the_next_path(self):
+        first = self.skill(".claude/skills", "aaa")
+        second = self.skill(".claude/skills", "bbb")
+        self.refuse[first] = "Trashing on system internal mounts is not supported"
+        code, report = self.remove(first, second)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.trashed, [second])
+        self.assertEqual([r["path"] for r in report["refused"]], [first])
+
+    def test_a_refused_link_holds_back_the_directory_it_points_at(self):
+        # The network-mount case the README names: ~/.agents/skills on another
+        # filesystem, where the trash refuses the link outright. The directory
+        # went anyway, which left the skill in the trash, a live dangling link in
+        # a root Codex and OpenCode still walk, and no row on the panel to fix it
+        # with -- a skill whose realpath is gone stops being an item.
+        real = self.skill(".claude/skills", "shared")
+        os.makedirs(os.path.join(self.home, ".agents", "skills"))
+        link = os.path.join(self.home, ".agents", "skills", "shared")
+        os.symlink(real, link)
+        self.refuse[link] = "Trashing on system internal mounts is not supported"
+        code, report = self.remove(real, link)
+        self.assertEqual(code, 2)
+        self.assertEqual(report["removed"], [])
+        self.assertEqual(self.trashed, [])
+        self.assertTrue(os.path.isdir(real))
+        held = next(r for r in report["refused"] if r["path"] == real)
+        self.assertIn("/.agents/skills/shared", held["reason"])
+        self.assertIn("dangling", held["reason"])
+
+    def test_a_link_our_own_checks_refuse_holds_the_directory_back_too(self):
+        # Whichever of the two refused it, the link is still on disk and the
+        # directory under it has to stay: gio is not the only way a link can fail.
+        real = self.skill(".claude/skills", "shared")
+        os.makedirs(os.path.join(self.home, ".codex", "skills", ".system"))
+        link = os.path.join(self.home, ".codex", "skills", ".system", "shared")
+        os.symlink(real, link)
+        code, report = self.remove(real, link)
+        self.assertEqual(code, 2)
+        self.assertEqual(self.trashed, [])
+        self.assertTrue(os.path.isdir(real))
+        self.assertIn("dangling", next(r for r in report["refused"]
+                                       if r["path"] == real)["reason"])
+
+    def test_only_the_directory_that_link_named_is_held_back(self):
+        # One refusal must not abandon the others, and that is about separate
+        # skills rather than about the links and the target of one: a second link
+        # to the same directory still goes, and so does an unrelated skill.
+        real = self.skill(".claude/skills", "shared")
+        alone = self.skill(".claude/skills", "alone")
+        os.makedirs(os.path.join(self.home, ".agents", "skills"))
+        os.makedirs(os.path.join(self.home, ".codex", "skills"))
+        stuck = os.path.join(self.home, ".agents", "skills", "shared")
+        spare = os.path.join(self.home, ".codex", "skills", "shared")
+        os.symlink(real, stuck)
+        os.symlink(real, spare)
+        self.refuse[stuck] = "Trashing on system internal mounts is not supported"
+        code, report = self.remove(real, stuck, spare, alone)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.trashed, [spare, alone])
+        self.assertTrue(os.path.isdir(real))
+        self.assertFalse(os.path.exists(alone))
+        self.assertEqual(sorted(r["path"] for r in report["refused"]), sorted([real, stuck]))
+
+
+class PackageLookupIsCached(unittest.TestCase):
+    """`owning_packages` spawned pacman on every scan: 125 ms against the 21 ms
+    the rest of the scan costs, on the path the panel takes each time it opens
+    because scanOnOpen defaults to true. The premise that a foreign-owned skill is
+    rare is backwards for this audience -- omarchy-provision-user links two
+    package-owned skills into every stock user root, so every scan on every stock
+    install paid it. Ownership of a path cannot change without a pacman
+    transaction, and every transaction rewrites the local database, so the answer
+    is kept and re-asked only once that database has moved.
+    """
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+        for name, value in (("HOME", self.home), ("PACMAN", sys.executable),
+                            ("PACMAN_DB", os.path.join(self.home, "localdb"))):
+            self.addCleanup(setattr, ax, name, getattr(ax, name))
+            setattr(ax, name, value)
+        os.makedirs(ax.PACMAN_DB)
+        # The one thing that leaves the process. Stubbed rather than mocked out
+        # wholesale, so the cache is exercised through the same door a scan uses.
+        self.asked: list = []
+        self.addCleanup(setattr, ax, "_ask_pacman", ax._ask_pacman)
+        ax._ask_pacman = self.fake_ask
+
+    def fake_ask(self, paths):
+        self.asked.append(list(paths))
+        return {p: "omarchy-settings-dev" for p in paths if p.endswith("/omarchy")}
+
+    OMARCHY = "/usr/share/omarchy/default/agents/skills/omarchy"
+    CRASH = "/usr/share/omarchy/default/agents/skills/diagnose-crash"
+
+    def test_the_second_scan_spawns_nothing(self):
+        answer = {self.OMARCHY: "omarchy-settings-dev"}
+        self.assertEqual(ax.owning_packages([self.OMARCHY]), answer)
+        self.assertEqual(ax.owning_packages([self.OMARCHY]), answer)
+        self.assertEqual(len(self.asked), 1, self.asked)
+
+    def test_a_pacman_transaction_makes_it_ask_again(self):
+        ax.owning_packages([self.OMARCHY])
+        os.utime(ax.PACMAN_DB, (0, 0))
+        ax.owning_packages([self.OMARCHY])
+        self.assertEqual(len(self.asked), 2, self.asked)
+
+    def test_a_path_no_package_owns_is_not_asked_about_twice(self):
+        # Recorded as the empty string rather than left out of the cache. Left
+        # out, a negative answer would send pacman off again on every scan, which
+        # is the whole cost this exists to remove.
+        self.assertEqual(ax.owning_packages([self.CRASH]), {})
+        self.assertEqual(ax.owning_packages([self.CRASH]), {})
+        self.assertEqual(len(self.asked), 1, self.asked)
+
+    def test_a_path_the_cache_never_saw_makes_it_ask(self):
+        # A partial hit would name the package for one skill and bare uid for the
+        # next, which reads as though the second belonged to nobody.
+        ax.owning_packages([self.OMARCHY])
+        ax.owning_packages([self.CRASH, self.OMARCHY])
+        self.assertEqual(len(self.asked), 2, self.asked)
+
+    def test_a_cache_that_cannot_be_parsed_is_a_miss_and_not_a_crash(self):
+        path = ax._package_cache_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{ half a fil")
+        self.assertEqual(ax.owning_packages([self.OMARCHY]),
+                         {self.OMARCHY: "omarchy-settings-dev"})
+        self.assertEqual(len(self.asked), 1, self.asked)
+
+    def test_a_database_that_cannot_be_stat_ed_never_trusts_a_cached_answer(self):
+        # No key, so no hit: a machine whose pacman database we cannot see is one
+        # where a stale answer could outlive the transaction that invalidated it.
+        ax.PACMAN_DB = os.path.join(self.home, "gone")
+        ax.owning_packages([self.OMARCHY])
+        ax.owning_packages([self.OMARCHY])
+        self.assertEqual(len(self.asked), 2, self.asked)
+        self.assertFalse(os.path.exists(ax._package_cache_path()))
+
+
 if __name__ == "__main__":
     unittest.main()
