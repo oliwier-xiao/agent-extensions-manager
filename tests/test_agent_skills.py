@@ -485,6 +485,36 @@ class Redaction(unittest.TestCase):
         self.assertNotIn("DEADBEEF", got)
         self.assertIn("--api-key", got)
 
+    def test_a_header_flag_that_does_not_say_header_still_hides_its_value(self):
+        # `-H` is the short form every HTTP-shaped launcher takes, and its own
+        # name says nothing about what it carries. Matching only on flags that
+        # spell out a secret word left a bearer token on the panel in full.
+        for argv in (["npx", "mcp-remote", "https://x/mcp", "-H", "Authorization: Bearer SEKRIT"],
+                     ["npx", "mcp-remote", "https://x/mcp", "-H", "X-Api-Key: SEKRIT"],
+                     ["node", "srv.js", "-H=Authorization: Bearer SEKRIT"],
+                     ["node", "srv.js", "-H=X-Api-Key: SEKRIT"],
+                     ["node", "srv.js", "--headers", "X-Api-Key: SEKRIT"]):
+            self.assertNotIn("SEKRIT", ax.redact_argv(argv), argv)
+
+    def test_the_header_name_survives_so_the_line_still_says_something(self):
+        # Every other rule here keeps the flag and blanks the value. A header is
+        # the same shape one level down: the name is not the credential.
+        got = ax.redact_argv(["node", "srv.js", "-H=Authorization: Bearer SEKRIT"])
+        self.assertIn("Authorization", got)
+        self.assertNotIn("SEKRIT", got)
+
+    def test_lower_case_h_is_help_or_a_host_and_is_left_alone(self):
+        # The flag patterns carry `(?i)` for the words in them, and under that
+        # `-h` would match `-H`. It is help on nearly every launcher and `--host`
+        # on several, so folding it in blanks the one thing the panel is for.
+        got = ax.redact_argv(["mcp-proxy", "-h", "127.0.0.1", "--port", "8080"])
+        self.assertIn("127.0.0.1", got)
+        self.assertNotIn("\u2026", got)
+
+    def test_a_path_that_merely_contains_a_secret_word_is_not_a_secret(self):
+        cmd = "node /home/me/.local/share/authors/srv.js"
+        self.assertEqual(ax.redact(cmd), cmd)
+
     def test_url_userinfo_is_a_credential_too(self):
         got = ax.redact("https://someone:hunter2@host/mcp")
         self.assertNotIn("hunter2", got)
@@ -2743,6 +2773,130 @@ class DescriptionShapes(DescribeCase):
         path = self.plain("long")
         self.describe("long", "x" * (ax.MAX_DESCRIPTION + 200))
         self.assertEqual(len(self.described(path)), ax.MAX_DESCRIPTION)
+
+
+class StoresWeCouldNotRead(DescribeCase):
+    """What happens when the file this plugin owns is not the file it left.
+
+    Every verb here decides what to do from what the store says, and a store that
+    cannot be read says nothing in exactly the way an untouched machine does.
+    Answering the first when the second is true is how reset reports success over
+    our own text and write records our own earlier words as the author's.
+    """
+
+    TEXT = "One line about it, for the agent to read."
+
+    def corrupt(self, doc='{"version":1,"notes":{},"edited":{"a":{"original":"AUTHOR'):
+        os.makedirs(ax.STORE_DIR, mode=0o700, exist_ok=True)
+        with open(ax.DESCRIBE_PATH, "w", encoding="utf-8") as fh:
+            fh.write(doc)
+
+    def test_a_half_written_store_refuses_every_verb_rather_than_guessing(self):
+        path = self.plain("alpha")
+        self.corrupt()
+        for verb in (lambda: self.note("alpha", "a note"),
+                     lambda: self.describe("alpha", self.TEXT),
+                     lambda: self.cli("describe", "reset", "--", "alpha", path)):
+            code, said = verb()
+            self.assertEqual((code, said["ok"]), (2, False))
+            self.assertIn("could not be read", said["detail"])
+        self.assertEqual(self.described(path), self.AUTHOR)
+
+    def test_a_store_that_parsed_into_the_wrong_shape_is_reported_too(self):
+        # It used to be silent: only a read error reached `findings`, so a store
+        # holding a list read as an empty one with nothing said, on `scan` too.
+        self.corrupt("[]")
+        findings = []
+        ax.read_describe_store(findings)
+        self.assertEqual([f["what"] for f in findings], ["descriptions.json"])
+        findings = []
+        with open(ax.STORE_PATH, "w", encoding="utf-8") as fh:
+            fh.write("[]")
+        ax.read_store(findings)
+        self.assertEqual([f["what"] for f in findings], ["categories.json"])
+
+    def test_no_store_at_all_is_the_one_silence_that_means_what_it_looks_like(self):
+        findings = []
+        self.assertEqual(ax.read_describe_store(findings), {"notes": {}, "edited": {}})
+        self.assertEqual(ax.read_store(findings)["assign"], {})
+        self.assertEqual(findings, [])
+
+    def test_a_store_kept_in_a_dotfiles_checkout_is_refused_not_replaced(self):
+        # The read side opens these files O_NOFOLLOW, so a linked store is never
+        # read. Renaming over the link would swap it for a fresh file and orphan
+        # what it pointed at -- for descriptions.json, the only copy of every
+        # author's words. This is the one setup the scanner recognises by name.
+        os.makedirs(ax.STORE_DIR, mode=0o700, exist_ok=True)
+        elsewhere = os.path.join(self.home, "dotfiles")
+        os.makedirs(elsewhere)
+        real = os.path.join(elsewhere, "categories.json")
+        with open(real, "w", encoding="utf-8") as fh:
+            fh.write('{"version":1,"custom":["mine"],"assign":{"alpha":"mine"}}')
+        os.symlink(real, ax.STORE_PATH)
+        code, _ = self.cli_text("category", "placed-by", "hide")
+        self.assertEqual(code, 2)
+        self.assertTrue(os.path.islink(ax.STORE_PATH))
+        with open(real, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["assign"], {"alpha": "mine"})
+
+    def test_a_store_that_will_not_take_a_write_answers_in_one_line(self):
+        # `describe` has answered a full disk or a read-only $HOME in one line
+        # since it was written; `category` raised, which the panel reads as a
+        # failure it cannot name and a person reads as a traceback in qs log.
+        os.makedirs(ax.STORE_DIR, mode=0o700, exist_ok=True)
+        os.chmod(ax.STORE_DIR, 0o500)
+        code, err = self.cli_text("category", "create", "--", "mine")
+        self.assertEqual(code, 2)
+        self.assertIn("could not be written", err)
+        self.assertNotIn("Traceback", err)
+
+    def cli_text(self, *argv):
+        """`category` speaks in sentences on stderr, not in JSON."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ax.main(list(argv))
+        return code, out.getvalue() + err.getvalue()
+
+
+class OneNameTwoCopies(DescribeCase):
+    """A name reaches more than one SKILL.md, and an entry recorded before this
+    program named the file it wrote to belongs to only one of them."""
+
+    def two(self):
+        other = os.path.join(self.home, ".agents", "skills")
+        os.makedirs(other)
+        a = self.write("dup", "name: dup\ndescription: OURS ALREADY IN A\n")
+        b = self.write("dup", "name: dup\ndescription: B AUTHOR TEXT\n", root=other)
+        return a, b
+
+    def legacy(self):
+        """The shape the shipped code wrote: `applied`, and no `file` key."""
+        os.makedirs(ax.STORE_DIR, mode=0o700, exist_ok=True)
+        with open(ax.DESCRIBE_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"version": 1, "notes": {},
+                       "applied": {"dup": {"original": "A AUTHOR TEXT",
+                                           "wrote": "OURS ALREADY IN A", "at": 1}}}, fh)
+
+    def test_an_entry_naming_no_copy_may_not_claim_a_copy_it_does_not_match(self):
+        # Inherited blind, one author's `original` is rebound to another author's
+        # file, and the reset that follows writes it over that author's own
+        # description while reporting that the file reads as its author wrote it.
+        a, b = self.two()
+        self.legacy()
+        code, said = self.describe("dup", "NEW TEXT IN B", path=b)
+        self.assertEqual((code, said["ok"]), (2, False))
+        self.assertIn("another copy of this name", said["detail"])
+        self.assertEqual(self.described(b), "B AUTHOR TEXT")
+        self.assertEqual(self.described(a), "OURS ALREADY IN A")
+
+    def test_the_copy_that_still_carries_our_text_is_the_one_that_may_claim_it(self):
+        a, _ = self.two()
+        self.legacy()
+        code, said = self.describe("dup", "SECOND TEXT", path=a)
+        self.assertEqual((code, said["ok"]), (0, True))
+        code, said = self.cli("describe", "reset", "--", "dup", a)
+        self.assertEqual((code, said["ok"]), (0, True))
+        self.assertEqual(self.described(a), "A AUTHOR TEXT")
 
 
 class DescriptionStore(DescribeCase):

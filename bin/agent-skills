@@ -178,10 +178,22 @@ def read_toml(path: str) -> tuple[dict | None, str | None]:
 # other, and a header is routinely written `--header X-Api-Key: one two`, so a
 # match that stopped at whitespace left two thirds of the key on screen.
 _SECRET_WORD = r"(?:header|token|api[-_]?key|password|secret|auth[a-z-]*)"
-SECRET_FLAG = re.compile(r"(?i)(--?%s[= ]).*$" % _SECRET_WORD)
+SECRET_FLAG = re.compile(r"(?i)(--?%ss?[= ]).*$" % _SECRET_WORD)
 SECRET_ENVISH = re.compile(r"(?i)\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*=).*$")
+# The same secret carried in the VALUE rather than under a flag that names it.
+# `-H` is the short form every HTTP-shaped launcher takes and its own name says
+# nothing, so what is matched here is the HEADER NAME -- `Authorization:`,
+# `X-Api-Key:`, `Proxy-Authorization:` -- which is the half of that argument
+# that is not the credential. Anchored on the name rather than on the start of
+# the argument, so the `-H=Authorization: ...` spelling falls to the same rule
+# and a path like ~/.local/share/authors/srv.js does not.
+SECRET_HEADER = re.compile(r"(?i)(^|[\s=])((?:[a-z0-9]+-)*%s)(\s*:\s*).*$" % _SECRET_WORD)
 # The same flag written as its own argument, with the value in the next one.
-SECRET_FLAG_ALONE = re.compile(r"(?i)^--?%s$" % _SECRET_WORD)
+# `-H` is matched case-sensitively and on its own: the pattern carries `(?i)`
+# for the words, and under that `-h` is help on nearly every launcher and
+# `--host` on several, so folding it in would blank a hostname the panel exists
+# to show.
+SECRET_FLAG_ALONE = re.compile(r"(?i)^(?:--?%ss?|(?-i:-H))$" % _SECRET_WORD)
 # A scheme and an authority, anywhere in an argument: `npx mcp-remote <url>` is
 # how most hosted servers are launched, so the URL is rarely the whole of it.
 URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S*")
@@ -194,6 +206,7 @@ def redact(text) -> str:
         out = URL_IN_TEXT.sub(lambda m: redact_url(m.group(0)), out)
         out = SECRET_FLAG.sub("\\1\u2026", out)
         out = SECRET_ENVISH.sub("\\1\u2026", out)
+        out = SECRET_HEADER.sub("\\1\\2\\3\u2026", out)
     except Exception:
         # A target we could not clean is a target we do not print. No display
         # string is worth failing a scan for, and the ellipsis is honest.
@@ -570,8 +583,15 @@ def read_store(findings: list | None = None) -> dict:
         # falling back to an empty store puts every skill back under the
         # classifier's guess, which looks exactly like a machine nobody has
         # filed anything on. Say so where there is anywhere to say it.
-        if err and findings is not None:
-            findings.append({"what": "categories.json", "detail": err})
+        #
+        # An absent file is the one silence that means what it looks like -- no
+        # store yet -- and read_json says so by returning no error with no value.
+        # Everything else is a store we could not read: half a file, a link we
+        # will not follow, a list where an object should be. Reading those as
+        # empty is how a file somebody filled reads as a file nobody touched.
+        detail = err or (None if value is None else "not an object")
+        if detail and findings is not None:
+            findings.append({"what": "categories.json", "detail": detail})
         return {"custom": [], "assign": {}, "labels": {}, "colors": {},
                 "hidePlacedBy": False}
     custom = [c for c in as_list(value.get("custom"))
@@ -609,11 +629,44 @@ def write_store(store: dict) -> None:
                                    "hidePlacedBy": store.get("hidePlacedBy", False) is True})
 
 
+def _store_written(store: dict) -> bool:
+    """The one step in `category` that can fail for a reason the caller did not
+    cause: a full disk, a quota, a read-only $HOME, a store somebody linked into
+    a dotfiles checkout. `describe` has answered those in one line since it was
+    written; this verb answered them with a traceback on stderr and nothing on
+    stdout, which the panel reads as a failure it cannot name and a person reads
+    in `qs log`. Temp-then-rename means a refusal here really did write nothing,
+    so the sentence can say so. Named rather than left to strerror alone, because
+    `Permission denied` on its own does not say which file would not take it."""
+    try:
+        write_store(store)
+        return True
+    except Exception as exc:  # noqa: BLE001 - every one of these is the same answer
+        detail = clip(getattr(exc, "strerror", None) or str(exc) or type(exc).__name__, 160)
+        warn(f"{tilde(STORE_PATH)} could not be written: {detail}; nothing changed")
+        return False
+
+
 def _write_json_store(path: str, payload: dict) -> None:
     """How both of the files this plugin owns are written: built whole, fsynced,
     renamed over the old one. Shared rather than copied, because the second store
     has exactly the need the first one has -- a descriptions.json left half
-    written would parse as an empty one and take every note with it."""
+    written would parse as an empty one and take every note with it.
+
+    A symlinked store is refused rather than written. The read side opens these
+    files O_NOFOLLOW, so one reached through a link is never read: read_store
+    hands back an empty store and says so in `findings`. Writing anyway is the
+    worse half of that bargain whichever way it is done -- the rename swaps the
+    link for a fresh file and orphans what the link pointed at, and following
+    the link instead would put that empty store over the real one, which for
+    descriptions.json is the only copy of every author's description reset
+    exists to put back. Keeping a store in a dotfiles checkout is the one setup
+    this program goes out of its way to recognise elsewhere, so it may not be
+    the setup this program silently eats.
+    """
+    if os.path.islink(path):
+        raise OSError(errno.ELOOP,
+                      f"{tilde(path)} is reached through a symlink, which is not followed")
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     text = json.dumps(payload, indent=1, sort_keys=True) + "\n"
     tmp = path + ".tmp.%d" % os.getpid()
@@ -630,6 +683,12 @@ def _write_json_store(path: str, payload: dict) -> None:
         except OSError:
             pass
         raise
+    # The rename is a write of its own, in the parent rather than in the file.
+    # Unsynced, a crash can leave the old store, an empty one, or none -- which is
+    # exactly what building the file whole was meant to make impossible. Best
+    # effort: the bytes are already down, and a store that is one crash away from
+    # being stale is still better than a refusal for a change that landed.
+    _commit_directory(os.path.dirname(path) or ".")
 
 
 # ------------------------------------------------------- description store
@@ -685,9 +744,12 @@ def read_describe_store(findings: list | None = None) -> dict:
     if err or not isinstance(value, dict):
         # Said out loud for the same reason a lost categories.json is: a store
         # that cannot be read looks exactly like a machine nobody has edited
-        # anything on, and one of the two is worth knowing about.
-        if err and findings is not None:
-            findings.append({"what": "descriptions.json", "detail": err})
+        # anything on, and one of the two is worth knowing about. The same rule
+        # about which silence is honest: no file is no store, anything else is a
+        # store we could not read.
+        detail = err or (None if value is None else "not an object")
+        if detail and findings is not None:
+            findings.append({"what": "descriptions.json", "detail": detail})
         return {"notes": {}, "edited": {}}
     notes = {}
     for k, v in list(as_dict(value.get("notes")).items())[:MAX_NOTES]:
@@ -1444,6 +1506,11 @@ def _write_package_cache(stamp: str, paths: list[str], answers: dict) -> None:
     if not stamp:
         return
     path = _package_cache_path()
+    # Same refusal as the two stores, without the noise: a cache reached through
+    # a link is a link somebody made, and losing this file costs a tenth of a
+    # second on the next scan.
+    if os.path.islink(path):
+        return
     payload = json.dumps({"version": 1, "stamp": stamp,
                           "owned": {p: answers.get(p, "") for p in paths}},
                          sort_keys=True) + "\n"
@@ -1891,7 +1958,8 @@ def category_command(args) -> int:
             print("placed by is already " + ("hidden" if want else "shown"))
             return 0
         store["hidePlacedBy"] = want
-        write_store(store)
+        if not _store_written(store):
+            return 2
         print("placed by " + ("hidden on every card; `placed-by show` puts it back"
                               if want else "back on every card"))
         return 0
@@ -1902,7 +1970,8 @@ def category_command(args) -> int:
             warn(f"{skill} was not assigned to anything")
             return 0
         del store["assign"][skill]
-        write_store(store)
+        if not _store_written(store):
+            return 2
         print(f"{skill} goes back to the classifier")
         return 0
 
@@ -1921,7 +1990,8 @@ def category_command(args) -> int:
             store["custom"].append(name)
         if not _apply_style(store, name, args.label, args.color):
             return 2
-        write_store(store)
+        if not _store_written(store):
+            return 2
         print(f"{name} created")
         return 0
 
@@ -1933,7 +2003,8 @@ def category_command(args) -> int:
         if args.reset:
             store["labels"].pop(name, None)
             store["colors"].pop(name, None)
-            write_store(store)
+            if not _store_written(store):
+                return 2
             print(f"{name} back to its defaults")
             return 0
         if args.label is None and args.color is None:
@@ -1941,7 +2012,8 @@ def category_command(args) -> int:
             return 1
         if not _apply_style(store, name, args.label, args.color):
             return 2
-        write_store(store)
+        if not _store_written(store):
+            return 2
         print(f"{name} restyled")
         return 0
 
@@ -1973,7 +2045,8 @@ def category_command(args) -> int:
         warn(f"there is room for {MAX_ASSIGNMENTS} assignments")
         return 2
     store["assign"][skill] = name
-    write_store(store)
+    if not _store_written(store):
+        return 2
     print(f"{skill} filed under {name}")
     return 0
 
@@ -2001,7 +2074,18 @@ def describe_command(args) -> int:
     if not SKILL_NAME.match(skill):
         return _describe_says(False, "a skill is named by its directory: anything but a "
                                      "slash, and not . or ..")
-    store = read_describe_store()
+    # Every verb here decides what to do from what the store says, and an
+    # unreadable store says nothing in exactly the way an untouched machine does.
+    # That is the difference between "this file already carries its author's
+    # description" and "we cannot tell", and answering the first when the second
+    # is true is how reset reports success over our own text and write records
+    # our own earlier words as the author's. So none of the three runs blind.
+    unread: list = []
+    store = read_describe_store(unread)
+    if unread:
+        return _describe_says(False, "%s could not be read (%s), so this cannot say what is "
+                                     "in the file or what to put back"
+                                     % (tilde(DESCRIBE_PATH), unread[0]["detail"]))
     try:
         if args.action == "note":
             return _describe_note(store, skill, args.text)
@@ -2112,6 +2196,32 @@ def _describe_write(store: dict, skill: str, path: str, text: str, expect: str |
                                      f"time, so nothing was written")
     current = _description_in(text_now)
     edited = store["edited"].get(skill)
+    # What this write is allowed to inherit. Normally the entry itself: a second
+    # write over our own text keeps the first `original`, so reset still puts the
+    # author's words back rather than our earlier ones.
+    inherit = edited
+    if edited and not edited["file"]:
+        # A store written before entries named a file names no copy, and one name
+        # reaches more than one SKILL.md. The only proof this side has that the
+        # entry belongs to THIS copy is the one reset already demands: the file
+        # still carries what we wrote. Inherited without it, one author's words
+        # are rebound to another author's file, and the reset that follows writes
+        # them over that author's description while reporting that the file reads
+        # as its author wrote it.
+        if clip(current, MAX_DESCRIPTION) != edited["wrote"]:
+            elsewhere = next((c for c in candidates
+                              if not same_file(c["skillMd"], target["skillMd"])
+                              and clip(_description_in(read_text(c["skillMd"]) or ""),
+                                       MAX_DESCRIPTION) == edited["wrote"]), None)
+            if elsewhere:
+                return _describe_says(False, f"your description is already in "
+                                             f"{tilde(elsewhere['skillMd'])}, which is another "
+                                             f"copy of this name; only one copy at a time can "
+                                             f"be put back, so reset that one before writing "
+                                             f"this one")
+            # No copy of this name still carries it, so nothing here can say whose
+            # words the entry holds. This file's own text is the honest original.
+            inherit = None
     if edited and edited["file"] and not same_file(edited["file"], target["skillMd"]):
         # One entry per name holds one author's text, so writing a second copy
         # would drop the first file's, leaving that file carrying our words with
@@ -2143,12 +2253,12 @@ def _describe_write(store: dict, skill: str, path: str, text: str, expect: str |
     # The file is recorded by its real path, which is the name it keeps: a root
     # holds links as often as directories, and the link can be remade tomorrow
     # while the file under it stays where it is.
-    store["edited"][skill] = {"original": edited["original"] if edited else current,
+    store["edited"][skill] = {"original": inherit["original"] if inherit else current,
                               "wrote": value, "at": int(time.time()),
                               "file": os.path.realpath(target["skillMd"])}
     write_describe_store(store)
 
-    failed = _write_description(target["skillMd"], value)
+    failed = _write_description(target["skillMd"], value, expect)
     if failed:
         # An entry is only true while the file carries it, so one recorded for a
         # write that did not happen goes back the way it was. Best effort, and
@@ -2540,6 +2650,19 @@ def _replace_description(text: str, value: str) -> tuple[str | None, str]:
     # worth filling in, so it is replaced like any other.
     if rest == "" and indented:
         return None, "its description is written as a mapping rather than as text"
+    # A trailing comment on a plain scalar, for the same reason as the block
+    # scalar above. Every YAML reader stops a plain scalar at ` #`; the reader in
+    # this file takes the whole of what follows the colon, so `description: hello
+    # # a note` is recorded as the author having written "hello # a note". Reset
+    # then writes that back quoted, and the comment becomes part of the
+    # description every agent loads on every turn -- permanently, and invisibly,
+    # because the read-back that checks a write uses the same parser that made
+    # the mistake. Quoted scalars are unaffected: the ` #` is inside the quotes
+    # and is text, which is why the shape rather than the substring is tested.
+    if rest[:1] not in ("|", ">", '"', "'") and " #" in rest:
+        return None, ("its description carries a trailing comment this program cannot tell "
+                      "from the text, so putting the author's words back afterwards could "
+                      "not be exact")
     return text[:first + 1] + "\n".join(
         lines[:start] + _render_description(value) + lines[last + 1:]) + text[end:], ""
 
@@ -2567,6 +2690,33 @@ def _replace_file(path: str, data: bytes, mode: int) -> str:
     except BaseException:
         _unlink_quietly(tmp)
         raise
+    stuck = _commit_directory(os.path.dirname(path) or ".")
+    if stuck:
+        return f"{tilde(path)} was written but the rename was not committed to disk, {stuck}"
+    return ""
+
+
+def _commit_directory(directory: str) -> str:
+    """Make the rename itself survive a power cut, not just the bytes it renamed.
+
+    fsync on the temp file commits its contents; the link that gives it its name
+    lives in the parent directory and is a separate write. Without this step the
+    old state, a zero-length file, or nothing at all is a legal thing to find
+    after a crash -- which is the one outcome temp-then-rename is chosen to rule
+    out. Its own sentence, because a failure here is not the same failure as a
+    write that never landed: the new text IS on disk, and saying it "could not be
+    replaced" would be the one thing this program promises never to say.
+    """
+    try:
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        return clip(exc.strerror or exc, 96).lower()
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        return clip(exc.strerror or exc, 96).lower()
+    finally:
+        os.close(fd)
     return ""
 
 
@@ -2581,7 +2731,7 @@ def _frontmatter_besides_description(text: str) -> dict:
     return {k: v for k, v in parse_frontmatter(text).items() if k != "description"}
 
 
-def _write_description(skill_md: str, value: str) -> str:
+def _write_description(skill_md: str, value: str, expect: str | None = None) -> str:
     """Put `value` in as the description, or say what stopped it and change nothing.
 
     Nothing here trusts the write. The file is read again afterwards and parsed
@@ -2589,6 +2739,15 @@ def _write_description(skill_md: str, value: str) -> str:
     read it with, and unless the description now comes back as exactly the text
     asked for -- with every other key still saying what it said -- the original
     bytes go back before this returns.
+
+    `expect` is re-checked here, against the read this function rewrites from,
+    and not only by the caller. The caller reads the file to decide whether to
+    write at all, records the author's words, and fsyncs a store before getting
+    this far; that is around a tenth of a second in which an editor save, a
+    checkout being updated underneath, or an agent rewriting a skill on launch
+    lands between the guard and the thing it guards. A guard that protects a revision other than the one being
+    replaced is not a guard, so the same sentence is asked again about the bytes
+    that are actually going.
     """
     why: list[str] = []
     raw = safe_read(skill_md, why=why)
@@ -2601,6 +2760,9 @@ def _write_description(skill_md: str, value: str) -> str:
         # that no longer encodes to the bytes it came from, and writing it would
         # quietly rewrite parts of the file nobody asked us to touch.
         return f"{tilde(skill_md)} is not valid UTF-8, so it is not a file we can rewrite safely"
+    if expect is not None and clip(_description_in(text), MAX_DESCRIPTION) != clip(expect, MAX_DESCRIPTION):
+        return (f"{tilde(skill_md)} changed while this was being written, so it was left "
+                f"alone; run another scan")
     new_text, refusal = _replace_description(text, value)
     if new_text is None:
         return f"{tilde(skill_md)} was left alone: {refusal}"

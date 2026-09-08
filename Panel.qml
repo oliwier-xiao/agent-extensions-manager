@@ -235,6 +235,8 @@ Panel {
   function runCategory(argv, done) {
     if (catProc.running) { root.flashResult("One at a time", "error"); return }
     catProc.pending = done || ""
+    catProc.inflight = true
+    catWatchdog.restart()
     root.startHelper(catProc, ["category"].concat(argv))
   }
 
@@ -720,12 +722,85 @@ Panel {
     onTriggered: if (scanProc.running) scanProc.signal(9)
   }
 
+  // The same deadline the scan has always had, for the two verbs that write and
+  // the one that files. The scan's own timeout message names the hazard --
+  // "a skill root may be on a network mount" -- and every one of these walks the
+  // same roots: the helper re-stats each path at the moment it acts, and on a
+  // hung mount that blocks in uninterruptible sleep with nothing bounding it.
+  // Without this the panel's writing half simply stops: both openers refuse a
+  // second run while the first is alive, so one wedged helper leaves the row
+  // that asked with no answer, no timeout and no way out short of reloading the
+  // shell.
+  //
+  // Reported, never killed. A removal that is still going is a filesystem change
+  // in progress and its own report is the only record of which paths went; and a
+  // signalled helper skips the cleanup that unlinks its temp file, which would
+  // strand a SKILL.md.tmp in somebody else's skill directory with nothing to
+  // sweep it. So the deadline buys a sentence, not an interrupt.
+  //
+  // `reported` is set first so a late answer from a helper that did come back
+  // cannot flash a second line contradicting this one.
+  component WriteWatchdog: Timer {
+    id: ww
+    property string what: ""
+    property string advice: ""
+    signal fired()
+    onTriggered: ww.fired()
+    function say() {
+      return "The " + ww.what + " did not finish in " + Math.round(ww.interval / 1000)
+        + " s. A skill root may be on a network mount." + (ww.advice !== "" ? " " + ww.advice : "")
+    }
+  }
+
+  WriteWatchdog {
+    id: removeWatchdog
+    what: "removal"
+    // Thirty seconds a path is what the helper allows `gio trash`, spent one
+    // path at a time, plus room for the re-stat that precedes them.
+    interval: Math.max(60000, 30000 * removeProc.paths + 15000)
+    onFired: {
+      if (!removeProc.inflight) return
+      removeProc.reported = true
+      root.flashResult(removeWatchdog.say() + " Run it in a terminal: "
+                       + root.helperPath + " remove --dry-run", "error")
+    }
+  }
+
+  WriteWatchdog {
+    id: describeWatchdog
+    what: "description"
+    interval: 15000
+    onFired: {
+      if (!describeProc.inflight) return
+      describeProc.reported = true
+      root.describeQueue = []
+      root.flashResult(describeWatchdog.say(), "error")
+    }
+  }
+
+  WriteWatchdog {
+    id: catWatchdog
+    what: "change"
+    interval: 10000
+    onFired: {
+      if (!catProc.inflight) return
+      catProc.inflight = false
+      root.flashResult(catWatchdog.say(), "error")
+    }
+  }
+
   Process {
     id: catProc
     // What to say when it works. Set per call so the message names the change.
     property string pending: ""
+    // The panel's own, not the process object's, for the reason the scan keeps
+    // `scanning`: it has to be true at the moment the deadline is judged rather
+    // than at the moment the process noticed it had exited.
+    property bool inflight: false
     stdout: StdioCollector { waitForEnd: true }
     onExited: function (exitCode, exitStatus) {
+      catWatchdog.stop()
+      catProc.inflight = false
       if (exitCode === 0) {
         if (catProc.pending !== "") root.flashResult(catProc.pending, "ok")
         // The store the classifier reads has changed, so the answer on screen is
@@ -760,6 +835,8 @@ Panel {
     removeProc.label = String(label || "")
     removeProc.reported = false
     removeProc.inflight = true
+    removeProc.paths = paths.length
+    removeWatchdog.restart()
     root.startHelper(removeProc, ["remove", "--"].concat(paths))
   }
 
@@ -816,6 +893,9 @@ Panel {
     // What was under the cursor when this was sent, so the answer can still name
     // it after the rescan has taken the row away.
     property string label: ""
+    // How many paths went with this run, so the deadline can be what the helper
+    // is actually allowed to spend rather than one flat number.
+    property int paths: 0
     // Whether the helper's own report has been read, and whether the run is
     // still going. Both are the panel's own, rather than the process's, for the
     // reason the scan keeps `scanning`: they have to be true at the moment the
@@ -832,6 +912,7 @@ Panel {
     }
 
     onExited: function (exitCode, exitStatus) {
+      removeWatchdog.stop()
       removeProc.inflight = false
       // Re-read whatever happened, a run that removed nothing included. More
       // rows than this one can be stale by the end: a skill reached through a
@@ -884,6 +965,7 @@ Panel {
     describeProc.code = -1
     describeProc.reported = false
     describeProc.inflight = true
+    describeWatchdog.restart()
     root.startHelper(describeProc, ["describe"].concat(job.argv))
   }
 
@@ -956,6 +1038,7 @@ Panel {
 
     onExited: function (exitCode, exitStatus) {
       describeProc.code = exitCode
+      describeWatchdog.stop()
       describeProc.inflight = false
       Qt.callLater(root.settleDescribe)
     }
@@ -1181,7 +1264,18 @@ Panel {
       category: String(tax.category || "agents"),
       glyph: root.clean(tax.glyph, 4),
       name: name,
+      // Two of them, for the reason the two removal paths already give: one is
+      // drawn and one travels. `dirName` is the display string and goes through
+      // clean() like every other drawn string; `dirKey` is what names the skill
+      // to the helper, and clean() would be the wrong thing to do to it --
+      // collapsing runs of whitespace makes `data  science` into a name no
+      // directory on this disk has, and the helper matches a name rather than
+      // tidying it, so what came back was a store keyed to nothing and a toast
+      // reporting a move that never happened. The helper has already stripped
+      // control characters from this on the way out; the bound is all that is
+      // left to apply.
       dirName: root.clean(item.dirName, 128),
+      dirKey: String(item.dirName || "").slice(0, 128),
       badge: "SKILL",
       scope: item.scope === "bundled" ? "built-in" : root.clean(item.scope, 16),
       tools: {
@@ -1227,6 +1321,15 @@ Panel {
         // The hint as its author wrote it, so the picker's list can be checked
         // against the source rather than trusted.
         { label: "arguments", value: root.clean(item.argumentHint, 200) },
+        // What the author declared, where they declared anything: `version:` in
+        // the frontmatter, or `metadata.version` under it. Most skills declare
+        // neither and this row simply is not drawn for them. It is the same
+        // string that decides whether two copies of one name are one release
+        // built twice or one copy left behind, so seeing it is how a drift
+        // report can be checked rather than believed. It is not a claim about
+        // anything upstream: nothing here fetches, and a skill directory carries
+        // no remote to fetch from.
+        { label: "version", value: root.clean(item.declaredVersion, 32) },
         // Where the shelf came from, which is the thing worth knowing when the
         // shelf is wrong. Which shelf it is has its own control above.
         //
@@ -2208,7 +2311,7 @@ Panel {
   // modification time nobody can account for.
   function describeSave() {
     var row = root.pickerRow
-    var dir = row && row.view ? root.clean(row.view.dirName, 128) : ""
+    var dir = row && row.view ? String(row.view.dirKey || "") : ""
     if (dir === "") { root.describeAsking = false; root.closePicker(); return }
     var note = root.describeNote.trim()
     var text = root.describeText.trim()
@@ -2418,6 +2521,14 @@ Panel {
     root.pickerNaming = false
     root.pickerText = ""
     root.pickerIndex = 0
+    // Both unsaved-changes questions, not just the one this screen asks. They
+    // are two flags because they belong to two editors, but the overlay they are
+    // drawn on is one surface: a `styleAsking` left standing after the category
+    // editor closed put its own heading and its own question -- "save the new
+    // name and colour" -- over the description editor the next time one opened,
+    // above two fields that have neither. It read as a prompt about work nobody
+    // had done, in a window that had just been asked to open clean.
+    root.styleAsking = false
     root.describeAsking = false
     root.describeNote = ""
     root.describeNoteBase = ""
@@ -2499,7 +2610,7 @@ Panel {
     if (root.pickerMode === "category") {
       var chips = root.pickerChips()
       var pick = chips[root.pickerIndex]
-      var dir = root.pickerRow ? root.clean(root.pickerRow.view.dirName, 128) : ""
+      var dir = root.pickerRow ? String(root.pickerRow.view.dirKey || "") : ""
       if (!dir) { root.closePicker(); return }
       if (pick === "\u0000new") {
         var fresh = root.newCategoryName()
@@ -2589,7 +2700,7 @@ Panel {
     // rule and the same order as the removal below.
     if (root.pickerMode === "reset") {
       if (!root.describeResettable() || root.pickerIndex !== 1) { root.closePicker(); return }
-      var dirReset = root.clean(root.pickerRow.view.dirName, 128)
+      var dirReset = String(root.pickerRow.view.dirKey || "")
       var fileReset = root.describeTarget(root.pickerRow)
       var namedReset = root.clean(root.pickerRow.view.name, 60)
       root.closePicker()
