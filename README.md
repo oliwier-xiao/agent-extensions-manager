@@ -69,7 +69,7 @@ The coloured bar down the left is its category.
 
 ### Inside a row
 
-![The top of an opened skill](docs/card.png)
+![A skill opened](docs/card.png)
 
 Open a row and it stops summarising. The description is the one the agents actually read — the text costing
 you the tokens in the corner. Under it, the state each agent has this skill in and **the file that state is
@@ -179,7 +179,7 @@ way of knowing was still a draft.
 
 ## Your own notes
 
-![The note field, in the editor `^D` opens](docs/describe.png)
+![Writing a note about a skill](docs/describe.png)
 
 `^D` on an open row, or **note** in the corner of its card. It starts empty, it is drawn above the
 description in that skill's card, no agent ever sees it, and it is in no figure anywhere. Write what the
