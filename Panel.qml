@@ -1,4 +1,5 @@
 import QtQuick
+import QtQml.Models
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -370,6 +371,23 @@ Panel {
   property string pickerText: ""
   property int pickerIndex: 0
   readonly property bool pickerOpen: root.pickerMode !== ""
+
+  // DND-LANE chip-drag state. While a shelf chip is held, the working order
+  // lives in shelvesChipModel (moved with ListModel.move so delegates persist
+  // and the Flow slides); shelvesDragOrder mirrors the shelf-key order (null
+  // when not dragging) for the single order-set persist on drop. dragHeld
+  // freezes keyboard stepping + hover select while the pointer owns the grid.
+  property bool dragHeld: false
+  property bool reduceMotion: false
+  property var shelvesDragOrder: null
+  property string shelvesDragCat: ""
+  property var dragStartChips: []
+  property int shelvesDropTarget: -1
+  property real shelvesGhostX: 0
+  property real shelvesGhostY: 0
+  property var lastShelvesOrder: []
+  property bool shelvesUndoArmed: false
+  property string shelvesUndoText: ""
 
   // Twelve swatches, the whole colour vocabulary a category can be given. A free
   // hex field would be a text editor this panel does not have, and twelve
@@ -1281,7 +1299,9 @@ Panel {
 
     var keys = []
     if (mode === "Category") {
-      var cats = root.knownCategories()
+      // Group headers follow the display order, not the stored order: in
+      // count modes the biggest shelf leads, in custom the hand arrangement.
+      var cats = root.orderedCategories()
       for (var c = 0; c < cats.length; c++)
         if (buckets["cat:" + cats[c]]) keys.push("cat:" + cats[c])
       if (buckets["cat:_servers"]) keys.push("cat:_servers")
@@ -1409,19 +1429,18 @@ Panel {
       if (!root.passes(v, "category", query)) continue
       counts[v.category] = (counts[v.category] || 0) + 1
     }
-    var order = root.knownCategories()
+    var order = root.orderedCategories()
+    var rankByKey = ({})
+    for (var r = 0; r < order.length; r++) rankByKey[order[r]] = r
     for (var c = 0; c < order.length; c++)
       if (counts[order[c]])
         out.push({ key: order[c], label: root.categoryLabelFor(order[c]),
                    count: counts[order[c]], colour: root.categoryColourFor(order[c]),
-                   rank: c })
-    // Fullest shelf first, so the row that survives the fold is the row worth
-    // keeping. The stored order breaks ties rather than leaving it to the sort,
-    // so two shelves of equal size never swap places between rescans.
-    //
-    // The counts are faceted, so picking a shelf does not reorder the shelves;
-    // only changing a different filter, or typing, can move them.
-    out.sort(function (a, b) { return b.count - a.count || a.rank - b.rank })
+                   rank: rankByKey[order[c]] })
+    // Order comes from orderedCategories (count-desc / count-asc / custom);
+    // the counts above stay faceted (passes with "category" excepted) so
+    // picking a shelf never reorders the strip, only other filters move it.
+    out.sort(function (a, b) { return a.rank - b.rank })
     return out
   }
 
@@ -1693,16 +1712,16 @@ Panel {
       return hits
     }
     if (root.pickerMode === "shelves") {
-      var all = root.knownCategories()
+      // Display order, already sorted by orderedCategories (count / custom).
+      // No inline sort here so the index and the filter strip cannot disagree
+      // about which shelf is the important one.
+      var all = root.orderedCategories()
       var q2 = root.pickerText.toLowerCase()
       var out2 = []
       for (var k = 0; k < all.length; k++)
         if (q2 === "" || all[k].indexOf(q2) >= 0
             || root.categoryLabelFor(all[k]).toLowerCase().indexOf(q2) >= 0)
           out2.push(all[k])
-      // Biggest first, the same order the filter strip uses, so the two views of
-      // the same shelves do not disagree about which one is the important one.
-      out2.sort(function (a, b) { return root.shelfCount(b) - root.shelfCount(a) })
       // Typing a name nothing answers to offers it at the top, which is the fast
       // path once you know it exists. The standing chip at the end is how you
       // find out: an affordance you can see beats one you have to discover by
@@ -1745,6 +1764,213 @@ Panel {
     var out = []
     for (var i = 0; i < order.length; i++) out.push(String(order[i]))
     return out
+  }
+
+  // DND-LANE note: canonical orderedCategories() lives just below next to
+  // categoryOrderMode(); the chip-drag helpers below consume it. There is
+  // exactly one order source; the shelves Repeater mirrors it (see
+  // syncShelvesChipModel) and the working order during a drag.
+
+  // DND-LANE single persist point: exactly one order-set verb per drop, which
+  // forces custom mode server-side. Failure relies on the existing error toast
+  // + rescan rollback (no custom rollback animation).
+  function syncShelvesOrderToPython(fullOrder, movedCat) {
+    var order = []
+    for (var i = 0; i < fullOrder.length; i++) order.push(String(fullOrder[i]))
+    root.runCategory(["order", "set"].concat(order), "")
+    var label = root.categoryLabelFor(String(movedCat))
+    root.shelvesUndoText = "Moved " + label + " to position "
+      + String(order.indexOf(String(movedCat)) + 1)
+    root.shelvesUndoArmed = true
+    root.flashResult(root.shelvesUndoText + " - Undo below", "ok")
+  }
+
+  // Undo restores the pre-drag order snapshot via a single order-set verb.
+  function restoreShelvesOrder() {
+    if (!root.shelvesUndoArmed) return
+    var prev = root.lastShelvesOrder || []
+    if (prev.length === 0) { root.shelvesUndoArmed = false; return }
+    root.runCategory(["order", "set"].concat(prev), "Previous order restored")
+    root.shelvesUndoArmed = false
+    root.shelvesUndoText = ""
+  }
+
+  // The shelves Repeater renders this model instead of a fresh pickerChips()
+  // array, so ListModel.move() reuses delegates and the Flow slides them.
+  // Synced whenever the display chips would change and no drag is held.
+  ListModel { id: shelvesChipModel }
+
+  function syncShelvesChipModel() {
+    if (root.dragHeld || root.pickerMode !== "shelves") return
+    var chips = root.pickerChips()
+    shelvesChipModel.clear()
+    for (var i = 0; i < chips.length; i++)
+      shelvesChipModel.append({ modelData: String(chips[i]) })
+  }
+
+  Connections {
+    target: root
+    function onReportChanged() { root.syncShelvesChipModel() }
+    function onPickerTextChanged() { root.syncShelvesChipModel() }
+    function onPickerModeChanged() { root.syncShelvesChipModel() }
+    function onPickerNamingChanged() { root.syncShelvesChipModel() }
+  }
+
+  // Model row holding a shelf key, or -1. Special \0 chips never match.
+  function shelvesRowOf(cat) {
+    for (var i = 0; i < shelvesChipModel.count; i++)
+      if (String(shelvesChipModel.get(i).modelData) === String(cat)) return i
+    return -1
+  }
+
+  // DND-LANE drag start: snapshot the full pre-drag display order (for Undo)
+  // and the current chip row (for Escape restore), then take the pointer.
+  function beginShelvesDrag(cat) {
+    if (root.dragHeld || root.pickerMode !== "shelves" || root.pickerNaming) return
+    root.lastShelvesOrder = root.orderedCategories()
+    var snap = []
+    for (var i = 0; i < shelvesChipModel.count; i++)
+      snap.push(String(shelvesChipModel.get(i).modelData))
+    root.dragStartChips = snap
+    var grid = []
+    for (var j = 0; j < snap.length; j++)
+      if (snap[j].charCodeAt(0) !== 0) grid.push(snap[j])
+    root.shelvesDragOrder = grid
+    root.shelvesDragCat = String(cat)
+    root.shelvesUndoArmed = false
+    root.shelvesDropTarget = root.shelvesRowOf(cat)
+    root.dragHeld = true
+  }
+
+  // DND-LANE drag move: hit-test the Flow, splice the working order on a new
+  // shelf target, move the ghost. Special chips are never drop targets.
+  function moveShelvesDrag(area, mx, my) {
+    if (!root.dragHeld) return
+    var p = area.mapToItem(optionFlow, mx, my)
+    var hit = optionFlow.childAt(p.x, p.y)
+    if (hit && hit.index !== undefined && hit.modelData !== undefined) {
+      var tv = String(hit.modelData)
+      if (tv.charCodeAt(0) !== 0 && tv !== root.shelvesDragCat) {
+        var from = root.shelvesRowOf(root.shelvesDragCat)
+        if (from >= 0 && from !== hit.index) {
+          shelvesChipModel.move(from, hit.index, 1)
+          var order = []
+          for (var i = 0; i < shelvesChipModel.count; i++) {
+            var v = String(shelvesChipModel.get(i).modelData)
+            if (v.charCodeAt(0) !== 0) order.push(v)
+          }
+          root.shelvesDragOrder = order
+          root.shelvesDropTarget = hit.index
+        } else if (from === hit.index) {
+          root.shelvesDropTarget = hit.index
+        }
+      } else if (tv === root.shelvesDragCat) {
+        root.shelvesDropTarget = hit.index
+      }
+    }
+    var g = area.mapToItem(picker, mx, my)
+    root.shelvesGhostX = g.x - shelvesGhost.implicitWidth / 2
+    root.shelvesGhostY = g.y - Style.space(14)
+  }
+
+  // DND-LANE drop: one order-set with the full new display order (working grid
+  // order + off-grid keys appended in stored order so nothing is lost), but
+  // only when the grid order actually changed. A press without a move persists
+  // nothing and stays in the current sort mode.
+  function endShelvesDrag() {
+    if (!root.dragHeld) return
+    var movedCat = root.shelvesDragCat
+    var working = (root.shelvesDragOrder || []).slice()
+    var q = root.pickerText.toLowerCase()
+    var pre = []
+    var prev = root.lastShelvesOrder || []
+    for (var i = 0; i < prev.length; i++) {
+      var k = String(prev[i])
+      if (q === "" || k.indexOf(q) >= 0
+          || root.categoryLabelFor(k).toLowerCase().indexOf(q) >= 0) pre.push(k)
+    }
+    var changed = working.length !== pre.length
+    if (!changed) for (var j = 0; j < working.length; j++)
+      if (working[j] !== pre[j]) { changed = true; break }
+    var seen = ({}), full = []
+    for (var a = 0; a < working.length; a++) {
+      if (seen[working[a]]) continue
+      seen[working[a]] = true
+      full.push(working[a])
+    }
+    for (var b = 0; b < prev.length; b++)
+      if (!seen[prev[b]]) full.push(prev[b])
+    root.shelvesDragOrder = null
+    root.shelvesDragCat = ""
+    root.dragStartChips = []
+    root.shelvesDropTarget = -1
+    root.dragHeld = false
+    var chips = root.pickerChips()
+    var at = chips.indexOf(movedCat)
+    if (at >= 0) root.pickerIndex = at
+    if (changed && movedCat !== "") root.syncShelvesOrderToPython(full, movedCat)
+  }
+
+  // DND-LANE Escape: put the pre-drag chip row back locally; nothing persists.
+  function cancelShelvesDrag() {
+    if (!root.dragHeld) return
+    var snap = root.dragStartChips || []
+    shelvesChipModel.clear()
+    for (var i = 0; i < snap.length; i++)
+      shelvesChipModel.append({ modelData: snap[i] })
+    root.shelvesDragOrder = null
+    root.shelvesDragCat = ""
+    root.dragStartChips = []
+    root.shelvesDropTarget = -1
+    root.dragHeld = false
+  }
+
+  // Display order for shelves, honouring report.categories.orderMode. The
+  // backend lane owns the store; this only reads it, so a report without
+  // order/orderMode (old helper, mid-migration rescan) falls back to today's
+  // behaviour: biggest shelf first, ties by stored order.
+  // DND-LANE: shelves list model source = orderedCategories()
+  property string dragHookOrderSource: "orderedCategories"
+
+  function categoryOrderMode() {
+    var meta = root.report && root.report.categories ? root.report.categories : null
+    var m = meta ? String(meta.orderMode || "") : ""
+    if (m === "custom" || m === "count-asc" || m === "count-desc") return m
+    return "count-desc"
+  }
+
+  function orderedCategories() {
+    var known = root.knownCategories()
+    var mode = root.categoryOrderMode()
+    if (mode === "custom") {
+      // Sanitized stored order: only keys still present, then any known key
+      // missing from the store appended in known order so a newly created
+      // shelf is never lost from the display.
+      var meta = root.report && root.report.categories ? root.report.categories : null
+      var stored = meta && meta.order && typeof meta.order.length === "number" ? meta.order : []
+      var seen = ({})
+      var out = []
+      for (var s = 0; s < stored.length; s++) {
+        var k = String(stored[s])
+        if (known.indexOf(k) < 0 || seen[k]) continue
+        seen[k] = true
+        out.push(k)
+      }
+      for (var n = 0; n < known.length; n++)
+        if (!seen[known[n]]) out.push(known[n])
+      return out
+    }
+    // Count modes sort by live shelf size; the stored order only breaks ties
+    // so equal shelves never swap places between rescans. Colour stays keyed
+    // by stable categoryOrder (see categoryTint), position never affects it.
+    var rank = ({})
+    for (var r = 0; r < known.length; r++) rank[known[r]] = r
+    var sorted = known.slice()
+    if (mode === "count-asc")
+      sorted.sort(function (a, b) { return root.shelfCount(a) - root.shelfCount(b) || rank[a] - rank[b] })
+    else
+      sorted.sort(function (a, b) { return root.shelfCount(b) - root.shelfCount(a) || rank[a] - rank[b] })
+    return sorted
   }
 
   function categoryLabelFor(cat) {
@@ -1879,6 +2105,7 @@ Panel {
   // The grid cursor and the draft colour are the same thing while the swatches
   // are on screen, so arrowing and clicking both preview and neither commits.
   onPickerIndexChanged: {
+    if (root.dragHeld) return
     if (root.pickerMode === "style" && !root.styleAsking)
       root.styleColourIndex = root.pickerIndex
   }
@@ -3920,7 +4147,12 @@ Panel {
         if (root.pickerOpen) {
           event.accepted = true
           var count = root.pickerChips().length
-          if (event.key === Qt.Key_Escape) { root.pickerBack(); return }
+          if (event.key === Qt.Key_Escape) {
+            // DND-LANE: Escape cancels a held chip drag and puts the pre-drag
+            // row back locally; otherwise it backs out as before.
+            if (root.dragHeld) { root.cancelShelvesDrag(); return }
+            root.pickerBack(); return
+          }
           if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             root.pickerConfirm(); return
           }
@@ -3957,6 +4189,14 @@ Panel {
           // the modulo below is a division by zero, the cursor becomes NaN, and
           // the overlay stops answering keys until it is closed.
           if (count === 0) return
+          // DND-LANE guard: while a chip drag holds the grid, keyboard stepping
+          // and typing must not fight the live working order (Alt+Arrow lives
+          // in the sibling lane and is left untouched). Escape cancels the drag
+          // above and restores the pre-drag row locally.
+          if (root.dragHeld) {
+            event.accepted = true
+            return
+          }
           if (event.key === Qt.Key_Right || event.key === Qt.Key_Tab
               || (ctrl && event.key === Qt.Key_N)) {
             root.pickerIndex = (root.pickerIndex + 1) % count; return
@@ -3967,6 +4207,20 @@ Panel {
           }
           // Down and Up move by a row of chips rather than one, which is what
           // the eye expects of a grid. The step matches the layout's own count.
+          // Alt+Up/Down on the shelves index reorders instead of moving: the
+          // backend forces custom on every move, and the rescan redraws the
+          // chips, so no optimistic local update is needed here.
+          if ((event.modifiers & Qt.AltModifier) !== 0
+              && root.pickerMode === "shelves" && !root.pickerNaming
+              && (event.key === Qt.Key_Up || event.key === Qt.Key_Down)) {
+            var focused = root.pickerChips()[root.pickerIndex]
+            if (focused !== undefined && String(focused).charCodeAt(0) !== 0) {
+              var step = event.key === Qt.Key_Up ? "-1" : "+1"
+              root.runCategory(["order", "move", String(focused), step],
+                root.categoryLabelFor(String(focused)) + " moved")
+            }
+            return
+          }
           if (event.key === Qt.Key_Down) {
             root.pickerIndex = Math.min(count - 1, root.pickerIndex + optionFlow.perRow); return
           }
@@ -5516,6 +5770,112 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
+          // Sort order for the shelves, as a segmented control rather than a
+          // menu: three states fit beside each other and the active one reads
+          // by weight plus border, not colour alone. Clicking only sends
+          // sort-mode, so the filter text and the highlighted chip survive it;
+          // the rescan redraws the chips in the new order underneath.
+          // ASCII labels on purpose: the panel font mangles diacritics here.
+          Row {
+            width: parent.width
+            visible: picker.managing && !root.pickerNaming
+            spacing: Style.spacing.sm
+
+            Text {
+              height: Style.space(28)
+              verticalAlignment: Text.AlignVCenter
+              textFormat: Text.PlainText
+              text: "Sort:"
+              color: root.soft
+              font.family: root.face
+              font.pixelSize: Style.font.caption
+            }
+
+            BorderSurface {
+              implicitWidth: sortMost.implicitWidth + Style.space(22)
+              implicitHeight: Style.space(28)
+              radius: Style.cornerRadius
+              color: root.categoryOrderMode() === "count-desc"
+                ? Util.alpha(root.hue, 0.26) : Util.alpha(root.fg, 0.07)
+              borderSpec: Border.controlSpec(
+                root.categoryOrderMode() === "count-desc" ? "hover-cursor" : "normal",
+                root.fg, root.hue)
+              Text {
+                id: sortMost
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "Most first"
+                color: root.categoryOrderMode() === "count-desc" ? root.fg : root.readable
+                font.family: root.face
+                font.pixelSize: Style.font.bodySmall
+                font.bold: root.categoryOrderMode() === "count-desc"
+              }
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.runCategory(["sort-mode", "count-desc"],
+                  "Sorted: biggest first")
+              }
+            }
+
+            BorderSurface {
+              implicitWidth: sortLeast.implicitWidth + Style.space(22)
+              implicitHeight: Style.space(28)
+              radius: Style.cornerRadius
+              color: root.categoryOrderMode() === "count-asc"
+                ? Util.alpha(root.hue, 0.26) : Util.alpha(root.fg, 0.07)
+              borderSpec: Border.controlSpec(
+                root.categoryOrderMode() === "count-asc" ? "hover-cursor" : "normal",
+                root.fg, root.hue)
+              Text {
+                id: sortLeast
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "Least first"
+                color: root.categoryOrderMode() === "count-asc" ? root.fg : root.readable
+                font.family: root.face
+                font.pixelSize: Style.font.bodySmall
+                font.bold: root.categoryOrderMode() === "count-asc"
+              }
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.runCategory(["sort-mode", "count-asc"],
+                  "Sorted: smallest first")
+              }
+            }
+
+            BorderSurface {
+              implicitWidth: sortOwn.implicitWidth + Style.space(22)
+              implicitHeight: Style.space(28)
+              radius: Style.cornerRadius
+              color: root.categoryOrderMode() === "custom"
+                ? Util.alpha(root.hue, 0.26) : Util.alpha(root.fg, 0.07)
+              borderSpec: Border.controlSpec(
+                root.categoryOrderMode() === "custom" ? "hover-cursor" : "normal",
+                root.fg, root.hue)
+              Text {
+                id: sortOwn
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "Custom"
+                color: root.categoryOrderMode() === "custom" ? root.fg : root.readable
+                font.family: root.face
+                font.pixelSize: Style.font.bodySmall
+                font.bold: root.categoryOrderMode() === "custom"
+              }
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.runCategory(["sort-mode", "custom"],
+                  "Order: custom")
+              }
+            }
+          }
+
           // What removing this would mean, in the helper's words and the
           // helper's paths: the sentence it gave for the mode it chose, one
           // chip per path that will be sent, and what the agents on this
@@ -5629,6 +5989,17 @@ Panel {
               width: parent.width
               spacing: Style.spacing.sm
 
+              // DND-LANE: neighbors slide while a shelf chip is dragged. The
+              // shelves Repeater keeps delegates alive across ListModel.move,
+              // so the positioner animates instead of rebuilding.
+              move: Transition {
+                NumberAnimation {
+                  properties: "x,y"
+                  duration: root.reduceMotion ? 0 : 160
+                  easing.type: Easing.OutCubic
+                }
+              }
+
               // What Down and Up step by. Measured from the laid-out chips
               // rather than assumed, so it stays right at any panel width or
               // font scale. The width test matters: the Repeater is a child of
@@ -5646,7 +6017,10 @@ Panel {
               }
 
               Repeater {
-                model: root.pickerChips()
+                // DND-LANE: shelves render the persistent chip model so a drag
+                // can move rows without rebuilding delegates; every other mode
+                // keeps today's array exactly as before.
+                model: root.pickerMode === "shelves" ? shelvesChipModel : root.pickerChips()
 
                 BorderSurface {
                   id: chip
@@ -5671,18 +6045,29 @@ Panel {
                   readonly property bool isShelf: picker.shelfList && !chip.isNew
                     && !chip.isAddNew && !chip.isPlacedBy
 
+                  // DND-LANE: the held chip renders as its placeholder slot
+                  // while the ghost follows the pointer; the live drop target
+                  // gets the accent border. Special \0 chips never take part.
+                  readonly property bool isDragged: root.dragHeld && picker.managing
+                    && chip.isShelf && String(chip.modelData) === root.shelvesDragCat
+                  readonly property bool dropHere: root.dragHeld && picker.managing
+                    && !chip.isDragged && chip.isShelf
+                    && root.shelvesDropTarget === chip.index
+
                   implicitWidth: chip.isSwatch && !chip.isClear
                     ? Style.space(30) : chipRowInner.implicitWidth + Style.space(22)
                   implicitHeight: Style.space(28)
                   radius: Style.cornerRadius
+                  opacity: chip.isDragged ? 0.35 : 1
                   color: {
                     if (chip.isSwatch && !chip.isClear)
                       return Util.alpha(String(chip.modelData), chip.current ? 1.0 : 0.72)
                     if (chip.current) return Util.alpha(root.hue, 0.26)
                     return Util.alpha(root.fg, 0.07)
                   }
-                  borderSpec: Border.controlSpec(chip.current ? "hover-cursor" : "normal",
-                                                 root.fg, root.hue)
+                  borderSpec: Border.controlSpec(
+                    chip.current || chip.dropHere ? "hover-cursor" : "normal",
+                    root.fg, root.hue)
 
                   Row {
                     id: chipRowInner
@@ -5741,12 +6126,57 @@ Panel {
                     }
                   }
 
+                  // DND-LANE: shelf chips drag to reorder (press, move past ~8px).
+                  // No grip and no press-and-hold delay: the targets are small
+                  // and hover/click/Enter keep working untouched underneath.
                   MouseArea {
+                    id: chipMouse
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onEntered: root.pickerIndex = chip.index
+                    preventStealing: picker.managing && chip.isShelf
+
+                    property bool armed: false
+                    property bool wasDrag: false
+                    property real pressX: 0
+                    property real pressY: 0
+
+                    onEntered: {
+                      if (root.dragHeld) return
+                      root.pickerIndex = chip.index
+                    }
+                    onPressed: function (mouse) {
+                      armed = picker.managing && chip.isShelf && !root.pickerNaming
+                      wasDrag = false
+                      pressX = mouse.x
+                      pressY = mouse.y
+                    }
+                    onPositionChanged: function (mouse) {
+                      if (!armed) return
+                      if (!root.dragHeld) {
+                        if (Math.hypot(mouse.x - pressX, mouse.y - pressY) < 8) return
+                        if (String(chip.modelData).charCodeAt(0) === 0) { armed = false; return }
+                        root.beginShelvesDrag(String(chip.modelData))
+                        if (!root.dragHeld) { armed = false; return }
+                        wasDrag = true
+                      }
+                      root.moveShelvesDrag(chipMouse, mouse.x, mouse.y)
+                    }
+                    onReleased: {
+                      if (!armed) return
+                      armed = false
+                      if (root.dragHeld
+                          && String(chip.modelData) === root.shelvesDragCat)
+                        root.endShelvesDrag()
+                    }
+                    onCanceled: {
+                      armed = false
+                      if (root.dragHeld
+                          && String(chip.modelData) === root.shelvesDragCat)
+                        root.cancelShelvesDrag()
+                    }
                     onClicked: {
+                      if (wasDrag) { wasDrag = false; return }
                       root.pickerIndex = chip.index
                       // Trying a colour on is not choosing it. Everywhere else a
                       // chip is the answer, so clicking it answers.
@@ -5756,6 +6186,49 @@ Panel {
                   }
                 }
               }
+            }
+          }
+
+          // DND-LANE undo: appears after a chip drop; restores the pre-drag
+          // full order with one order-set verb. Big-button UI stays sort-only.
+          Row {
+            width: parent.width
+            visible: picker.managing && root.shelvesUndoArmed
+            height: visible ? Style.space(28) : 0
+            spacing: Style.spacing.sm
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: root.shelvesUndoText
+              color: root.readable
+              font.family: root.face
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+              width: Math.max(0, parent.width - undoChip.width - Style.spacing.sm)
+            }
+
+            BorderSurface {
+              id: undoChip
+              anchors.verticalCenter: parent.verticalCenter
+              implicitWidth: undoText.implicitWidth + Style.space(22)
+              implicitHeight: Style.space(28)
+              radius: Style.cornerRadius
+              color: Util.alpha(root.hue, 0.26)
+              borderSpec: Border.controlSpec("hover-cursor", root.fg, root.hue)
+
+              Text {
+                id: undoText
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "Undo"
+                color: root.fg
+                font.family: root.face
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              TapHandler { onTapped: root.restoreShelvesOrder() }
+              HoverHandler { cursorShape: Qt.PointingHandCursor }
             }
           }
 
@@ -5782,6 +6255,57 @@ Panel {
             elide: Text.ElideRight
           }
         }
+        }
+
+        // DND-LANE drag ghost: follows the pointer while a shelf chip is held.
+        // The source chip stays in the Flow as a dimmed placeholder so the
+        // layout never collapses; neighbors slide via optionFlow.move.
+        BorderSurface {
+          id: shelvesGhost
+          visible: root.dragHeld && picker.managing && root.shelvesDragCat !== ""
+          x: root.shelvesGhostX
+          y: root.shelvesGhostY
+          z: 50
+          implicitWidth: ghostInner.implicitWidth + Style.space(22)
+          implicitHeight: Style.space(28)
+          radius: Style.cornerRadius
+          opacity: 0.92
+          scale: 1.03
+          color: Util.alpha(root.hue, 0.26)
+          borderSpec: Border.controlSpec("hover-cursor", root.fg, root.hue)
+
+          Row {
+            id: ghostInner
+            anchors.centerIn: parent
+            spacing: Style.spacing.sm
+
+            Rectangle {
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(7)
+              height: Style.space(7)
+              radius: width / 2
+              color: root.categoryColourFor(root.shelvesDragCat)
+            }
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: root.categoryLabelFor(root.shelvesDragCat)
+              color: root.fg
+              font.family: root.face
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: root.shelfCount(root.shelvesDragCat) > 0
+                ? String(root.shelfCount(root.shelvesDragCat)) : "empty"
+              color: root.readable
+              font.family: root.face
+              font.pixelSize: Style.font.caption
+            }
+          }
         }
       }
     }

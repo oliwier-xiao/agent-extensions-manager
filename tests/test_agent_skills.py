@@ -664,6 +664,7 @@ class CategoryStore(unittest.TestCase):
         finally:
             ax.STORE_PATH = saved
         self.assertEqual(store, {"custom": [], "assign": {}, "labels": {}, "colors": {},
+                                 "order": [], "orderMode": "count-desc",
                                  "hidePlacedBy": False})
 
     def test_placed_by_is_shown_until_a_store_says_otherwise(self):
@@ -1546,6 +1547,161 @@ class ReadOnlyOverEverythingElse(unittest.TestCase):
                          open(os.path.join(dp, p), "rb").read())
                      for dp, _, fs in os.walk(home) for p in fs}
             self.assertEqual(before, after)
+
+
+class CategoryOrderTest(unittest.TestCase):
+    """The shelf order: an explicit list plus the mode that draws it.
+
+    Every verb below points the helper at a throwaway store, the way
+    CategoryAssign does: STORE_DIR and STORE_PATH are moved into a temporary
+    directory before a single verb runs, so no test can file anything on a
+    real machine.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        for name in ("STORE_DIR", "STORE_PATH"):
+            self.addCleanup(setattr, ax, name, getattr(ax, name))
+        ax.STORE_DIR = os.path.join(self._tmp.name, "agent-skills")
+        ax.STORE_PATH = os.path.join(ax.STORE_DIR, "categories.json")
+
+    def cli(self, argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = ax.main(list(argv))
+        return code, out.getvalue()
+
+    def stored_bytes(self):
+        if not os.path.exists(ax.STORE_PATH):
+            return None
+        with open(ax.STORE_PATH, "rb") as fh:
+            return fh.read()
+
+    def test_set_forces_custom_and_round_trips_through_get(self):
+        code, _ = self.cli(["category", "order", "set", "web", "code", "agents"])
+        self.assertEqual(code, 0)
+        store = ax.read_store()
+        self.assertEqual(store["order"], ["web", "code", "agents"])
+        self.assertEqual(store["orderMode"], "custom")
+        code, text = self.cli(["category", "order", "get"])
+        self.assertEqual(code, 0)
+        payload = json.loads(text)
+        self.assertEqual(payload["orderMode"], "custom")
+        self.assertEqual(payload["order"], ax.known_categories(store))
+        self.assertEqual(payload["order"][:3], ["web", "code", "agents"])
+
+    def test_move_absolute_then_relative_steps(self):
+        code, _ = self.cli(["category", "order", "set", "web", "code", "agents"])
+        self.assertEqual(code, 0)
+        code, _ = self.cli(["category", "order", "move", "agents", "0"])
+        self.assertEqual(code, 0)
+        store = ax.read_store()
+        self.assertEqual(store["orderMode"], "custom")
+        self.assertEqual(store["order"][0], "agents")
+        code, _ = self.cli(["category", "order", "move", "agents", "+1"])
+        self.assertEqual(code, 0)
+        self.assertEqual(ax.read_store()["order"][1], "agents")
+        code, _ = self.cli(["category", "order", "move", "agents", "-1"])
+        self.assertEqual(code, 0)
+        self.assertEqual(ax.read_store()["order"][0], "agents")
+
+    def test_sort_mode_sets_the_mode_and_leaves_the_order_alone(self):
+        code, _ = self.cli(["category", "order", "set", "web", "code", "agents"])
+        self.assertEqual(code, 0)
+        before = ax.read_store()["order"]
+        code, _ = self.cli(["category", "sort-mode", "count-asc"])
+        self.assertEqual(code, 0)
+        store = ax.read_store()
+        self.assertEqual(store["orderMode"], "count-asc")
+        self.assertEqual(store["order"], before)
+        code, _ = self.cli(["category", "sort-mode", "count-desc"])
+        self.assertEqual(code, 0)
+        self.assertEqual(ax.read_store()["orderMode"], "count-desc")
+
+    def test_set_refuses_an_unknown_name_and_writes_nothing(self):
+        code, _ = self.cli(["category", "order", "set", "web", "code", "agents"])
+        self.assertEqual(code, 0)
+        before = self.stored_bytes()
+        code, _ = self.cli(["category", "order", "set", "web", "nosuchcat"])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.stored_bytes(), before)
+
+    def test_set_with_no_names_and_move_past_the_end_are_refusals(self):
+        code, _ = self.cli(["category", "order", "set", "web", "code"])
+        self.assertEqual(code, 0)
+        before = self.stored_bytes()
+        code, _ = self.cli(["category", "order", "set"])
+        self.assertEqual(code, 2)
+        code, _ = self.cli(["category", "order", "move", "web", "99"])
+        self.assertEqual(code, 2)
+        code, _ = self.cli(["category", "order", "move", "nosuchcat", "0"])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.stored_bytes(), before)
+
+    def test_moving_the_first_shelf_down_refuses_rather_than_wrapping(self):
+        code, _ = self.cli(["category", "order", "set", "web", "code", "agents"])
+        self.assertEqual(code, 0)
+        before = self.stored_bytes()
+        code, _ = self.cli(["category", "order", "move", "web", "-1"])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.stored_bytes(), before)
+
+    def test_a_store_from_before_the_order_keys_reads_as_count_desc(self):
+        os.makedirs(ax.STORE_DIR, exist_ok=True)
+        with open(ax.STORE_PATH, "w", encoding="utf-8") as fh:
+            fh.write('{"version": 1, "custom": [], "assign": {},'
+                     ' "labels": {}, "colors": {}, "hidePlacedBy": false}')
+        store = ax.read_store()
+        self.assertEqual(store["order"], [])
+        self.assertEqual(store["orderMode"], "count-desc")
+        self.assertEqual(ax.known_categories(store), list(ax.CATEGORIES))
+
+    def test_stale_bad_and_repeated_order_entries_are_dropped(self):
+        os.makedirs(ax.STORE_DIR, exist_ok=True)
+        with open(ax.STORE_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"version": 1, "custom": ["ui"], "assign": {},
+                       "labels": {}, "colors": {}, "hidePlacedBy": False,
+                       "order": ["web", "BAD", "gone-cat", "web", "ui", 7],
+                       "orderMode": "sideways"}, fh)
+        store = ax.read_store()
+        self.assertEqual(store["order"], ["web", "ui"])
+        self.assertEqual(store["orderMode"], "count-desc")
+        known = ax.known_categories(store)
+        self.assertEqual(known[:2], ["web", "ui"])
+        self.assertIn("agents", known)
+
+    def test_list_carries_the_order_and_the_mode(self):
+        code, _ = self.cli(["category", "order", "set", "web", "code"])
+        self.assertEqual(code, 0)
+        code, text = self.cli(["category", "list"])
+        self.assertEqual(code, 0)
+        payload = json.loads(text)
+        self.assertEqual(payload["orderMode"], "custom")
+        self.assertEqual(payload["order"], ax.known_categories(ax.read_store()))
+
+    def test_scan_carries_the_order_and_the_mode(self):
+        saved_home = ax.HOME
+        try:
+            ax.HOME = self._tmp.name
+            code, _ = self.cli(["category", "order", "set", "web", "code"])
+            self.assertEqual(code, 0)
+            result = ax.scan()
+        finally:
+            ax.HOME = saved_home
+        self.assertEqual(result["categories"]["orderMode"], "custom")
+        self.assertEqual(result["categories"]["order"],
+                         ax.known_categories(ax.read_store()))
+
+    def test_older_verbs_leave_the_order_where_it_was(self):
+        code, _ = self.cli(["category", "order", "set", "web", "code", "agents"])
+        self.assertEqual(code, 0)
+        code, _ = self.cli(["category", "assign", "nextjs", "web"])
+        self.assertEqual(code, 0)
+        store = ax.read_store()
+        self.assertEqual(store["order"][:3], ["web", "code", "agents"])
+        self.assertEqual(store["orderMode"], "custom")
+        self.assertEqual(store["assign"], {"nextjs": "web"})
 
 
 if __name__ == "__main__":

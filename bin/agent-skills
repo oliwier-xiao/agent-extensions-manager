@@ -563,6 +563,12 @@ CUSTOM_GLYPH = "\u25c6"
 # A category name reaches a group header, a JSON file and the classifier's own
 # vocabulary, so it is checked once, here, against a shape rather than cleaned.
 CATEGORY_NAME = re.compile(r"^[a-z][a-z0-9-]{0,23}$")
+# How the shelves are drawn. count-desc/count-asc are computed live and ignore
+# the stored order for display (but preserve it, so going back to custom
+# restores the last manual layout); custom draws strictly from it. Only an
+# explicit action changes the mode -- never the shape of the array.
+ORDER_MODES = ("count-desc", "count-asc", "custom")
+DEFAULT_ORDER_MODE = "count-desc"
 # A colour reaches a QML `color` property, so it is matched rather than trusted:
 # only a six-digit hex triple, never a named colour or a function call.
 HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -597,6 +603,7 @@ def read_store(findings: list | None = None) -> dict:
         if detail and findings is not None:
             findings.append({"what": "categories.json", "detail": detail})
         return {"custom": [], "assign": {}, "labels": {}, "colors": {},
+                "order": [], "orderMode": DEFAULT_ORDER_MODE,
                 "hidePlacedBy": False}
     custom = [c for c in as_list(value.get("custom"))
               if isinstance(c, str) and CATEGORY_NAME.match(c)][:MAX_CUSTOM_CATEGORIES]
@@ -614,7 +621,23 @@ def read_store(findings: list | None = None) -> dict:
         if (isinstance(k, str) and CATEGORY_NAME.match(k)
                 and isinstance(v, str) and HEX_COLOR.match(v)):
             colors[k] = v.upper()
+    mode = value.get("orderMode")
+    if mode not in ORDER_MODES:
+        mode = DEFAULT_ORDER_MODE
+    # An explicit shelf order, kept only where it names a shelf that exists.
+    # Anything else -- a typo, a deleted custom category, a name this program
+    # did not write -- is dropped silently: the display falls back to the
+    # legacy order plus whatever of this survives, and a rescan never invents
+    # a shelf from a stale entry.
+    known = set(CATEGORIES) | set(custom)
+    order: list = []
+    seen: set = set()
+    for c in as_list(value.get("order")):
+        if isinstance(c, str) and CATEGORY_NAME.match(c) and c in known and c not in seen:
+            seen.add(c)
+            order.append(c)
     return {"custom": custom, "assign": assign, "labels": labels, "colors": colors,
+            "order": order, "orderMode": mode,
             # Whether the card still says how a skill came to be on its shelf.
             # Absent means shown, so a store written before this key existed
             # reads as a machine that has never turned the line off -- which is
@@ -625,11 +648,18 @@ def read_store(findings: list | None = None) -> dict:
 def write_store(store: dict) -> None:
     """Whole file, temp then rename, so a crash mid-write cannot leave a
     half-written categories.json that the next scan refuses to parse."""
+    mode = store.get("orderMode", DEFAULT_ORDER_MODE)
+    if mode not in ORDER_MODES:
+        mode = DEFAULT_ORDER_MODE
+    order = [c for c in as_list(store.get("order"))
+             if isinstance(c, str) and CATEGORY_NAME.match(c)]
     _write_json_store(STORE_PATH, {"version": 1,
                                    "custom": store.get("custom", []),
                                    "assign": store.get("assign", {}),
                                    "labels": store.get("labels", {}),
                                    "colors": store.get("colors", {}),
+                                   "order": order,
+                                   "orderMode": mode,
                                    "hidePlacedBy": store.get("hidePlacedBy", False) is True})
 
 
@@ -753,11 +783,35 @@ def write_describe_store(store: dict) -> None:
 
 
 def known_categories(store: dict) -> list:
-    out = list(CATEGORIES)
+    """The shelves in the order the panel draws them from the stored order.
+
+    A non-empty stored order wins: stale entries (a custom category deleted
+    since) are skipped, and any shelf missing from it (a category created
+    since) is appended at the end, so nothing is ever lost from the display.
+    An empty or absent order reads as the legacy order -- the built-ins first,
+    then the custom ones in the order they were made -- which is also what a
+    store written before the order key existed reads as.
+    """
+    legacy = list(CATEGORIES)
     for c in store.get("custom", []):
-        if c not in out:
-            out.append(c)
-    return out
+        if c not in legacy:
+            legacy.append(c)
+    order = [c for c in as_list(store.get("order")) if isinstance(c, str)]
+    if order:
+        known_set = set(legacy)
+        effective: list = []
+        seen: set = set()
+        for c in order:
+            if c in known_set and c not in seen:
+                seen.add(c)
+                effective.append(c)
+        if effective:
+            for c in legacy:
+                if c not in seen:
+                    seen.add(c)
+                    effective.append(c)
+            return effective
+    return legacy
 
 
 def classify(name: str, description: str, path: str, official: str | None) -> dict:
@@ -1077,6 +1131,7 @@ def scan(divisor: int = 4) -> dict:
         # yours rather than built in.
         "categories": {
             "order": known_categories(store),
+            "orderMode": store["orderMode"],
             "custom": store["custom"],
             "labels": store["labels"],
             "colors": store["colors"],
@@ -1465,6 +1520,76 @@ def _counts(items: list[dict]) -> dict:
 
 # -------------------------------------------------------------------- main
 
+def _category_order_command(store: dict, args) -> int:
+    """The shelf order itself: read it, replace it whole, or move one entry.
+
+    Any manual change -- a full `set` or a single `move` -- puts the shelves
+    into custom mode, the way a drag does: count-desc and count-asc are entered
+    explicitly through `sort-mode` and never guessed from the array's shape.
+    """
+    known = known_categories(store)
+    known_set = set(known)
+
+    if args.order_action == "get":
+        sys.stdout.write(json.dumps({"order": known, "orderMode": store["orderMode"]},
+                                    ensure_ascii=False) + "\n")
+        return 0
+
+    if args.order_action == "set":
+        if not args.cats:
+            warn("name at least one category: `order set <cat...>` writes nothing empty")
+            return 2
+        seen: set = set()
+        order: list = []
+        for raw in args.cats:
+            name = raw.strip().lower()
+            if not CATEGORY_NAME.match(name):
+                warn("a category name is lower case letters, digits and dashes, up to 24")
+                return 2
+            if name not in known_set:
+                warn(f"{name} is not a category; create it first")
+                return 2
+            if name not in seen:
+                seen.add(name)
+                order.append(name)
+        store["order"] = order
+        store["orderMode"] = "custom"
+        if not _store_written(store):
+            return 2
+        print(f"order set: {' '.join(order)}")
+        return 0
+
+    # move
+    name = args.cat.strip().lower()
+    if not CATEGORY_NAME.match(name):
+        warn("a category name is lower case letters, digits and dashes, up to 24")
+        return 2
+    if name not in known_set:
+        warn(f"{name} is not a category; create it first")
+        return 2
+    cur = known.index(name)
+    raw_target = args.target.strip()
+    if raw_target in ("+1", "-1"):
+        new_index = cur + (1 if raw_target == "+1" else -1)
+    else:
+        try:
+            new_index = int(raw_target, 10)
+        except ValueError:
+            warn("move takes an index or +1/-1")
+            return 2
+    if new_index < 0 or new_index > len(known) - 1:
+        warn(f"move {name} to 0..{len(known) - 1}; nothing changed")
+        return 2
+    order = [c for c in known if c != name]
+    order.insert(new_index, name)
+    store["order"] = order
+    store["orderMode"] = "custom"
+    if not _store_written(store):
+        return 2
+    print(f"{name} moved to position {new_index}")
+    return 0
+
+
 def category_command(args) -> int:
     """Every path here either makes the one change it was asked for and says so,
     or changes nothing and says why. There is no partial outcome: the store is
@@ -1474,10 +1599,29 @@ def category_command(args) -> int:
     if args.action == "list":
         sys.stdout.write(json.dumps({"custom": store["custom"], "assign": store["assign"],
                                      "labels": store["labels"], "colors": store["colors"],
+                                     "order": known_categories(store),
+                                     "orderMode": store["orderMode"],
                                      "hidePlacedBy": store["hidePlacedBy"],
                                      "path": STORE_PATH, "known": known_categories(store)},
                                     ensure_ascii=False) + "\n")
         return 0
+
+    if args.action == "sort-mode":
+        mode = args.mode
+        if store["orderMode"] == mode:
+            print(f"already sorting {mode}")
+            return 0
+        # Only the mode moves. The stored order stays exactly as it was, so a
+        # return to custom restores the last manual layout rather than a
+        # recount of it.
+        store["orderMode"] = mode
+        if not _store_written(store):
+            return 2
+        print(f"sorting {mode}")
+        return 0
+
+    if args.action == "order":
+        return _category_order_command(store, args)
 
     if args.action == "placed-by":
         want = args.state == "hide"
@@ -1796,6 +1940,18 @@ def main(argv: list[str]) -> int:
     p_placed = cat_sub.add_parser("placed-by",
                                   help="show or hide the line saying how each skill was filed")
     p_placed.add_argument("state", choices=("show", "hide"))
+
+    p_order = cat_sub.add_parser("order", help="read or rearrange the shelf order")
+    order_sub = p_order.add_subparsers(dest="order_action", required=True)
+    order_sub.add_parser("get", help="print the shelf order and sort mode as JSON")
+    p_set = order_sub.add_parser("set", help="replace the shelf order whole (forces custom)")
+    p_set.add_argument("cats", nargs="*", help="category names in the order to keep them")
+    p_move = order_sub.add_parser("move", help="move one category (forces custom)")
+    p_move.add_argument("cat", help="the category to move")
+    p_move.add_argument("target", help="an index, or +1/-1 for one step")
+
+    p_sort = cat_sub.add_parser("sort-mode", help="how the shelves are drawn")
+    p_sort.add_argument("mode", choices=("count-desc", "count-asc", "custom"))
 
     cat_sub.add_parser("list", help="print the store as JSON")
 
