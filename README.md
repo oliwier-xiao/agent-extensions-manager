@@ -326,7 +326,7 @@ bin/agent-skills doctor
 ```
 
 ```
-agent-skills 0.1.0   scan 22.6 ms
+agent-skills 0.2.0   scan 22.6 ms
 skills            41
   claude          16   ~1406 tok always on
   codex            8   ~808 tok always on

@@ -30,7 +30,7 @@ import stat
 import sys
 import time
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 HOME = os.path.expanduser("~")
 
 # A skill's SKILL.md is prose. Anything larger than this is not a skill, it is a

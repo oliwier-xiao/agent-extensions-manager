@@ -388,6 +388,13 @@ Panel {
   property var lastShelvesOrder: []
   property bool shelvesUndoArmed: false
   property string shelvesUndoText: ""
+  // Whether the armed row also offers Undo: true after a chip drop (there is
+  // a pre-drag order to go back to), false after a sort-mode switch (the
+  // switch itself is the whole change, expiring with the timer).
+  property bool shelvesNoticeHasUndo: false
+  // True between a shelves order/sort run and its exit: lets the failure
+  // branch below take back the notice row when the file never changed.
+  property bool shelvesRunPending: false
 
   // Twelve swatches, the whole colour vocabulary a category can be given. A free
   // hex field would be a text editor this panel does not have, and twelve
@@ -555,6 +562,20 @@ Panel {
     id: toastTimer
     interval: 4000
     onTriggered: { root.toast = ""; root.toastTone = "info" }
+  }
+
+  // How long the shelves undo row keeps its "Moved X to position N" before
+  // falling back to the standing hint. Long enough to read and to reach Undo,
+  // short enough that a stale confirmation never outlives the rescan it came
+  // from. Opening the index or starting a drag stops it early.
+  Timer {
+    id: shelvesUndoTimer
+    interval: 10000
+    onTriggered: {
+      root.shelvesUndoArmed = false
+      root.shelvesUndoText = ""
+      root.shelvesNoticeHasUndo = false
+    }
   }
 
   // How long the footer keeps its tick up. Short, because it sits where the eye
@@ -783,6 +804,8 @@ Panel {
     onExited: function (exitCode, exitStatus) {
       catWatchdog.stop()
       catProc.inflight = false
+      var wasRun = root.shelvesRunPending
+      root.shelvesRunPending = false
       if (exitCode === 0) {
         if (catProc.pending !== "") root.flashResult(catProc.pending, "ok")
         // The store the classifier reads has changed, so the answer on screen is
@@ -794,6 +817,14 @@ Panel {
         // repeating them here in the panel's own words would be a second, worse
         // version of the same sentence.
         root.flashResult("The change was refused. Run bin/agent-skills category by hand to see why", "error")
+        // A refused shelves run leaves the file as it was, so an armed notice
+        // would confirm a change that never happened. Back to the hint.
+        if (wasRun) {
+          shelvesUndoTimer.stop()
+          root.shelvesUndoArmed = false
+          root.shelvesUndoText = ""
+          root.shelvesNoticeHasUndo = false
+        }
       }
     }
   }
@@ -1777,22 +1808,38 @@ Panel {
   function syncShelvesOrderToPython(fullOrder, movedCat) {
     var order = []
     for (var i = 0; i < fullOrder.length; i++) order.push(String(fullOrder[i]))
+    root.shelvesRunPending = true
     root.runCategory(["order", "set"].concat(order), "")
     var label = root.categoryLabelFor(String(movedCat))
     root.shelvesUndoText = "Moved " + label + " to position "
       + String(order.indexOf(String(movedCat)) + 1)
     root.shelvesUndoArmed = true
-    root.flashResult(root.shelvesUndoText + " - Undo below", "ok")
+    root.shelvesNoticeHasUndo = true
+    // No toast: the undo row below the grid carries this line for the next
+    // ten seconds, and a second copy in the footer would say it twice.
+    shelvesUndoTimer.restart()
+  }
+
+  // A confirmation with no Undo: sort-mode switches announce themselves in
+  // the same row and expire on the same timer.
+  function flashShelvesNotice(text) {
+    root.shelvesUndoText = String(text)
+    root.shelvesUndoArmed = true
+    root.shelvesNoticeHasUndo = false
+    shelvesUndoTimer.restart()
   }
 
   // Undo restores the pre-drag order snapshot via a single order-set verb.
   function restoreShelvesOrder() {
     if (!root.shelvesUndoArmed) return
+    shelvesUndoTimer.stop()
     var prev = root.lastShelvesOrder || []
     if (prev.length === 0) { root.shelvesUndoArmed = false; return }
+    root.shelvesRunPending = true
     root.runCategory(["order", "set"].concat(prev), "Previous order restored")
     root.shelvesUndoArmed = false
     root.shelvesUndoText = ""
+    root.shelvesNoticeHasUndo = false
   }
 
   // The shelves Repeater renders this model instead of a fresh pickerChips()
@@ -1838,6 +1885,9 @@ Panel {
     root.shelvesDragOrder = grid
     root.shelvesDragCat = String(cat)
     root.shelvesUndoArmed = false
+    root.shelvesUndoText = ""
+    root.shelvesNoticeHasUndo = false
+    shelvesUndoTimer.stop()
     root.shelvesDropTarget = root.shelvesRowOf(cat)
     root.dragHeld = true
   }
@@ -2097,6 +2147,12 @@ Panel {
     root.pickerNaming = false
     root.pickerText = ""
     root.pickerIndex = 0
+    // Fresh open, standing hint: whatever a previous visit confirmed has
+    // either landed (and the rescan shows it) or expired with the timer.
+    root.shelvesUndoArmed = false
+    root.shelvesUndoText = ""
+    root.shelvesNoticeHasUndo = false
+    shelvesUndoTimer.stop()
   }
 
   // Back out one layer if this mode was opened on top of another, and close
@@ -5814,8 +5870,11 @@ Panel {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: root.runCategory(["sort-mode", "count-desc"],
-                  "Sorted: biggest first")
+                onClicked: {
+                  root.shelvesRunPending = true
+                  root.runCategory(["sort-mode", "count-desc"], "")
+                  root.flashShelvesNotice("Switched to most first")
+                }
               }
             }
 
@@ -5842,8 +5901,11 @@ Panel {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: root.runCategory(["sort-mode", "count-asc"],
-                  "Sorted: smallest first")
+                onClicked: {
+                  root.shelvesRunPending = true
+                  root.runCategory(["sort-mode", "count-asc"], "")
+                  root.flashShelvesNotice("Switched to least first")
+                }
               }
             }
 
@@ -6189,28 +6251,34 @@ Panel {
             }
           }
 
-          // DND-LANE undo: appears after a chip drop; restores the pre-drag
-          // full order with one order-set verb. Big-button UI stays sort-only.
+          // DND-LANE undo row, always present under the grid so the eye learns
+          // where to look: the standing hint says the grid drags, a drop swaps
+          // it for the confirmation plus Undo, and ten seconds later (or on
+          // reopen) the hint is back. Big-button UI stays sort-only.
           Row {
             width: parent.width
-            visible: picker.managing && root.shelvesUndoArmed
+            visible: picker.managing
             height: visible ? Style.space(28) : 0
             spacing: Style.spacing.sm
 
             Text {
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
-              text: root.shelvesUndoText
-              color: root.readable
+              text: root.shelvesUndoArmed ? root.shelvesUndoText : "Drag and drop to reorder"
+              color: root.shelvesUndoArmed ? root.readable : root.strong
               font.family: root.face
               font.pixelSize: Style.font.caption
+              font.bold: !root.shelvesUndoArmed
               elide: Text.ElideRight
-              width: Math.max(0, parent.width - undoChip.width - Style.spacing.sm)
+              width: Math.max(0, parent.width
+                - ((root.shelvesUndoArmed && root.shelvesNoticeHasUndo)
+                  ? undoChip.width + Style.spacing.sm : 0))
             }
 
             BorderSurface {
               id: undoChip
               anchors.verticalCenter: parent.verticalCenter
+              visible: root.shelvesUndoArmed && root.shelvesNoticeHasUndo
               implicitWidth: undoText.implicitWidth + Style.space(22)
               implicitHeight: Style.space(28)
               radius: Style.cornerRadius
