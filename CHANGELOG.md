@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0
+
+Categories can now be ordered, not just filled. The category index grew a
+**Sort** switch — biggest first, smallest first, or your own order — and the
+shelves themselves drag into place: grab a chip, drop it, and the group headers
+in the main list follow. Any drag switches to your own order on its own; a
+**Moved X to position N** line with **Undo** confirms the drop for ten seconds,
+then falls back to the standing hint. The order lives in the widget's own
+`categories.json` beside everything else it keeps, and nothing an agent loads
+is touched by any of it.
+
 ## 0.1.0
 
 First release. Every skill, plugin and MCP server Claude Code, OpenCode and Codex load, in one
